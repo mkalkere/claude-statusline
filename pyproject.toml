@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-statusline"
+version = "0.1.0"
+description = "Beautiful, informative status line for Claude Code — zero dependencies, cross-platform"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.8"
+authors = [
+    {name = "Mallikarjuna"}
+]
+keywords = [
+    "claude-code", "claude", "statusline", "status-bar", "cli",
+    "terminal", "developer-tools", "anthropic", "claude-code-statusline"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: User Interfaces",
+    "Topic :: Terminals",
+]
+
+[project.scripts]
+claude-statusline = "claude_statusline.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mkalkere/claude-statusline"
+Repository = "https://github.com/mkalkere/claude-statusline"
+Issues = "https://github.com/mkalkere/claude-statusline/issues"
+
+[tool.setuptools.packages.find]
+include = ["claude_statusline*"]
