@@ -1,4 +1,4 @@
-# Contributing to claude-statusline
+# Contributing to claude-status
 
 Thanks for your interest in contributing! Here's how to get started.
 
@@ -42,5 +42,5 @@ python -m unittest discover tests/
 Open an issue with:
 - OS and Python version
 - Terminal emulator
-- Output of `claude-statusline --doctor`
+- Output of `claude-status --doctor`
 - What you expected vs what happened

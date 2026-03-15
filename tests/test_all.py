@@ -1,4 +1,4 @@
-"""Comprehensive tests for claude-statusline — stdlib unittest only."""
+"""Comprehensive tests for claude-status — stdlib unittest only."""
 
 import json
 import os
@@ -424,7 +424,7 @@ class TestCLIInstall(unittest.TestCase):
                 cli_mod.cmd_install("default")
                 with open(settings_file, "r") as f:
                     settings = json.load(f)
-                self.assertEqual(settings["statusLine"], "claude-statusline")
+                self.assertEqual(settings["statusLine"], "claude-status")
             finally:
                 cli_mod._settings_path = orig
 
@@ -459,7 +459,7 @@ class TestCLIInstall(unittest.TestCase):
                 with open(settings_file, "r") as f:
                     settings = json.load(f)
                 self.assertEqual(settings["existingKey"], "value")
-                self.assertEqual(settings["statusLine"], "claude-statusline")
+                self.assertEqual(settings["statusLine"], "claude-status")
             finally:
                 cli_mod._settings_path = orig
 

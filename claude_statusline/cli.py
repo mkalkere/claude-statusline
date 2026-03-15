@@ -1,4 +1,4 @@
-"""CLI entry point for claude-statusline."""
+"""CLI entry point for claude-status."""
 
 import argparse
 import json
@@ -257,7 +257,7 @@ def _print_indented(text, indent="  "):
 def cmd_demo():
     """Show demo output for all themes."""
     data = _demo_data()
-    print("claude-statusline v{} — theme demos\n".format(__version__))
+    print("claude-status v{} — theme demos\n".format(__version__))
     for name in ("default", "minimal", "powerline"):
         print("  {}:".format(name))
         _print_indented(render(data, name))
@@ -282,7 +282,7 @@ def cmd_demo():
 
 
 def cmd_install(theme_name="default"):
-    """Install claude-statusline into Claude Code settings."""
+    """Install claude-status into Claude Code settings."""
     settings_file = _settings_path()
     settings = {}
 
@@ -295,7 +295,7 @@ def cmd_install(theme_name="default"):
             print("Warning: could not parse existing settings.json, creating new one")
 
     # Build command
-    cmd = "claude-statusline"
+    cmd = "claude-status"
     if theme_name != "default":
         cmd += " --theme {}".format(theme_name)
 
@@ -310,7 +310,7 @@ def cmd_install(theme_name="default"):
         json.dump(settings, f, indent=2)
         f.write("\n")
 
-    print("Installed claude-statusline into {}".format(settings_file))
+    print("Installed claude-status into {}".format(settings_file))
     print("  statusLine: {}".format(cmd))
     print()
     print("Restart Claude Code to see your new status line!")
@@ -318,7 +318,7 @@ def cmd_install(theme_name="default"):
 
 def cmd_doctor():
     """Run diagnostics and print system info."""
-    print("claude-statusline v{} — diagnostics\n".format(__version__))
+    print("claude-status v{} — diagnostics\n".format(__version__))
 
     print("System:")
     print("  Python:   {} ({})".format(platform.python_version(), sys.executable))
@@ -362,7 +362,7 @@ def main():
     _force_utf8()
 
     parser = argparse.ArgumentParser(
-        prog="claude-statusline",
+        prog="claude-status",
         description="Beautiful status line for Claude Code",
     )
     parser.add_argument("--version", action="version", version="%(prog)s " + __version__)

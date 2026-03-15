@@ -1,9 +1,9 @@
-# claude-statusline
+# claude-status
 
 **Beautiful, informative status line for Claude Code — zero dependencies, cross-platform.**
 
-[![PyPI version](https://img.shields.io/pypi/v/claude-statusline)](https://pypi.org/project/claude-statusline/)
-[![Python versions](https://img.shields.io/pypi/pyversions/claude-statusline)](https://pypi.org/project/claude-statusline/)
+[![PyPI version](https://img.shields.io/pypi/v/claude-status)](https://pypi.org/project/claude-status/)
+[![Python versions](https://img.shields.io/pypi/pyversions/claude-status)](https://pypi.org/project/claude-status/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/mkalkere/claude-statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/mkalkere/claude-statusline/actions)
 
@@ -11,7 +11,7 @@
 [████████░░░░░░░░░░░░] in:245K out:18K cache:78% $0.73 burn:2.1K/min 12m05s +247 -38 ⎇ feat/statusline (200K)
 ```
 
-## Why claude-statusline?
+## Why claude-status?
 
 - **Zero dependencies** — pure Python stdlib, installs in seconds
 - **Cross-platform** — Windows, macOS, Linux — tested on all three
@@ -20,8 +20,8 @@
 ## Quick Start
 
 ```bash
-pip install claude-statusline
-claude-statusline --install
+pip install claude-status
+claude-status --install
 ```
 
 Restart Claude Code. Done.
@@ -30,33 +30,33 @@ Restart Claude Code. Done.
 
 ### pip (recommended)
 ```bash
-pip install claude-statusline
-claude-statusline --install
+pip install claude-status
+claude-status --install
 ```
 
 ### pipx (isolated)
 ```bash
-pipx install claude-statusline
-claude-statusline --install
+pipx install claude-status
+claude-status --install
 ```
 
 ### uvx (fast)
 ```bash
-uvx claude-statusline --install
+uvx claude-status --install
 ```
 
 ### From source
 ```bash
 git clone https://github.com/mkalkere/claude-statusline.git
-cd claude-statusline
+cd claude-status
 pip install -e .
-claude-statusline --install
+claude-status --install
 ```
 
 ### What `--install` does
 
 Adds `statusLine` to `~/.claude/settings.json` — preserves all existing settings.
-Use `--theme` to pick a theme: `claude-statusline --install --theme powerline`
+Use `--theme` to pick a theme: `claude-status --install --theme powerline`
 
 > **Command not found?** Make sure your Python scripts directory is in PATH.
 > Fallback: `python -m claude_statusline --install`
@@ -96,18 +96,18 @@ Use `--theme` to pick a theme: `claude-statusline --install --theme powerline`
 ████████░░░░░░░░░░░░  in:245K out:18K  cache:78%  $0.73  burn:2.1K/min  12m05s  +247 -38  ⎇ feat/statusline  (200K)
 ```
 
-Preview all themes: `claude-statusline --demo`
+Preview all themes: `claude-status --demo`
 
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
-| `claude-statusline --install` | Auto-configure Claude Code |
-| `claude-statusline --install --theme powerline` | Install with specific theme |
-| `claude-statusline --demo` | Preview all themes with sample data |
-| `claude-statusline --doctor` | Diagnostics: Python, OS, terminal, settings |
-| `claude-statusline --version` | Version info |
-| `claude-statusline --help` | Usage |
+| `claude-status --install` | Auto-configure Claude Code |
+| `claude-status --install --theme powerline` | Install with specific theme |
+| `claude-status --demo` | Preview all themes with sample data |
+| `claude-status --doctor` | Diagnostics: Python, OS, terminal, settings |
+| `claude-status --version` | Version info |
+| `claude-status --help` | Usage |
 
 ## Manual Configuration
 
@@ -115,7 +115,7 @@ If you prefer manual setup, add to `~/.claude/settings.json`:
 
 ```json
 {
-  "statusLine": "claude-statusline"
+  "statusLine": "claude-status"
 }
 ```
 
@@ -123,13 +123,13 @@ Or with a theme:
 
 ```json
 {
-  "statusLine": "claude-statusline --theme minimal"
+  "statusLine": "claude-status --theme minimal"
 }
 ```
 
 ## Comparison
 
-| Feature | claude-statusline | ccstatusline | claude-powerline |
+| Feature | claude-status | ccstatusline | claude-powerline |
 |---------|:-:|:-:|:-:|
 | Language | Python | Node.js | Bash |
 | Dependencies | 0 | npm | bash-only |
@@ -142,7 +142,7 @@ Or with a theme:
 ## Uninstall
 
 ```bash
-pip uninstall claude-statusline
+pip uninstall claude-status
 ```
 
 Then remove `"statusLine"` from `~/.claude/settings.json`.
