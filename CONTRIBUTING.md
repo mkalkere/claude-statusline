@@ -8,7 +8,10 @@ Thanks for your interest in contributing! Here's how to get started.
 git clone https://github.com/mkalkere/claude-statusline.git
 cd claude-statusline
 pip install -e .
+cp .github/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 ```
+
+The pre-commit hook scans for secrets (API keys, passwords) and blocks the commit if any are found.
 
 ## Running Tests
 

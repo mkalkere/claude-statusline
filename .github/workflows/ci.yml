@@ -7,7 +7,23 @@ on:
     branches: [main]
 
 jobs:
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan for secrets
+        run: |
+          PATTERNS="sk-ant-|ANTHROPIC_API_KEY|ALPACA.*KEY|ALPACA.*SECRET|AKIA[A-Z0-9]{16}|BEGIN RSA PRIVATE KEY|BEGIN OPENSSH PRIVATE KEY"
+          if git diff --name-only HEAD~1 2>/dev/null | grep -Ev '\.github/(hooks|workflows)/' | xargs grep -lEi "$PATTERNS" 2>/dev/null; then
+            echo "::error::Potential secrets detected in changed files!"
+            exit 1
+          fi
+          echo "No secrets found."
+
   test:
+    needs: secrets-scan
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

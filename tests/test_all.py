@@ -347,6 +347,27 @@ class TestRender(unittest.TestCase):
         result = render(data)
         self.assertIn("fix/bug-123", result)
 
+    def test_project_name_in_branch(self):
+        """Branch should show project/branch when cwd is available."""
+        data = self._full_data()
+        data["cwd"] = "/home/user/projects/trader"
+        result = render(data)
+        self.assertIn("trader", result)
+
+    def test_project_name_with_workspace(self):
+        """Workspace.current_dir should also provide project name."""
+        data = self._full_data()
+        data["workspace"] = {"current_dir": "/home/user/projects/my-app"}
+        result = render(data)
+        self.assertIn("my-app", result)
+
+    def test_no_project_name(self):
+        """Missing cwd should still show branch without project."""
+        data = self._full_data()
+        # Remove any cwd — git_branch is set in _full_data
+        result = render(data)
+        self.assertIn("feat/statusline", result)
+
     def test_all_optional_fields(self):
         data = self._full_data()
         data["vim"] = {"mode": "INSERT"}

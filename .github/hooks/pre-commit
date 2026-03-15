@@ -1,0 +1,43 @@
+#!/bin/bash
+# Pre-commit hook: block commits containing secrets or sensitive data
+# Install: cp .github/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+
+PATTERNS=(
+    'ANTHROPIC_API_KEY'
+    'ALPACA.*KEY'
+    'ALPACA.*SECRET'
+    'sk-ant-'
+    'AKIA[A-Z0-9]{16}'       # AWS access key
+    'password\s*='
+    'secret\s*='
+    'api_key\s*='
+    'BEGIN RSA PRIVATE KEY'
+    'BEGIN OPENSSH PRIVATE KEY'
+)
+
+# Exclude files that contain patterns as detection rules, not secrets
+EXCLUDE=".github/hooks/pre-commit|.github/workflows/ci.yml"
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep -Ev "$EXCLUDE")
+if [ -z "$STAGED" ]; then
+    exit 0
+fi
+
+FOUND=0
+for pattern in "${PATTERNS[@]}"; do
+    MATCHES=$(echo "$STAGED" | xargs grep -lEi "$pattern" 2>/dev/null)
+    if [ -n "$MATCHES" ]; then
+        echo "ERROR: Potential secret found matching '$pattern' in:"
+        echo "$MATCHES" | sed 's/^/  /'
+        FOUND=1
+    fi
+done
+
+if [ $FOUND -ne 0 ]; then
+    echo ""
+    echo "Commit blocked. Remove secrets before committing."
+    echo "If this is a false positive, use: git commit --no-verify"
+    exit 1
+fi
+
+exit 0
