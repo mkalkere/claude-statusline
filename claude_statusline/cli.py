@@ -299,8 +299,11 @@ def cmd_install(theme_name="default"):
     if theme_name != "default":
         cmd += " --theme {}".format(theme_name)
 
-    # Update statusLine config
-    settings["statusLine"] = cmd
+    # Update statusLine config (must be an object with type + command)
+    settings["statusLine"] = {
+        "type": "command",
+        "command": cmd,
+    }
 
     # Ensure directory exists
     os.makedirs(os.path.dirname(settings_file), exist_ok=True)

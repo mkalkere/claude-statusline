@@ -424,7 +424,9 @@ class TestCLIInstall(unittest.TestCase):
                 cli_mod.cmd_install("default")
                 with open(settings_file, "r") as f:
                     settings = json.load(f)
-                self.assertEqual(settings["statusLine"], "claude-status")
+                sl = settings["statusLine"]
+                self.assertEqual(sl["type"], "command")
+                self.assertEqual(sl["command"], "claude-status")
             finally:
                 cli_mod._settings_path = orig
 
@@ -439,7 +441,9 @@ class TestCLIInstall(unittest.TestCase):
                 cli_mod.cmd_install("powerline")
                 with open(settings_file, "r") as f:
                     settings = json.load(f)
-                self.assertIn("--theme powerline", settings["statusLine"])
+                sl = settings["statusLine"]
+                self.assertEqual(sl["type"], "command")
+                self.assertIn("--theme powerline", sl["command"])
             finally:
                 cli_mod._settings_path = orig
 
@@ -459,7 +463,7 @@ class TestCLIInstall(unittest.TestCase):
                 with open(settings_file, "r") as f:
                     settings = json.load(f)
                 self.assertEqual(settings["existingKey"], "value")
-                self.assertEqual(settings["statusLine"], "claude-status")
+                self.assertEqual(settings["statusLine"]["type"], "command")
             finally:
                 cli_mod._settings_path = orig
 

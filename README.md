@@ -130,7 +130,10 @@ Add to `~/.claude/settings.json`:
 
 ```json
 {
-  "statusLine": "claude-status"
+  "statusLine": {
+    "type": "command",
+    "command": "claude-status"
+  }
 }
 ```
 
@@ -138,7 +141,10 @@ With a theme:
 
 ```json
 {
-  "statusLine": "claude-status --theme minimal"
+  "statusLine": {
+    "type": "command",
+    "command": "claude-status --theme minimal"
+  }
 }
 ```
 
