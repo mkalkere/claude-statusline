@@ -88,6 +88,11 @@ def _normalize(data):
     # Git branch
     out["git_branch"] = data.get("git_branch")
 
+    # Project name (last folder in cwd path)
+    workspace = data.get("workspace") or {}
+    cwd = workspace.get("current_dir") or data.get("cwd") or ""
+    out["project_name"] = os.path.basename(cwd) if cwd else ""
+
     # Model info
     model_obj = data.get("model") or {}
     out["model_name"] = model_obj.get("display_name")
@@ -173,7 +178,14 @@ def _render_sections(n, order, theme):
             branch = n["git_branch"] or get_branch()
             if branch:
                 bc = tc["branch_main"] if branch in ("main", "master") else tc["branch_feature"]
-                sections.append(colorize("\u2387 " + branch, bc))
+                project = n.get("project_name", "")
+                if project:
+                    sections.append(
+                        colorize("\u2387 " + project, CYAN) +
+                        colorize("/" + branch, bc)
+                    )
+                else:
+                    sections.append(colorize("\u2387 " + branch, bc))
 
         elif section == "context_size" and context_size:
             label = "{}K".format(context_size // 1000) if context_size >= 1000 else str(context_size)
@@ -245,6 +257,7 @@ def _demo_data():
         },
         "exceeds_200k_tokens": False,
         "git_branch": "feat/statusline",
+        "cwd": "/home/user/projects/trader",
     }
 
 
