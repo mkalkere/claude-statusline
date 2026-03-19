@@ -394,9 +394,9 @@ class TestRender(unittest.TestCase):
     def test_project_name_in_branch(self):
         """Branch should show project/branch when cwd is available."""
         data = self._full_data()
-        data["cwd"] = "/home/user/projects/trader"
+        data["cwd"] = "/home/user/projects/myapp"
         result = render(data)
-        self.assertIn("trader", result)
+        self.assertIn("myapp", result)
 
     def test_project_name_with_workspace(self):
         """Workspace.current_dir should also provide project name."""
