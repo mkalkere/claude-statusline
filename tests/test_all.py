@@ -243,9 +243,11 @@ class TestGitBranch(unittest.TestCase):
             with tempfile.TemporaryDirectory() as dir_a:
                 os.chdir(dir_a)
                 cache_a = _cache_file()
+                os.chdir(original_cwd)  # leave before cleanup (Windows)
             with tempfile.TemporaryDirectory() as dir_b:
                 os.chdir(dir_b)
                 cache_b = _cache_file()
+                os.chdir(original_cwd)  # leave before cleanup (Windows)
             self.assertNotEqual(cache_a, cache_b)
         finally:
             os.chdir(original_cwd)
