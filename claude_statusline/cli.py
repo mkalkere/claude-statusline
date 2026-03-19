@@ -283,6 +283,13 @@ def _demo_data():
         "exceeds_200k_tokens": False,
         "git_branch": "feat/statusline",
         "cwd": "/home/user/projects/trader",
+        "workspace": {
+            "project_dir": "/home/user/projects/trader",
+            "current_dir": "/home/user/projects/trader/src",
+        },
+        "model": {
+            "display_name": "Opus 4.6 (1M context)",
+        },
     }
 
 

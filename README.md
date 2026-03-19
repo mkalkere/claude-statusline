@@ -11,7 +11,7 @@
 
 ```
 Line 1:  [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:36K/min │ (200K)
-Line 2:  12m05s │ api:2m31s │ +247 -38 │ ⎇ trader/main │ Opus 4.6 (1M context) │ [Explore] │ wt:fix/bug-123
+Line 2:  12m05s │ api:5m12s │ +247 -38 │ ⎇ trader/feat/statusline │ Opus 4.6 (1M context)
 ```
 
 ## Quick Start
