@@ -14,7 +14,7 @@ THEMES = {
             "bar", "tokens", "cache", "cost", "burn", "context_size", "ctx_warning",
         ],
         "line2": [
-            "duration", "lines", "branch", "vim", "agent", "worktree",
+            "duration", "lines", "branch", "vim", "agent", "worktree", "model",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -29,6 +29,7 @@ THEMES = {
             "agent": colors.CYAN,
             "vim_normal": colors.BLUE,
             "vim_insert": colors.GREEN,
+            "model": colors.BRIGHT_MAGENTA,
         },
     },
     "minimal": {
@@ -42,7 +43,7 @@ THEMES = {
             "bar", "tokens", "cost", "ctx_warning",
         ],
         "line2": [
-            "duration", "branch",
+            "duration", "branch", "model",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -57,6 +58,7 @@ THEMES = {
             "agent": colors.CYAN,
             "vim_normal": colors.BLUE,
             "vim_insert": colors.GREEN,
+            "model": colors.BRIGHT_MAGENTA,
         },
     },
     "powerline": {
@@ -70,7 +72,7 @@ THEMES = {
             "bar", "tokens", "cache", "cost", "burn", "context_size", "ctx_warning",
         ],
         "line2": [
-            "duration", "lines", "branch", "vim", "agent", "worktree",
+            "duration", "lines", "branch", "vim", "agent", "worktree", "model",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -85,6 +87,7 @@ THEMES = {
             "agent": colors.CYAN,
             "vim_normal": colors.BLUE,
             "vim_insert": colors.GREEN,
+            "model": colors.BRIGHT_MAGENTA,
         },
     },
 }

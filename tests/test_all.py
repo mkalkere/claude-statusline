@@ -235,6 +235,23 @@ class TestGitBranch(unittest.TestCase):
         # Just check it doesn't crash — result may be empty if not in git
         self.assertIsInstance(result, str)
 
+    def test_cache_isolation_per_directory(self):
+        """Different working directories should use different cache files."""
+        from claude_statusline.git import _cache_file
+        original_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as dir_a:
+                os.chdir(dir_a)
+                cache_a = _cache_file()
+                os.chdir(original_cwd)  # leave before cleanup (Windows)
+            with tempfile.TemporaryDirectory() as dir_b:
+                os.chdir(dir_b)
+                cache_b = _cache_file()
+                os.chdir(original_cwd)  # leave before cleanup (Windows)
+            self.assertNotEqual(cache_a, cache_b)
+        finally:
+            os.chdir(original_cwd)
+
 
 # ─── themes.py ────────────────────────────────────────────────────────
 
@@ -266,7 +283,8 @@ class TestThemes(unittest.TestCase):
     def test_color_keys(self):
         required_colors = ["separator", "label", "value", "cost",
                            "branch_main", "branch_feature", "warning",
-                           "added", "removed", "agent", "vim_normal", "vim_insert"]
+                           "added", "removed", "agent", "vim_normal", "vim_insert",
+                           "model"]
         for name, theme in THEMES.items():
             for key in required_colors:
                 self.assertIn(key, theme["colors"],
@@ -328,6 +346,32 @@ class TestRender(unittest.TestCase):
         data["exceeds_200k_tokens"] = True
         result = render(data)
         self.assertIn("!CTX", result)
+
+    def test_ctx_warning_at_85_percent(self):
+        """Warning should trigger at 85%+ usage regardless of context size."""
+        data = self._full_data()
+        data["exceeds_200k_tokens"] = False
+        data["context_window"]["used_percentage"] = 85
+        data["context_window"]["context_window_size"] = 1_000_000
+        result = render(data)
+        self.assertIn("!CTX", result)
+
+    def test_ctx_warning_not_at_84_percent(self):
+        """Warning should NOT trigger below 85% usage."""
+        data = self._full_data()
+        data["exceeds_200k_tokens"] = False
+        data["context_window"]["used_percentage"] = 84
+        result = render(data)
+        self.assertNotIn("!CTX", result)
+
+    def test_ctx_warning_1m_context_low_usage(self):
+        """1M context at 20% usage should NOT show warning."""
+        data = self._full_data()
+        data["exceeds_200k_tokens"] = False
+        data["context_window"]["used_percentage"] = 20
+        data["context_window"]["context_window_size"] = 1_000_000
+        result = render(data)
+        self.assertNotIn("!CTX", result)
 
     def test_vim_mode(self):
         data = self._full_data()
@@ -394,6 +438,20 @@ class TestRender(unittest.TestCase):
         }
         result = render(data)
         self.assertIsInstance(result, str)
+
+    def test_model_name_displayed(self):
+        """Model display_name should appear when present."""
+        data = self._full_data()
+        data["model"] = {"id": "claude-opus-4-6", "display_name": "Opus"}
+        result = render(data)
+        self.assertIn("Opus", result)
+
+    def test_model_name_absent(self):
+        """Missing model should not crash or show anything."""
+        data = self._full_data()
+        result = render(data)
+        self.assertNotIn("Opus", result)
+        self.assertNotIn("Sonnet", result)
 
     def test_real_schema_full(self):
         """Test with a complete real Claude Code JSON payload."""
@@ -465,6 +523,42 @@ class TestCLIInstall(unittest.TestCase):
                 sl = settings["statusLine"]
                 self.assertEqual(sl["type"], "command")
                 self.assertIn("--theme powerline", sl["command"])
+            finally:
+                cli_mod._settings_path = orig
+
+    def test_install_creates_backup(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            original = {"existingKey": "preserve_me", "other": 42}
+            with open(settings_file, "w") as f:
+                json.dump(original, f)
+
+            import claude_statusline.cli as cli_mod
+            orig = cli_mod._settings_path
+            cli_mod._settings_path = lambda: settings_file
+
+            try:
+                cli_mod.cmd_install("default")
+                backup_file = settings_file + ".bak"
+                self.assertTrue(os.path.exists(backup_file))
+                with open(backup_file, "r") as f:
+                    backup_content = json.load(f)
+                self.assertEqual(backup_content, original)
+            finally:
+                cli_mod._settings_path = orig
+
+    def test_install_no_backup_when_no_existing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+
+            import claude_statusline.cli as cli_mod
+            orig = cli_mod._settings_path
+            cli_mod._settings_path = lambda: settings_file
+
+            try:
+                cli_mod.cmd_install("default")
+                backup_file = settings_file + ".bak"
+                self.assertFalse(os.path.exists(backup_file))
             finally:
                 cli_mod._settings_path = orig
 

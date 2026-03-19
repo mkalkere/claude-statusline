@@ -4,18 +4,23 @@ import argparse
 import json
 import os
 import platform
+import shutil
 import sys
 
 from . import __version__
 from .bar import render_bar
 from .colors import (
-    BOLD, BRIGHT_BLACK, BRIGHT_RED, CYAN, GREEN, RED, RESET, YELLOW, colorize,
+    BOLD, BRIGHT_BLACK, BRIGHT_MAGENTA, BRIGHT_RED, CYAN, GREEN, RED, RESET,
+    YELLOW, colorize,
 )
 from .formatters import (
     fmt_burn_rate, fmt_cache_pct, fmt_cost, fmt_duration, fmt_lines, fmt_tokens,
 )
 from .git import get_branch
 from .themes import THEMES, get_theme
+
+# Percentage of context window usage that triggers the !CTX warning.
+CTX_WARNING_THRESHOLD_PCT = 85
 
 
 def _force_utf8():
@@ -127,6 +132,7 @@ def _render_sections(n, order, theme):
     vim_mode = n["vim_mode"]
     agent_name = n["agent_name"]
     worktree_branch = n["worktree_branch"]
+    model_name = n["model_name"]
     pct = n["used_percentage"]
 
     total_input = (input_tokens or 0) + (cache_read or 0) + (cache_create or 0)
@@ -191,8 +197,11 @@ def _render_sections(n, order, theme):
             label = "{}K".format(context_size // 1000) if context_size >= 1000 else str(context_size)
             sections.append(colorize("({})".format(label), BRIGHT_BLACK))
 
-        elif section == "ctx_warning" and exceeds_200k:
-            sections.append(colorize("!CTX", BRIGHT_RED, BOLD))
+        elif section == "ctx_warning":
+            # Prefer percentage-based warning (works for any context window size)
+            # Fall back to exceeds_200k_tokens for backward compatibility
+            if (pct is not None and pct >= CTX_WARNING_THRESHOLD_PCT) or exceeds_200k:
+                sections.append(colorize("!CTX", BRIGHT_RED, BOLD))
 
         elif section == "vim" and vim_mode:
             vc = tc["vim_normal"] if vim_mode.upper() == "NORMAL" else tc["vim_insert"]
@@ -203,6 +212,10 @@ def _render_sections(n, order, theme):
 
         elif section == "worktree" and worktree_branch:
             sections.append(colorize("wt:" + worktree_branch, YELLOW))
+
+        elif section == "model" and model_name:
+            mc = tc.get("model", BRIGHT_MAGENTA)
+            sections.append(colorize(model_name, mc))
 
     return sections
 
@@ -299,8 +312,13 @@ def cmd_install(theme_name="default"):
     settings_file = _settings_path()
     settings = {}
 
-    # Read existing settings
+    # Read existing settings and create backup
     if os.path.exists(settings_file):
+        backup_file = settings_file + ".bak"
+        try:
+            shutil.copy2(settings_file, backup_file)
+        except OSError:
+            pass  # Best-effort backup
         try:
             with open(settings_file, "r", encoding="utf-8") as f:
                 settings = json.load(f)
