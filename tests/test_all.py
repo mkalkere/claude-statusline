@@ -725,7 +725,6 @@ class TestProjectDir(unittest.TestCase):
 class TestCustomThemes(unittest.TestCase):
     def test_custom_theme_loads(self):
         """Custom theme JSON should be loadable."""
-        from claude_statusline.themes import load_custom_theme, _custom_theme_path
         import claude_statusline.themes as themes_mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -745,7 +744,7 @@ class TestCustomThemes(unittest.TestCase):
             themes_mod._custom_theme_path = lambda: theme_file
 
             try:
-                theme = load_custom_theme()
+                theme = themes_mod.load_custom_theme()
                 self.assertIsNotNone(theme)
                 self.assertEqual(theme["name"], "custom")
                 self.assertEqual(theme["separator"], " | ")
@@ -758,20 +757,18 @@ class TestCustomThemes(unittest.TestCase):
 
     def test_custom_theme_missing_file(self):
         """Missing file should return None gracefully."""
-        from claude_statusline.themes import load_custom_theme
         import claude_statusline.themes as themes_mod
 
         orig = themes_mod._custom_theme_path
         themes_mod._custom_theme_path = lambda: "/nonexistent/path.json"
         try:
-            result = load_custom_theme()
+            result = themes_mod.load_custom_theme()
             self.assertIsNone(result)
         finally:
             themes_mod._custom_theme_path = orig
 
     def test_custom_theme_invalid_json(self):
         """Invalid JSON should return None gracefully."""
-        from claude_statusline.themes import load_custom_theme
         import claude_statusline.themes as themes_mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -782,14 +779,13 @@ class TestCustomThemes(unittest.TestCase):
             orig = themes_mod._custom_theme_path
             themes_mod._custom_theme_path = lambda: theme_file
             try:
-                result = load_custom_theme()
+                result = themes_mod.load_custom_theme()
                 self.assertIsNone(result)
             finally:
                 themes_mod._custom_theme_path = orig
 
     def test_custom_theme_overrides_lines(self):
         """Custom theme can override line1/line2 layout."""
-        from claude_statusline.themes import load_custom_theme
         import claude_statusline.themes as themes_mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -804,7 +800,7 @@ class TestCustomThemes(unittest.TestCase):
             orig = themes_mod._custom_theme_path
             themes_mod._custom_theme_path = lambda: theme_file
             try:
-                theme = load_custom_theme()
+                theme = themes_mod.load_custom_theme()
                 self.assertEqual(theme["line1"], ["bar", "cost"])
                 self.assertEqual(theme["line2"], ["branch"])
             finally:
@@ -812,7 +808,6 @@ class TestCustomThemes(unittest.TestCase):
 
     def test_get_theme_custom(self):
         """get_theme('custom') should load from file."""
-        from claude_statusline.themes import get_theme
         import claude_statusline.themes as themes_mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
