@@ -19,6 +19,9 @@ from .formatters import (
 from .git import get_branch
 from .themes import THEMES, get_theme
 
+# Percentage of context window usage that triggers the !CTX warning.
+CTX_WARNING_THRESHOLD_PCT = 85
+
 
 def _force_utf8():
     """Force UTF-8 encoding on stdout for Windows compatibility."""
@@ -197,7 +200,7 @@ def _render_sections(n, order, theme):
         elif section == "ctx_warning":
             # Prefer percentage-based warning (works for any context window size)
             # Fall back to exceeds_200k_tokens for backward compatibility
-            if (pct is not None and pct >= 85) or exceeds_200k:
+            if (pct is not None and pct >= CTX_WARNING_THRESHOLD_PCT) or exceeds_200k:
                 sections.append(colorize("!CTX", BRIGHT_RED, BOLD))
 
         elif section == "vim" and vim_mode:
@@ -314,7 +317,7 @@ def cmd_install(theme_name="default"):
         backup_file = settings_file + ".bak"
         try:
             shutil.copy2(settings_file, backup_file)
-        except (OSError, IOError):
+        except OSError:
             pass  # Best-effort backup
         try:
             with open(settings_file, "r", encoding="utf-8") as f:
