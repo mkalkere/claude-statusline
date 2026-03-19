@@ -14,7 +14,8 @@ authors = [
 ]
 keywords = [
     "claude-code", "claude", "statusline", "status-bar", "cli",
-    "terminal", "developer-tools", "anthropic", "claude-status"
+    "terminal", "developer-tools", "anthropic", "claude-status",
+    "prompt", "productivity", "ai-tools", "llm", "coding-assistant"
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -31,6 +32,8 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: User Interfaces",
     "Topic :: Terminals",
+    "Topic :: Utilities",
+    "License :: OSI Approved :: MIT License",
 ]
 
 [project.scripts]

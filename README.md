@@ -7,10 +7,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/mkalkere/claude-statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/mkalkere/claude-statusline/actions)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://pypi.org/project/claude-status/)
+[![Downloads](https://img.shields.io/pypi/dm/claude-status)](https://pypi.org/project/claude-status/)
 
 ```
 Line 1:  [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:36K/min │ (200K)
-Line 2:  12m05s │ +247 -38 │ ⎇ feat/statusline │ NORMAL │ [Explore] │ wt:fix/bug-123
+Line 2:  12m05s │ api:2m31s │ +247 -38 │ ⎇ trader/main │ Opus 4.6 (1M context) │ [Explore] │ wt:fix/bug-123
 ```
 
 ## Quick Start
