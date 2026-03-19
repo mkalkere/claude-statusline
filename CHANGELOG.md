@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-03-19
+
+### Added
+- Active model name display in status line (e.g., Opus, Sonnet, Haiku)
+- `settings.json.bak` backup before `--install` modifies settings
+
+### Fixed
+- Context warning (`!CTX`) now uses percentage-based threshold (85%+) instead of hardcoded 200K boolean; works correctly with 1M token context windows
+- Git cache now uses per-directory files to prevent wrong branch names in concurrent sessions
+
+## [0.1.4] - 2026-03-14
+
+### Added
+- Project name in branch indicator (e.g., `trader/main` instead of just `main`)
+- Secret scanning in CI workflow and pre-commit hook
+- Tests for project name feature
+
+## [0.1.3] - 2026-03-14
+
+### Fixed
+- statusLine config must be an object with `type` and `command`, not a plain string
+
+## [0.1.2] - 2026-03-14
+
+### Changed
+- README rewrite for clarity and visual appeal on PyPI
+
+## [0.1.1] - 2026-03-14
+
+### Changed
+- Renamed PyPI package to `claude-status`
+- Updated README for PyPI listing
+
 ## [0.1.0] - 2026-03-14
 
 ### Added
