@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-03-19
+
+### Added
+- API latency metric (`api:` section) showing time spent in API calls via `total_api_duration_ms`
+- Custom theme support via `~/.claude/claude-status-theme.json` (`--theme custom`)
+- `latency` color key in all built-in themes
+
+### Changed
+- Project name now uses `workspace.project_dir` (explicit project root) instead of basename of `current_dir`, preventing wrong names in nested subdirectories
+
 ## [0.1.5] - 2026-03-19
 
 ### Added

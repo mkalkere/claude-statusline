@@ -284,7 +284,7 @@ class TestThemes(unittest.TestCase):
         required_colors = ["separator", "label", "value", "cost",
                            "branch_main", "branch_feature", "warning",
                            "added", "removed", "agent", "vim_normal", "vim_insert",
-                           "model"]
+                           "model", "latency"]
         for name, theme in THEMES.items():
             for key in required_colors:
                 self.assertIn(key, theme["colors"],
@@ -640,6 +640,201 @@ class TestCLISubprocess(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("Python:", result.stdout)
         self.assertIn("OS:", result.stdout)
+
+
+# ─── Issue #6: API latency ────────────────────────────────────────────
+
+class TestAPILatency(unittest.TestCase):
+    def _data_with_latency(self, api_ms):
+        return {
+            "context_window": {
+                "used_percentage": 30,
+                "current_usage": {"input_tokens": 5000, "output_tokens": 1000},
+            },
+            "cost": {
+                "total_cost_usd": 0.10,
+                "total_duration_ms": 60_000,
+                "total_api_duration_ms": api_ms,
+            },
+            "git_branch": "main",
+        }
+
+    def test_latency_displayed(self):
+        result = render(self._data_with_latency(45_000))
+        self.assertIn("api:", result)
+        self.assertIn("45s", result)
+
+    def test_latency_minutes(self):
+        result = render(self._data_with_latency(125_000))
+        self.assertIn("api:", result)
+        self.assertIn("2m05s", result)
+
+    def test_latency_absent(self):
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.10, "total_duration_ms": 60_000},
+        }
+        result = render(data)
+        self.assertNotIn("api:", result)
+
+
+# ─── Issue #7: workspace.project_dir ──────────────────────────────────
+
+class TestProjectDir(unittest.TestCase):
+    def test_project_dir_preferred(self):
+        """workspace.project_dir should take priority over current_dir."""
+        data = {
+            "context_window": {"used_percentage": 10,
+                               "current_usage": {"input_tokens": 100}},
+            "workspace": {
+                "project_dir": "/home/user/projects/my-project",
+                "current_dir": "/home/user/projects/my-project/src/deep/nested",
+            },
+            "git_branch": "main",
+        }
+        result = render(data)
+        self.assertIn("my-project", result)
+        self.assertNotIn("nested", result)
+
+    def test_falls_back_to_current_dir(self):
+        """Without project_dir, should use current_dir basename."""
+        data = {
+            "context_window": {"used_percentage": 10,
+                               "current_usage": {"input_tokens": 100}},
+            "workspace": {"current_dir": "/home/user/projects/fallback-app"},
+            "git_branch": "main",
+        }
+        result = render(data)
+        self.assertIn("fallback-app", result)
+
+    def test_falls_back_to_cwd(self):
+        """Without workspace at all, should use top-level cwd."""
+        data = {
+            "context_window": {"used_percentage": 10,
+                               "current_usage": {"input_tokens": 100}},
+            "cwd": "/home/user/projects/legacy-app",
+            "git_branch": "main",
+        }
+        result = render(data)
+        self.assertIn("legacy-app", result)
+
+
+# ─── Issue #8: Custom themes ─────────────────────────────────────────
+
+class TestCustomThemes(unittest.TestCase):
+    def test_custom_theme_loads(self):
+        """Custom theme JSON should be loadable."""
+        import claude_statusline.themes as themes_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            theme_file = os.path.join(tmpdir, "claude-status-theme.json")
+            theme_json = {
+                "base": "minimal",
+                "separator": " | ",
+                "colors": {
+                    "cost": "green",
+                    "branch_main": "bright_cyan",
+                },
+            }
+            with open(theme_file, "w") as f:
+                json.dump(theme_json, f)
+
+            orig = themes_mod._custom_theme_path
+            themes_mod._custom_theme_path = lambda: theme_file
+
+            try:
+                theme = themes_mod.load_custom_theme()
+                self.assertIsNotNone(theme)
+                self.assertEqual(theme["name"], "custom")
+                self.assertEqual(theme["separator"], " | ")
+                # Color should be resolved from string to ANSI code
+                from claude_statusline.colors import GREEN, BRIGHT_CYAN
+                self.assertEqual(theme["colors"]["cost"], GREEN)
+                self.assertEqual(theme["colors"]["branch_main"], BRIGHT_CYAN)
+            finally:
+                themes_mod._custom_theme_path = orig
+
+    def test_custom_theme_missing_file(self):
+        """Missing file should return None gracefully."""
+        import claude_statusline.themes as themes_mod
+
+        orig = themes_mod._custom_theme_path
+        themes_mod._custom_theme_path = lambda: "/nonexistent/path.json"
+        try:
+            result = themes_mod.load_custom_theme()
+            self.assertIsNone(result)
+        finally:
+            themes_mod._custom_theme_path = orig
+
+    def test_custom_theme_invalid_json(self):
+        """Invalid JSON should return None gracefully."""
+        import claude_statusline.themes as themes_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            theme_file = os.path.join(tmpdir, "bad.json")
+            with open(theme_file, "w") as f:
+                f.write("not valid json {{{")
+
+            orig = themes_mod._custom_theme_path
+            themes_mod._custom_theme_path = lambda: theme_file
+            try:
+                result = themes_mod.load_custom_theme()
+                self.assertIsNone(result)
+            finally:
+                themes_mod._custom_theme_path = orig
+
+    def test_custom_theme_overrides_lines(self):
+        """Custom theme can override line1/line2 layout."""
+        import claude_statusline.themes as themes_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            theme_file = os.path.join(tmpdir, "theme.json")
+            theme_json = {
+                "line1": ["bar", "cost"],
+                "line2": ["branch"],
+            }
+            with open(theme_file, "w") as f:
+                json.dump(theme_json, f)
+
+            orig = themes_mod._custom_theme_path
+            themes_mod._custom_theme_path = lambda: theme_file
+            try:
+                theme = themes_mod.load_custom_theme()
+                self.assertEqual(theme["line1"], ["bar", "cost"])
+                self.assertEqual(theme["line2"], ["branch"])
+            finally:
+                themes_mod._custom_theme_path = orig
+
+    def test_get_theme_custom(self):
+        """get_theme('custom') should load from file."""
+        import claude_statusline.themes as themes_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            theme_file = os.path.join(tmpdir, "theme.json")
+            with open(theme_file, "w") as f:
+                json.dump({"separator": " ~ "}, f)
+
+            orig = themes_mod._custom_theme_path
+            themes_mod._custom_theme_path = lambda: theme_file
+            try:
+                theme = get_theme("custom")
+                self.assertEqual(theme["name"], "custom")
+                self.assertEqual(theme["separator"], " ~ ")
+            finally:
+                themes_mod._custom_theme_path = orig
+
+    def test_get_theme_custom_fallback(self):
+        """get_theme('custom') without file falls back to default."""
+        import claude_statusline.themes as themes_mod
+
+        orig = themes_mod._custom_theme_path
+        themes_mod._custom_theme_path = lambda: "/nonexistent/path.json"
+        try:
+            theme = get_theme("custom")
+            self.assertEqual(theme["name"], "default")
+        finally:
+            themes_mod._custom_theme_path = orig
 
 
 if __name__ == "__main__":

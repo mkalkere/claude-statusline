@@ -1,5 +1,9 @@
 """Theme definitions for statusline rendering."""
 
+import copy
+import json
+import os
+
 from . import colors
 
 THEMES = {
@@ -14,7 +18,7 @@ THEMES = {
             "bar", "tokens", "cache", "cost", "burn", "context_size", "ctx_warning",
         ],
         "line2": [
-            "duration", "lines", "branch", "vim", "agent", "worktree", "model",
+            "duration", "latency", "lines", "branch", "vim", "agent", "worktree", "model",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -30,6 +34,7 @@ THEMES = {
             "vim_normal": colors.BLUE,
             "vim_insert": colors.GREEN,
             "model": colors.BRIGHT_MAGENTA,
+            "latency": colors.CYAN,
         },
     },
     "minimal": {
@@ -43,7 +48,7 @@ THEMES = {
             "bar", "tokens", "cost", "ctx_warning",
         ],
         "line2": [
-            "duration", "branch", "model",
+            "duration", "latency", "branch", "model",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -59,6 +64,7 @@ THEMES = {
             "vim_normal": colors.BLUE,
             "vim_insert": colors.GREEN,
             "model": colors.BRIGHT_MAGENTA,
+            "latency": colors.CYAN,
         },
     },
     "powerline": {
@@ -72,7 +78,7 @@ THEMES = {
             "bar", "tokens", "cache", "cost", "burn", "context_size", "ctx_warning",
         ],
         "line2": [
-            "duration", "lines", "branch", "vim", "agent", "worktree", "model",
+            "duration", "latency", "lines", "branch", "vim", "agent", "worktree", "model",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -88,11 +94,107 @@ THEMES = {
             "vim_normal": colors.BLUE,
             "vim_insert": colors.GREEN,
             "model": colors.BRIGHT_MAGENTA,
+            "latency": colors.CYAN,
         },
     },
 }
 
 
+# Map of color name strings to ANSI codes for user theme files.
+_COLOR_MAP = {
+    "black": colors.BLACK,
+    "red": colors.RED,
+    "green": colors.GREEN,
+    "yellow": colors.YELLOW,
+    "blue": colors.BLUE,
+    "magenta": colors.MAGENTA,
+    "cyan": colors.CYAN,
+    "white": colors.WHITE,
+    "bright_black": colors.BRIGHT_BLACK,
+    "bright_red": colors.BRIGHT_RED,
+    "bright_green": colors.BRIGHT_GREEN,
+    "bright_yellow": colors.BRIGHT_YELLOW,
+    "bright_blue": colors.BRIGHT_BLUE,
+    "bright_magenta": colors.BRIGHT_MAGENTA,
+    "bright_cyan": colors.BRIGHT_CYAN,
+    "bright_white": colors.BRIGHT_WHITE,
+    "bold": colors.BOLD,
+    "reset": colors.RESET,
+}
+
+
+def _resolve_colors(color_dict):
+    """Convert color name strings to ANSI codes."""
+    resolved = {}
+    for key, value in color_dict.items():
+        if isinstance(value, str):
+            resolved[key] = _COLOR_MAP.get(value.lower(), value)
+        else:
+            resolved[key] = value
+    return resolved
+
+
+def _custom_theme_path():
+    """Return the path to the user custom theme file."""
+    home = os.path.expanduser("~")
+    return os.path.join(home, ".claude", "claude-status-theme.json")
+
+
+def load_custom_theme():
+    """Load user-defined custom theme from ~/.claude/claude-status-theme.json.
+
+    The JSON file can override any theme keys. Missing keys are filled
+    from the 'default' built-in theme. Color values can be color name
+    strings like "green", "bright_cyan", etc.
+
+    Returns:
+        Theme dict if file exists and is valid, None otherwise.
+    """
+    path = _custom_theme_path()
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            user = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    if not isinstance(user, dict):
+        return None
+
+    # Start from a copy of the base theme the user chose (or default)
+    base_name = user.get("base", "default")
+    base = THEMES.get(base_name, THEMES["default"])
+    theme = copy.deepcopy(base)
+    theme["name"] = "custom"
+
+    # Override simple keys
+    for key in ("separator", "bar_filled", "bar_empty", "bar_left", "bar_right"):
+        if key in user:
+            theme[key] = user[key]
+
+    # Override line layout
+    if "line1" in user and isinstance(user["line1"], list):
+        theme["line1"] = user["line1"]
+    if "line2" in user and isinstance(user["line2"], list):
+        theme["line2"] = user["line2"]
+
+    # Override / merge colors
+    if "colors" in user and isinstance(user["colors"], dict):
+        resolved = _resolve_colors(user["colors"])
+        theme["colors"].update(resolved)
+
+    return theme
+
+
 def get_theme(name):
-    """Get theme by name, defaulting to 'default'."""
+    """Get theme by name, defaulting to 'default'.
+
+    If name is 'custom', attempts to load from the user theme file.
+    """
+    if name == "custom":
+        custom = load_custom_theme()
+        if custom:
+            return custom
+        # Fall through to default if custom file not found
     return THEMES.get(name, THEMES["default"])
