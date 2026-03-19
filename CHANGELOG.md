@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.4] - 2026-03-14
 
 ### Added
-- Project name in branch indicator (e.g., `trader/main` instead of just `main`)
+- Project name in branch indicator (e.g., `myapp/main` instead of just `main`)
 - Secret scanning in CI workflow and pre-commit hook
 - Tests for project name feature
 
