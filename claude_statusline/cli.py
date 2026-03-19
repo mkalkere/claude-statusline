@@ -71,6 +71,7 @@ def _normalize(data):
     cost_obj = data.get("cost") or {}
     out["cost"] = cost_obj.get("total_cost_usd") or data.get("cost_usd")
     out["duration"] = cost_obj.get("total_duration_ms") or data.get("session_duration_ms")
+    out["api_duration"] = cost_obj.get("total_api_duration_ms") or data.get("api_duration_ms")
     out["lines_added"] = cost_obj.get("total_lines_added") or data.get("lines_added")
     out["lines_removed"] = cost_obj.get("total_lines_removed") or data.get("lines_removed")
 
@@ -93,10 +94,13 @@ def _normalize(data):
     # Git branch
     out["git_branch"] = data.get("git_branch")
 
-    # Project name (last folder in cwd path)
+    # Project name: prefer workspace.project_dir (explicit project root),
+    # fall back to last folder of current_dir / cwd
     workspace = data.get("workspace") or {}
+    project_dir = workspace.get("project_dir") or ""
     cwd = workspace.get("current_dir") or data.get("cwd") or ""
-    out["project_name"] = os.path.basename(cwd) if cwd else ""
+    best_path = project_dir or cwd
+    out["project_name"] = os.path.basename(os.path.normpath(best_path)) if best_path else ""
 
     # Model info
     model_obj = data.get("model") or {}
@@ -133,6 +137,7 @@ def _render_sections(n, order, theme):
     agent_name = n["agent_name"]
     worktree_branch = n["worktree_branch"]
     model_name = n["model_name"]
+    api_duration = n["api_duration"]
     pct = n["used_percentage"]
 
     total_input = (input_tokens or 0) + (cache_read or 0) + (cache_create or 0)
@@ -169,6 +174,12 @@ def _render_sections(n, order, theme):
 
         elif section == "duration" and duration is not None:
             sections.append(colorize(fmt_duration(duration), tc["value"]))
+
+        elif section == "latency" and api_duration is not None:
+            lc = tc.get("latency", CYAN)
+            sections.append(
+                colorize("api:", tc["label"]) + colorize(fmt_duration(api_duration), lc)
+            )
 
         elif section == "lines":
             lines_str = fmt_lines(lines_added, lines_removed)
@@ -265,6 +276,7 @@ def _demo_data():
         "cost": {
             "total_cost_usd": 0.73,
             "total_duration_ms": 725_000,
+            "total_api_duration_ms": 312_000,
             "total_lines_added": 247,
             "total_lines_removed": 38,
         },
@@ -403,8 +415,10 @@ def main():
     parser.add_argument("--demo", action="store_true", help="Show demo output for all themes")
     parser.add_argument("--install", action="store_true", help="Install into Claude Code settings")
     parser.add_argument("--doctor", action="store_true", help="Run diagnostics")
-    parser.add_argument("--theme", default="default", choices=["default", "minimal", "powerline"],
-                        help="Theme to use (default: default)")
+    parser.add_argument("--theme", default="default",
+                        choices=["default", "minimal", "powerline", "custom"],
+                        help="Theme to use (default: default). "
+                             "'custom' loads ~/.claude/claude-status-theme.json")
 
     args = parser.parse_args()
 
