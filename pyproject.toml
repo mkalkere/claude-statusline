@@ -15,7 +15,8 @@ authors = [
 keywords = [
     "claude-code", "claude", "statusline", "status-bar", "cli",
     "terminal", "developer-tools", "anthropic", "claude-status",
-    "prompt", "productivity", "ai-tools", "llm", "coding-assistant"
+    "prompt", "productivity", "ai-tools", "llm", "coding-assistant",
+    "token-usage", "context-window", "budget-monitor", "burn-rate",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -43,6 +44,7 @@ claude-status = "claude_statusline.cli:main"
 Homepage = "https://github.com/mkalkere/claude-statusline"
 Repository = "https://github.com/mkalkere/claude-statusline"
 Issues = "https://github.com/mkalkere/claude-statusline/issues"
+Changelog = "https://github.com/mkalkere/claude-statusline/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 include = ["claude_statusline*"]

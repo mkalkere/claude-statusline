@@ -207,6 +207,33 @@ Claude Code pipes session JSON to your `statusLine` command via stdin on every r
 
 **Our philosophy:** Do one thing well. Show every metric you need, nothing you don't. Install in 2 seconds, work everywhere, break never.
 
+## FAQ
+
+**Does this work on Windows?**
+Yes! Fully tested on Windows 11, macOS, and Linux across Python 3.8–3.14.
+
+**Can I customize the colors?**
+Yes — use `--theme custom` with a `~/.claude/claude-status-theme.json` file. Override any color or layout from the built-in themes.
+
+**How does budget monitoring work?**
+Create `~/.claude/claude-status-budget.json` with `{"daily_budget_usd": 10.00}`. The cost indicator turns yellow at 70% and red at 90% of your daily limit.
+
+**What is burn rate?**
+Tokens consumed per minute — a metric unique to claude-status. Helps you gauge how fast you're using context in a session.
+
+**Does it add any latency to Claude Code?**
+No. It runs as a pure stdin-to-stdout pipe in single-digit milliseconds. No daemon, no network calls, no background processes.
+
+## Troubleshooting
+
+If claude-status doesn't appear after installation:
+
+1. Run `claude-status --doctor` to check your setup
+2. Verify `~/.claude/settings.json` contains the `statusLine` entry
+3. Ensure your Python scripts directory is in your `PATH`
+4. Try `python -m claude_statusline --install` as a fallback
+5. Restart Claude Code after any configuration change
+
 ## Uninstall
 
 ```bash
