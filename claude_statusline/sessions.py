@@ -189,60 +189,58 @@ def get_session_tool_count(session_id):
     return count
 
 
-def get_budget_config():
-    """Read daily budget threshold from ~/.claude/claude-status-budget.json.
-
-    Expected format: {"daily_budget_usd": 10.0}
-    Uses 30s cache to avoid hitting disk on every status line render.
+def _read_status_config():
+    """Read ~/.claude/claude-status-budget.json once, cache both values.
 
     Returns:
-        Budget in USD as float, or None if not configured.
+        Dict with 'budget' (float or None) and 'threshold' (float or None).
     """
-    cached = _read_cache("budget_config")
+    cached = _read_cache("status_config")
     if cached is not None:
-        val = cached.get("budget")
-        return float(val) if val is not None else None
+        return cached
 
+    result = {"budget": None, "threshold": None}
     path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         budget = data.get("daily_budget_usd")
         if budget is not None:
-            budget = float(budget)
-            _write_cache("budget_config", {"budget": budget})
-            return budget
+            result["budget"] = float(budget)
+        threshold = data.get("compaction_threshold_pct")
+        if threshold is not None:
+            threshold = float(threshold)
+            if 0 < threshold <= 100:
+                result["threshold"] = threshold
     except (OSError, IOError, json.JSONDecodeError, ValueError, TypeError):
         pass
-    _write_cache("budget_config", {"budget": None})
-    return None
+    _write_cache("status_config", result)
+    return result
+
+
+def get_budget_config():
+    """Read daily budget threshold from ~/.claude/claude-status-budget.json.
+
+    Expected format: {"daily_budget_usd": 10.0}
+    Uses 30s cache shared with compaction config to avoid redundant file reads.
+
+    Returns:
+        Budget in USD as float, or None if not configured.
+    """
+    config = _read_status_config()
+    val = config.get("budget")
+    return float(val) if val is not None else None
 
 
 def get_compaction_threshold():
     """Read compaction threshold from ~/.claude/claude-status-budget.json.
 
     Expected format: {"compaction_threshold_pct": 62}
-    Uses 30s cache (shares budget_config cache key).
+    Uses 30s cache shared with budget config to avoid redundant file reads.
 
     Returns:
         Compaction threshold as float (0-100), or None if not configured.
     """
-    cached = _read_cache("compaction_config")
-    if cached is not None:
-        val = cached.get("threshold")
-        return float(val) if val is not None else None
-
-    path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        threshold = data.get("compaction_threshold_pct")
-        if threshold is not None:
-            threshold = float(threshold)
-            if 0 < threshold <= 100:
-                _write_cache("compaction_config", {"threshold": threshold})
-                return threshold
-    except (OSError, IOError, json.JSONDecodeError, ValueError, TypeError):
-        pass
-    _write_cache("compaction_config", {"threshold": None})
-    return None
+    config = _read_status_config()
+    val = config.get("threshold")
+    return float(val) if val is not None else None

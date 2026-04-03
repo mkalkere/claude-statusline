@@ -1,6 +1,7 @@
 """Git branch detection with cross-platform caching."""
 
 import hashlib
+import json
 import os
 import subprocess
 import tempfile
@@ -77,13 +78,23 @@ def get_branch():
 
 
 def _extras_cache_file():
-    """Return cache file path for git extras (stash, ahead/behind)."""
+    """Return user-scoped cache file path for git extras."""
     try:
         cwd = os.getcwd()
     except OSError:
         cwd = ""
+    user_hash = hashlib.md5(
+        os.path.expanduser("~").encode("utf-8", "replace")
+    ).hexdigest()[:8]
     suffix = hashlib.md5(cwd.encode("utf-8", errors="replace")).hexdigest()[:12]
-    return os.path.join(tempfile.gettempdir(), "claude_sl_extras_{}".format(suffix))
+    cache_dir = os.path.join(
+        tempfile.gettempdir(), "claude_sl_{}".format(user_hash)
+    )
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError:
+        cache_dir = tempfile.gettempdir()
+    return os.path.join(cache_dir, "extras_{}".format(suffix))
 
 
 def _read_extras_cache():
@@ -94,20 +105,24 @@ def _read_extras_cache():
         if time.time() - stat.st_mtime > _CACHE_TTL:
             return None
         with open(path, "r") as f:
-            import json
             return json.load(f)
-    except (OSError, IOError, ValueError):
+    except (OSError, IOError, json.JSONDecodeError, ValueError):
         return None
 
 
 def _write_extras_cache(data):
-    """Write git extras to cache file."""
+    """Write git extras to cache file atomically."""
+    target = _extras_cache_file()
+    tmp = target + ".tmp"
     try:
-        import json
-        with open(_extras_cache_file(), "w") as f:
+        with open(tmp, "w") as f:
             json.dump(data, f)
+        os.replace(tmp, target)
     except (OSError, IOError):
-        pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def get_git_extras():

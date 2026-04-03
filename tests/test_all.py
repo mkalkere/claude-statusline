@@ -966,7 +966,7 @@ class TestSessions(unittest.TestCase):
             sessions_mod._CLAUDE_DIR = tmpdir
             # Invalidate cache to force re-read from new path
             try:
-                os.unlink(_cache_path("budget_config"))
+                os.unlink(_cache_path("status_config"))
             except OSError:
                 pass
             try:
@@ -987,7 +987,7 @@ class TestSessions(unittest.TestCase):
             orig = sessions_mod._CLAUDE_DIR
             sessions_mod._CLAUDE_DIR = tmpdir
             try:
-                os.unlink(_cache_path("budget_config"))
+                os.unlink(_cache_path("status_config"))
             except OSError:
                 pass
             try:
@@ -1346,7 +1346,7 @@ class TestCompactionConfig(unittest.TestCase):
             orig = sessions_mod._CLAUDE_DIR
             sessions_mod._CLAUDE_DIR = tmpdir
             try:
-                os.unlink(_cache_path("compaction_config"))
+                os.unlink(_cache_path("status_config"))
             except OSError:
                 pass
             try:
@@ -1362,7 +1362,7 @@ class TestCompactionConfig(unittest.TestCase):
         orig = sessions_mod._CLAUDE_DIR
         sessions_mod._CLAUDE_DIR = "/nonexistent/path"
         try:
-            os.unlink(_cache_path("compaction_config"))
+            os.unlink(_cache_path("status_config"))
         except OSError:
             pass
         try:
