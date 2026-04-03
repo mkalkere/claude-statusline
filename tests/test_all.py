@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 # Add parent to path for imports
@@ -835,6 +836,335 @@ class TestCustomThemes(unittest.TestCase):
             self.assertEqual(theme["name"], "default")
         finally:
             themes_mod._custom_theme_path = orig
+
+
+# ─── themes.py — new themes ─────────────────────────────────────────
+
+class TestNewThemes(unittest.TestCase):
+    def test_all_seven_themes_exist(self):
+        """All 7 built-in themes should be registered."""
+        for name in ("default", "minimal", "powerline",
+                     "nord", "tokyo-night", "gruvbox", "rose-pine"):
+            self.assertIn(name, THEMES, "Missing theme: {}".format(name))
+
+    def test_new_theme_names_match(self):
+        for name in ("nord", "tokyo-night", "gruvbox", "rose-pine"):
+            self.assertEqual(THEMES[name]["name"], name)
+
+    def test_new_themes_have_required_keys(self):
+        required = ["name", "separator", "bar_filled", "bar_empty",
+                     "line1", "line2", "colors"]
+        for name in ("nord", "tokyo-night", "gruvbox", "rose-pine"):
+            for key in required:
+                self.assertIn(key, THEMES[name],
+                              "{} missing key: {}".format(name, key))
+
+    def test_new_themes_have_required_colors(self):
+        required_colors = ["separator", "label", "value", "cost",
+                           "branch_main", "branch_feature", "warning",
+                           "added", "removed", "agent", "vim_normal", "vim_insert",
+                           "model", "latency", "sessions"]
+        for name in ("nord", "tokyo-night", "gruvbox", "rose-pine"):
+            for key in required_colors:
+                self.assertIn(key, THEMES[name]["colors"],
+                              "{} theme missing color: {}".format(name, key))
+
+    def test_new_themes_render(self):
+        """All new themes should produce output without crashing."""
+        data = {
+            "context_window": {
+                "used_percentage": 42,
+                "context_window_size": 200_000,
+                "current_usage": {
+                    "input_tokens": 245_000,
+                    "output_tokens": 18_500,
+                    "cache_read_input_tokens": 180_000,
+                    "cache_creation_input_tokens": 5_000,
+                },
+            },
+            "cost": {
+                "total_cost_usd": 0.73,
+                "total_duration_ms": 725_000,
+                "total_lines_added": 247,
+                "total_lines_removed": 38,
+            },
+            "git_branch": "main",
+        }
+        for name in ("nord", "tokyo-night", "gruvbox", "rose-pine"):
+            result = render(data, name)
+            self.assertIsInstance(result, str)
+            self.assertTrue(len(result) > 0, "{} produced empty output".format(name))
+
+    def test_new_themes_have_new_sections(self):
+        """New themes should include tools, sessions, budget in their layouts."""
+        for name in ("nord", "tokyo-night", "gruvbox", "rose-pine"):
+            theme = THEMES[name]
+            self.assertIn("tools", theme["line2"],
+                          "{} missing 'tools' in line2".format(name))
+            self.assertIn("sessions", theme["line2"],
+                          "{} missing 'sessions' in line2".format(name))
+            self.assertIn("budget", theme["line1"],
+                          "{} missing 'budget' in line1".format(name))
+
+
+# ─── sessions.py ────────────────────────────────────────────────────
+
+class TestSessions(unittest.TestCase):
+    def test_get_today_session_count_returns_int(self):
+        from claude_statusline.sessions import get_today_session_count
+        result = get_today_session_count()
+        self.assertIsInstance(result, int)
+        self.assertGreaterEqual(result, 0)
+
+    def test_get_session_tool_count_empty_id(self):
+        from claude_statusline.sessions import get_session_tool_count
+        self.assertEqual(get_session_tool_count(""), 0)
+        self.assertEqual(get_session_tool_count(None), 0)
+
+    def test_get_session_tool_count_nonexistent(self):
+        from claude_statusline.sessions import get_session_tool_count
+        result = get_session_tool_count("nonexistent-session-id-12345")
+        self.assertEqual(result, 0)
+
+    def test_get_budget_config_no_file(self):
+        from claude_statusline.sessions import get_budget_config
+        import claude_statusline.sessions as sessions_mod
+        orig = sessions_mod._CLAUDE_DIR
+        sessions_mod._CLAUDE_DIR = "/nonexistent/path"
+        try:
+            result = get_budget_config()
+            self.assertIsNone(result)
+        finally:
+            sessions_mod._CLAUDE_DIR = orig
+
+    def test_get_budget_config_valid(self):
+        from claude_statusline.sessions import get_budget_config
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            budget_file = os.path.join(tmpdir, "claude-status-budget.json")
+            with open(budget_file, "w") as f:
+                json.dump({"daily_budget_usd": 15.0}, f)
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                result = get_budget_config()
+                self.assertAlmostEqual(result, 15.0)
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+    def test_get_budget_config_invalid_json(self):
+        from claude_statusline.sessions import get_budget_config
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            budget_file = os.path.join(tmpdir, "claude-status-budget.json")
+            with open(budget_file, "w") as f:
+                f.write("not json {{{")
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                result = get_budget_config()
+                self.assertIsNone(result)
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+    def test_session_count_with_mock_sessions(self):
+        """Test session counting with mock session files."""
+        from claude_statusline.sessions import get_today_session_count, _write_cache
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sessions_dir = os.path.join(tmpdir, "sessions")
+            os.makedirs(sessions_dir)
+
+            # Create a session started "today" (use current epoch)
+            now_ms = int(time.time() * 1000)
+            with open(os.path.join(sessions_dir, "111.json"), "w") as f:
+                json.dump({"pid": 111, "sessionId": "a", "startedAt": now_ms}, f)
+
+            # Create a session from yesterday
+            yesterday_ms = now_ms - (86400 * 1000)
+            with open(os.path.join(sessions_dir, "222.json"), "w") as f:
+                json.dump({"pid": 222, "sessionId": "b", "startedAt": yesterday_ms}, f)
+
+            orig_sessions = sessions_mod._SESSIONS_DIR
+            sessions_mod._SESSIONS_DIR = sessions_dir
+
+            # Clear cache to force re-read
+            _write_cache("sessions_today", None)
+
+            try:
+                count = get_today_session_count()
+                self.assertEqual(count, 1)
+            finally:
+                sessions_mod._SESSIONS_DIR = orig_sessions
+
+    def test_tool_count_with_mock_jsonl(self):
+        """Test tool counting with a mock JSONL file."""
+        from claude_statusline.sessions import get_session_tool_count, _write_cache
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = os.path.join(tmpdir, "projects")
+            project_dir = os.path.join(projects_dir, "test-project")
+            os.makedirs(project_dir)
+
+            session_id = "test-session-abc123"
+            jsonl_file = os.path.join(project_dir, "{}.jsonl".format(session_id))
+            with open(jsonl_file, "w") as f:
+                f.write('{"type":"user","message":{"content":"hello"}}\n')
+                f.write('{"message":{"content":[{"type":"tool_use","name":"Bash"}]}}\n')
+                f.write('{"message":{"content":[{"type":"text","text":"done"}]}}\n')
+                # Include spaced JSON format to verify both are counted
+                f.write('{"message":{"content":[{"type": "tool_use", "name": "Read"}]}}\n')
+
+            orig_projects = sessions_mod._PROJECTS_DIR
+            sessions_mod._PROJECTS_DIR = projects_dir
+
+            # Clear cache
+            import hashlib
+            cache_key = "tools_{}".format(
+                hashlib.md5(session_id.encode()).hexdigest()[:12]
+            )
+            _write_cache(cache_key, None)
+
+            try:
+                count = get_session_tool_count(session_id)
+                self.assertEqual(count, 2)
+            finally:
+                sessions_mod._PROJECTS_DIR = orig_projects
+
+
+# ─── cli.py — new sections ──────────────────────────────────────────
+
+class TestBudgetSection(unittest.TestCase):
+    def test_budget_warning_red(self):
+        """Budget at 90%+ should show bold red."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_budget_config
+
+        cli_mod.get_budget_config = lambda: 1.0
+
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.95, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            # Should contain both current cost and budget formatted
+            self.assertIn("$0.95", result)
+            self.assertIn("$1.0", result)
+        finally:
+            cli_mod.get_budget_config = orig
+
+    def test_budget_not_shown_without_config(self):
+        """Without budget config, no budget section should appear."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_budget_config
+
+        cli_mod.get_budget_config = lambda: None
+
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            }
+            result = render(data)
+            # Should have cost but not budget format (cost/budget)
+            self.assertNotIn("/", result.replace("/min", "").replace("feat/", ""))
+        finally:
+            cli_mod.get_budget_config = orig
+
+
+class TestToolsSection(unittest.TestCase):
+    def test_tools_shown_with_session_id(self):
+        """Tools count should appear when session has tool calls."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_session_tool_count
+
+        cli_mod.get_session_tool_count = lambda sid: 42
+
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "session_id": "test-session",
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("tools:", result)
+            self.assertIn("42", result)
+        finally:
+            cli_mod.get_session_tool_count = orig
+
+    def test_tools_hidden_without_session_id(self):
+        """Without session_id, tools section should not appear."""
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+        }
+        result = render(data)
+        self.assertNotIn("tools:", result)
+
+
+class TestSessionsSection(unittest.TestCase):
+    def test_sessions_shown(self):
+        """Sessions count should appear in output."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_today_session_count
+
+        cli_mod.get_today_session_count = lambda: 5
+
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("sessions:", result)
+            self.assertIn("5", result)
+        finally:
+            cli_mod.get_today_session_count = orig
+
+
+# ─── cli.py — setup command ─────────────────────────────────────────
+
+class TestSetupCommand(unittest.TestCase):
+    def test_setup_flag_accepted(self):
+        """--setup flag should be recognized by argument parser."""
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_statusline", "--setup"],
+            capture_output=True, timeout=5,
+            input="1\n\n",  # choose default theme, skip budget
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("setup wizard", result.stdout)
+
+    def test_demo_shows_all_themes(self):
+        """Demo should show all 7 themes."""
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_statusline", "--demo"],
+            capture_output=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        self.assertEqual(result.returncode, 0)
+        for name in ("default", "minimal", "powerline",
+                     "nord", "tokyo-night", "gruvbox", "rose-pine"):
+            self.assertIn("{}:".format(name), result.stdout,
+                          "Demo missing theme: {}".format(name))
 
 
 if __name__ == "__main__":
