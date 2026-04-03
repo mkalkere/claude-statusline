@@ -10,8 +10,8 @@
 [![Downloads](https://img.shields.io/pypi/dm/claude-status)](https://pypi.org/project/claude-status/)
 
 ```
-Line 1:  [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:36K/min │ (200K)
-Line 2:  12m05s │ api:5m12s │ +247 -38 │ ⎇ myapp/feat/statusline │ Opus 4.6 (1M context)
+Line 1:  [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ $0.73/$10 │ burn:36K/min │ (200K)
+Line 2:  12m05s │ api:5m12s │ +247 -38 │ ⎇ myapp/feat/statusline │ tools:42 │ sessions:3 │ Opus 4.6 (1M context)
 ```
 
 ## Quick Start
@@ -27,9 +27,12 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 
 - **Zero dependencies** — pure Python stdlib. No `psutil`, no `colorama`, no compilation. Installs in under 2 seconds
 - **Two-line layout** — glanceable metrics on line 1, context details on line 2. Nothing gets truncated
-- **Every metric that matters** — 14 data points including burn rate (tokens/min), a metric no other statusline tracks
+- **Every metric that matters** — 17 data points including burn rate (tokens/min), a metric no other statusline tracks
+- **7 built-in themes** — default, minimal, powerline, nord, tokyo-night, gruvbox, rose-pine
+- **Budget monitoring** — set a daily spend limit, get color-coded warnings as you approach it
+- **Session analytics** — tool call count and today's session count at a glance
 - **Cross-platform** — tested on Windows, macOS, and Linux across Python 3.8–3.14 (21 CI jobs)
-- **Instant setup** — `--install` auto-configures Claude Code. No manual JSON editing
+- **Interactive setup** — `--setup` wizard walks you through theme selection and budget config
 
 ## Features
 
@@ -42,39 +45,49 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 | Cost | `$0.73` | Session cost in real-time — cents for small, dollars for large |
 | Burn Rate | `burn:36K/min` | Tokens/min consumption — unique to claude-status |
 | Context Size | `(200K)` | Know if you're on 200K or 1M context |
+| Budget | `$0.73/$10` | Color-coded daily budget tracker (green/yellow/red) |
 | Context Warning | `!CTX` | Bold red alert when you exceed 200K tokens |
 
 ### Line 2 — Session Context
 | Feature | What You See | Why It Matters |
 |---------|-------------|----------------|
 | Duration | `12m05s` | Wall-clock session time |
+| API Latency | `api:5m12s` | Time spent in API calls |
 | Lines Changed | `+247 -38` | Git-diff style — green additions, red removals |
 | Git Branch | `⎇ feat/statusline` | Green for main/master, yellow for feature branches |
+| Tool Calls | `tools:42` | Number of tool calls in current session |
+| Sessions Today | `sessions:3` | How many sessions you've started today |
 | Vim Mode | `NORMAL` | Blue for NORMAL, green for INSERT (when vim mode is on) |
 | Agent | `[Explore]` | Shows which subagent is active |
 | Worktree | `wt:fix/bug-123` | Worktree branch indicator |
+| Model | `Opus 4.6 (1M context)` | Active model name |
 
 ## Themes
+
+7 built-in themes to match your terminal aesthetic. Preview all live with `claude-status --demo`.
 
 ### default — full detail, clean separators
 ```
 [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:36K/min │ (200K)
-12m05s │ +247 -38 │ ⎇ feat/statusline
+12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ tools:42 │ sessions:3 │ Opus 4.6 (1M context)
 ```
 
 ### minimal — just the essentials
 ```
 ●●●●●●●●·············· in:245K out:18K $0.73
-12m05s ⎇ feat/statusline
+12m05s ⎇ feat/statusline sessions:3 Opus 4.6 (1M context)
 ```
 
 ### powerline — Nerd Font separators
 ```
 ████████░░░░░░░░░░░░  in:245K out:18K  cache:41%  $0.73  burn:36K/min  (200K)
-12m05s  +247 -38  ⎇ feat/statusline
+12m05s  +247 -38  ⎇ feat/statusline  tools:42  sessions:3  Opus 4.6 (1M context)
 ```
 
-Preview all themes live: `claude-status --demo`
+### nord — cool blue tones
+### tokyo-night — purple and blue accents
+### gruvbox — warm retro palette
+### rose-pine — soft muted pinks
 
 ## Installation
 
@@ -118,12 +131,34 @@ claude-status --install --theme powerline
 
 | Command | Description |
 |---------|-------------|
+| `claude-status --setup` | Interactive setup wizard (recommended for first use) |
 | `claude-status --install` | Auto-configure Claude Code settings |
-| `claude-status --install --theme powerline` | Install with a specific theme |
-| `claude-status --demo` | Preview all 3 themes with sample data |
+| `claude-status --install --theme nord` | Install with a specific theme |
+| `claude-status --demo` | Preview all 7 themes with sample data |
 | `claude-status --doctor` | Diagnostics: Python version, OS, terminal, current settings |
 | `claude-status --version` | Show version |
 | `claude-status --help` | Show usage |
+
+## Budget Monitoring
+
+Set a daily spending limit to get color-coded warnings as you approach it:
+
+```bash
+claude-status --setup  # interactive wizard sets this up for you
+```
+
+Or manually create `~/.claude/claude-status-budget.json`:
+
+```json
+{
+  "daily_budget_usd": 10.00
+}
+```
+
+The budget indicator changes color based on usage:
+- **Green**: under 70% of budget
+- **Yellow**: 70–90% of budget
+- **Red (bold)**: 90%+ of budget
 
 ## Manual Configuration
 
@@ -161,10 +196,12 @@ Claude Code pipes session JSON to your `statusLine` command via stdin on every r
 | **Dependencies** | **0** | 2 (psutil, colorama) | npm |
 | **Install time** | ~2s | ~10s | ~15s |
 | **Cross-platform** | Windows, macOS, Linux | Windows, macOS, Linux | Partial |
-| **Themes** | 3 | 100 | 1 |
+| **Themes** | 7 + custom | 100 | 1 |
 | **Burn rate** | Yes | No | No |
+| **Budget monitoring** | Yes | No | No |
+| **Session analytics** | Yes | No | No |
 | **Two-line layout** | Yes | Yes | No |
-| **Auto-install** | `--install` | `init` | Manual |
+| **Interactive setup** | `--setup` | `init` | Manual |
 | **Analytics/Dashboard** | No | Yes | No |
 | **Background daemon** | No | Yes | No |
 

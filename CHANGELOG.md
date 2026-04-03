@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-04-03
+
+### Added
+- 4 new built-in themes: `nord`, `tokyo-night`, `gruvbox`, `rose-pine` (7 total)
+- Budget monitoring with color-coded warnings via `~/.claude/claude-status-budget.json`
+- Tool call count display (`tools:N`) — counts tool_use entries in current session JSONL
+- Today's session count display (`sessions:N`) — reads `~/.claude/sessions/` metadata
+- Interactive `--setup` wizard for guided theme selection and budget configuration
+- New `sessions.py` module for reading `~/.claude/` data files with file-based caching
+
+### Changed
+- All full-detail themes now include `budget`, `tools`, and `sessions` sections
+- `--demo` now previews all 7 themes
+- Theme choices expanded in `--theme` and `--install` CLI arguments
+
 ## [0.1.6] - 2026-03-19
 
 ### Added

@@ -17,6 +17,7 @@ from .formatters import (
     fmt_burn_rate, fmt_cache_pct, fmt_cost, fmt_duration, fmt_lines, fmt_tokens,
 )
 from .git import get_branch
+from .sessions import get_budget_config, get_session_tool_count, get_today_session_count
 from .themes import THEMES, get_theme
 
 # Percentage of context window usage that triggers the !CTX warning.
@@ -105,6 +106,9 @@ def _normalize(data):
     # Model info
     model_obj = data.get("model") or {}
     out["model_name"] = model_obj.get("display_name")
+
+    # Session ID (for tool call counting)
+    out["session_id"] = data.get("session_id") or ""
 
     return out
 
@@ -228,6 +232,44 @@ def _render_sections(n, order, theme):
             mc = tc.get("model", BRIGHT_MAGENTA)
             sections.append(colorize(model_name, mc))
 
+        elif section == "tools":
+            session_id = n.get("session_id", "")
+            if session_id:
+                tool_count = get_session_tool_count(session_id)
+                if tool_count > 0:
+                    sections.append(
+                        colorize("tools:", tc["label"])
+                        + colorize(str(tool_count), tc["value"])
+                    )
+
+        elif section == "sessions":
+            count = get_today_session_count()
+            if count > 0:
+                sc = tc.get("sessions", CYAN)
+                sections.append(
+                    colorize("sessions:", tc["label"])
+                    + colorize(str(count), sc)
+                )
+
+        elif section == "budget":
+            if cost is not None:
+                budget = get_budget_config()
+                if budget is not None and budget > 0:
+                    pct_used = (cost / budget) * 100
+                    if pct_used >= 90:
+                        bc = BRIGHT_RED
+                    elif pct_used >= 70:
+                        bc = YELLOW
+                    else:
+                        bc = GREEN
+                    # Format budget as clean dollar amount (no trailing .0)
+                    if budget == int(budget):
+                        budget_str = "${}".format(int(budget))
+                    else:
+                        budget_str = fmt_cost(budget)
+                    label = "{}/{}".format(fmt_cost(cost), budget_str)
+                    sections.append(colorize(label, bc, BOLD))
+
     return sections
 
 
@@ -290,6 +332,7 @@ def _demo_data():
         "model": {
             "display_name": "Opus 4.6 (1M context)",
         },
+        "session_id": "demo-session",
     }
 
 
@@ -302,28 +345,40 @@ def _print_indented(text, indent="  "):
 def cmd_demo():
     """Show demo output for all themes."""
     data = _demo_data()
-    print("claude-status v{} — theme demos\n".format(__version__))
-    for name in ("default", "minimal", "powerline"):
-        print("  {}:".format(name))
-        _print_indented(render(data, name))
+
+    # Mock session functions so demo shows tools/sessions sections
+    import claude_statusline.cli as _self
+    _orig_tool_count = _self.get_session_tool_count
+    _orig_session_count = _self.get_today_session_count
+    _self.get_session_tool_count = lambda sid: 42
+    _self.get_today_session_count = lambda: 3
+
+    try:
+        print("claude-status v{} — theme demos\n".format(__version__))
+        for name in ("default", "minimal", "powerline", "nord", "tokyo-night", "gruvbox", "rose-pine"):
+            print("  {}:".format(name))
+            _print_indented(render(data, name))
+            print()
+
+        # Also show warning state
+        warn_data = json.loads(json.dumps(data))
+        warn_data["exceeds_200k_tokens"] = True
+        warn_data["context_window"]["used_percentage"] = 93
+        print("  warning state (93% usage):")
+        _print_indented(render(warn_data, "default"))
         print()
 
-    # Also show warning state
-    warn_data = json.loads(json.dumps(data))
-    warn_data["exceeds_200k_tokens"] = True
-    warn_data["context_window"]["used_percentage"] = 93
-    print("  warning state (93% usage):")
-    _print_indented(render(warn_data, "default"))
-    print()
-
-    # Show with optional fields
-    full_data = json.loads(json.dumps(data))
-    full_data["vim"] = {"mode": "NORMAL"}
-    full_data["agent"] = {"name": "Explore"}
-    full_data["worktree"] = {"branch": "fix/bug-123", "name": "bug-fix"}
-    print("  all fields (vim + agent + worktree):")
-    _print_indented(render(full_data, "default"))
-    print()
+        # Show with optional fields
+        full_data = json.loads(json.dumps(data))
+        full_data["vim"] = {"mode": "NORMAL"}
+        full_data["agent"] = {"name": "Explore"}
+        full_data["worktree"] = {"branch": "fix/bug-123", "name": "bug-fix"}
+        print("  all fields (vim + agent + worktree):")
+        _print_indented(render(full_data, "default"))
+        print()
+    finally:
+        _self.get_session_tool_count = _orig_tool_count
+        _self.get_today_session_count = _orig_session_count
 
 
 def cmd_install(theme_name="default"):
@@ -367,6 +422,99 @@ def cmd_install(theme_name="default"):
     print("  statusLine: {}".format(cmd))
     print()
     print("Restart Claude Code to see your new status line!")
+
+
+def cmd_setup():
+    """Interactive setup wizard for first-time configuration."""
+    print("claude-status v{} — setup wizard\n".format(__version__))
+
+    # Step 1: Show themes and let user pick
+    data = _demo_data()
+    theme_names = ["default", "minimal", "powerline",
+                   "nord", "tokyo-night", "gruvbox", "rose-pine"]
+
+    print("Available themes:\n")
+    for i, name in enumerate(theme_names, 1):
+        print("  [{}] {}".format(i, name))
+        _print_indented(render(data, name), "      ")
+        print()
+
+    print("  [{}] custom (load from ~/.claude/claude-status-theme.json)".format(
+        len(theme_names) + 1
+    ))
+    print()
+
+    try:
+        choice = input("Choose a theme [1-{}] (default: 1): ".format(
+            len(theme_names) + 1
+        )).strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nSetup cancelled.")
+        return
+
+    if not choice:
+        theme_choice = "default"
+    else:
+        try:
+            idx = int(choice) - 1
+            if idx == len(theme_names):
+                theme_choice = "custom"
+            elif 0 <= idx < len(theme_names):
+                theme_choice = theme_names[idx]
+            else:
+                print("Invalid choice, using default.")
+                theme_choice = "default"
+        except ValueError:
+            print("Invalid choice, using default.")
+            theme_choice = "default"
+
+    # Step 2: Budget configuration
+    print()
+    try:
+        budget_input = input(
+            "Set a daily budget in USD? (e.g., 10.00, or press Enter to skip): "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nSetup cancelled.")
+        return
+
+    budget = None
+    if budget_input:
+        try:
+            budget = float(budget_input.lstrip("$"))
+            if budget <= 0:
+                print("Budget must be positive, skipping.")
+                budget = None
+        except ValueError:
+            print("Invalid amount, skipping budget.")
+
+    # Step 3: Write budget config if set
+    if budget is not None:
+        budget_path = os.path.join(
+            os.path.expanduser("~"), ".claude", "claude-status-budget.json"
+        )
+        try:
+            os.makedirs(os.path.dirname(budget_path), exist_ok=True)
+            with open(budget_path, "w", encoding="utf-8") as f:
+                json.dump({"daily_budget_usd": budget}, f, indent=2)
+                f.write("\n")
+            print("  Budget saved: ${:.2f}/day".format(budget))
+        except OSError as e:
+            print("  Warning: could not save budget config: {}".format(e))
+
+    # Step 4: Install
+    print()
+    cmd_install(theme_choice)
+
+    # Step 5: Summary
+    print()
+    print("Setup complete!")
+    print("  Theme: {}".format(theme_choice))
+    if budget is not None:
+        print("  Budget: ${:.2f}/day".format(budget))
+    print()
+    print("Preview: claude-status --demo")
+    print("Diagnostics: claude-status --doctor")
 
 
 def cmd_doctor():
@@ -421,9 +569,12 @@ def main():
     parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
     parser.add_argument("--demo", action="store_true", help="Show demo output for all themes")
     parser.add_argument("--install", action="store_true", help="Install into Claude Code settings")
+    parser.add_argument("--setup", action="store_true", help="Interactive setup wizard")
     parser.add_argument("--doctor", action="store_true", help="Run diagnostics")
     parser.add_argument("--theme", default="default",
-                        choices=["default", "minimal", "powerline", "custom"],
+                        choices=["default", "minimal", "powerline",
+                                 "nord", "tokyo-night", "gruvbox", "rose-pine",
+                                 "custom"],
                         help="Theme to use (default: default). "
                              "'custom' loads ~/.claude/claude-status-theme.json")
 
@@ -435,6 +586,10 @@ def main():
 
     if args.install:
         cmd_install(args.theme)
+        return
+
+    if args.setup:
+        cmd_setup()
         return
 
     if args.doctor:

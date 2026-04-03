@@ -1,0 +1,218 @@
+"""Session analytics — daily cost, session count, tool calls.
+
+Reads ~/.claude/ data files to provide aggregate metrics across sessions.
+Uses file-based caching to avoid expensive filesystem scans on every render.
+"""
+
+import hashlib
+import json
+import os
+import re
+import tempfile
+import time
+
+_CACHE_TTL = 30  # seconds — longer than git cache since this is heavier
+
+_CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
+_SESSIONS_DIR = os.path.join(_CLAUDE_DIR, "sessions")
+_PROJECTS_DIR = os.path.join(_CLAUDE_DIR, "projects")
+
+# Valid session IDs contain only alphanumeric chars, hyphens, and underscores.
+_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _cache_dir():
+    """Return a user-scoped cache directory to avoid multi-user collisions."""
+    user_hash = hashlib.md5(
+        os.path.expanduser("~").encode("utf-8", "replace")
+    ).hexdigest()[:8]
+    path = os.path.join(tempfile.gettempdir(), "claude_sl_{}".format(user_hash))
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        return tempfile.gettempdir()
+    return path
+
+
+def _cache_path(name):
+    """Return a cache file path for a named metric."""
+    return os.path.join(_cache_dir(), name)
+
+
+def _read_cache(name):
+    """Read a cached JSON value if still fresh."""
+    try:
+        path = _cache_path(name)
+        stat = os.stat(path)
+        if time.time() - stat.st_mtime > _CACHE_TTL:
+            return None
+        with open(path, "r") as f:
+            return json.load(f)
+    except (OSError, IOError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def _write_cache(name, value):
+    """Write a JSON value to the named cache file atomically."""
+    target = _cache_path(name)
+    tmp = target + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(value, f)
+        os.replace(tmp, target)
+    except (OSError, IOError):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _today_str():
+    """Return today's date as YYYY-MM-DD string."""
+    t = time.localtime()
+    return "{:04d}-{:02d}-{:02d}".format(t.tm_year, t.tm_mon, t.tm_mday)
+
+
+def get_today_session_count():
+    """Count sessions started today by reading ~/.claude/sessions/*.json.
+
+    Each file contains a JSON object with a 'startedAt' timestamp (ms epoch).
+    Uses os.scandir with mtime filtering to skip stale files efficiently.
+
+    Returns:
+        Number of sessions started today, or 0 on error.
+    """
+    cached = _read_cache("sessions_today")
+    if cached is not None:
+        return cached.get("count", 0)
+
+    count = 0
+    today = _today_str()
+
+    try:
+        if not os.path.isdir(_SESSIONS_DIR):
+            _write_cache("sessions_today", {"count": 0})
+            return 0
+
+        now = time.time()
+        for entry in os.scandir(_SESSIONS_DIR):
+            if not entry.name.endswith(".json") or not entry.is_file():
+                continue
+            # Skip files not modified in the last 24h
+            try:
+                if now - entry.stat().st_mtime > 86400:
+                    continue
+            except OSError:
+                continue
+            try:
+                with open(entry.path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                started_at = data.get("startedAt")
+                if started_at:
+                    session_date = time.strftime(
+                        "%Y-%m-%d", time.localtime(started_at / 1000)
+                    )
+                    if session_date == today:
+                        count += 1
+            except (json.JSONDecodeError, OSError, IOError,
+                    ValueError, TypeError, AttributeError):
+                continue
+    except OSError:
+        pass
+
+    _write_cache("sessions_today", {"count": count})
+    return count
+
+
+def get_session_tool_count(session_id):
+    """Count tool_use entries in a session's JSONL file.
+
+    Scans all project directories for the session JSONL and counts
+    lines containing tool_use content.
+
+    Args:
+        session_id: The session UUID string.
+
+    Returns:
+        Number of tool calls in the session, or 0 if not found.
+    """
+    if not session_id:
+        return 0
+
+    # Validate session_id to prevent path traversal
+    if not _SESSION_ID_RE.match(session_id):
+        return 0
+
+    cache_key = "tools_{}".format(
+        hashlib.md5(session_id.encode("utf-8", errors="replace")).hexdigest()[:12]
+    )
+    cached = _read_cache(cache_key)
+    if cached is not None:
+        return cached.get("count", 0)
+
+    count = 0
+    jsonl_name = "{}.jsonl".format(session_id)
+
+    try:
+        if not os.path.isdir(_PROJECTS_DIR):
+            return 0
+
+        for project in os.listdir(_PROJECTS_DIR):
+            fpath = os.path.join(_PROJECTS_DIR, project, jsonl_name)
+            if os.path.isfile(fpath):
+                try:
+                    with open(fpath, "r", encoding="utf-8",
+                              errors="replace") as f:
+                        for line in f:
+                            # Quick pre-filter before expensive JSON parse
+                            if '"tool_use"' not in line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                            # Count tool_use in message content array
+                            msg = entry.get("message") or {}
+                            content = msg.get("content")
+                            if isinstance(content, list):
+                                for block in content:
+                                    if (isinstance(block, dict)
+                                            and block.get("type") == "tool_use"):
+                                        count += 1
+                except (OSError, IOError):
+                    pass
+                break  # Session only exists in one project
+    except OSError:
+        pass
+
+    _write_cache(cache_key, {"count": count})
+    return count
+
+
+def get_budget_config():
+    """Read daily budget threshold from ~/.claude/claude-status-budget.json.
+
+    Expected format: {"daily_budget_usd": 10.0}
+    Uses 30s cache to avoid hitting disk on every status line render.
+
+    Returns:
+        Budget in USD as float, or None if not configured.
+    """
+    cached = _read_cache("budget_config")
+    if cached is not None:
+        val = cached.get("budget")
+        return float(val) if val is not None else None
+
+    path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        budget = data.get("daily_budget_usd")
+        if budget is not None:
+            budget = float(budget)
+            _write_cache("budget_config", {"budget": budget})
+            return budget
+    except (OSError, IOError, json.JSONDecodeError, ValueError, TypeError):
+        pass
+    _write_cache("budget_config", {"budget": None})
+    return None
