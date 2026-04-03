@@ -164,9 +164,21 @@ def get_session_tool_count(session_id):
                     with open(fpath, "r", encoding="utf-8",
                               errors="replace") as f:
                         for line in f:
-                            if ('"type":"tool_use"' in line
-                                    or '"type": "tool_use"' in line):
-                                count += 1
+                            # Quick pre-filter before expensive JSON parse
+                            if '"tool_use"' not in line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                            # Count tool_use in message content array
+                            msg = entry.get("message") or {}
+                            content = msg.get("content")
+                            if isinstance(content, list):
+                                for block in content:
+                                    if (isinstance(block, dict)
+                                            and block.get("type") == "tool_use"):
+                                        count += 1
                 except (OSError, IOError):
                     pass
                 break  # Session only exists in one project
@@ -181,17 +193,26 @@ def get_budget_config():
     """Read daily budget threshold from ~/.claude/claude-status-budget.json.
 
     Expected format: {"daily_budget_usd": 10.0}
+    Uses 30s cache to avoid hitting disk on every status line render.
 
     Returns:
         Budget in USD as float, or None if not configured.
     """
+    cached = _read_cache("budget_config")
+    if cached is not None:
+        val = cached.get("budget")
+        return float(val) if val is not None else None
+
     path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         budget = data.get("daily_budget_usd")
         if budget is not None:
-            return float(budget)
+            budget = float(budget)
+            _write_cache("budget_config", {"budget": budget})
+            return budget
     except (OSError, IOError, json.JSONDecodeError, ValueError, TypeError):
         pass
+    _write_cache("budget_config", {"budget": None})
     return None

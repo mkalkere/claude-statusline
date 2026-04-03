@@ -262,7 +262,12 @@ def _render_sections(n, order, theme):
                         bc = YELLOW
                     else:
                         bc = GREEN
-                    label = "{}/{}".format(fmt_cost(cost), fmt_cost(budget))
+                    # Format budget as clean dollar amount (no trailing .0)
+                    if budget == int(budget):
+                        budget_str = "${}".format(int(budget))
+                    else:
+                        budget_str = fmt_cost(budget)
+                    label = "{}/{}".format(fmt_cost(cost), budget_str)
                     sections.append(colorize(label, bc, BOLD))
 
     return sections
@@ -342,38 +347,38 @@ def cmd_demo():
     data = _demo_data()
 
     # Mock session functions so demo shows tools/sessions sections
-    _orig_tool_count = get_session_tool_count
-    _orig_session_count = get_today_session_count
     import claude_statusline.cli as _self
+    _orig_tool_count = _self.get_session_tool_count
+    _orig_session_count = _self.get_today_session_count
     _self.get_session_tool_count = lambda sid: 42
     _self.get_today_session_count = lambda: 3
 
-    print("claude-status v{} — theme demos\n".format(__version__))
-    for name in ("default", "minimal", "powerline", "nord", "tokyo-night", "gruvbox", "rose-pine"):
-        print("  {}:".format(name))
-        _print_indented(render(data, name))
+    try:
+        print("claude-status v{} — theme demos\n".format(__version__))
+        for name in ("default", "minimal", "powerline", "nord", "tokyo-night", "gruvbox", "rose-pine"):
+            print("  {}:".format(name))
+            _print_indented(render(data, name))
+            print()
+
+        # Also show warning state
+        warn_data = json.loads(json.dumps(data))
+        warn_data["exceeds_200k_tokens"] = True
+        warn_data["context_window"]["used_percentage"] = 93
+        print("  warning state (93% usage):")
+        _print_indented(render(warn_data, "default"))
         print()
 
-    # Also show warning state
-    warn_data = json.loads(json.dumps(data))
-    warn_data["exceeds_200k_tokens"] = True
-    warn_data["context_window"]["used_percentage"] = 93
-    print("  warning state (93% usage):")
-    _print_indented(render(warn_data, "default"))
-    print()
-
-    # Show with optional fields
-    full_data = json.loads(json.dumps(data))
-    full_data["vim"] = {"mode": "NORMAL"}
-    full_data["agent"] = {"name": "Explore"}
-    full_data["worktree"] = {"branch": "fix/bug-123", "name": "bug-fix"}
-    print("  all fields (vim + agent + worktree):")
-    _print_indented(render(full_data, "default"))
-    print()
-
-    # Restore original functions
-    _self.get_session_tool_count = _orig_tool_count
-    _self.get_today_session_count = _orig_session_count
+        # Show with optional fields
+        full_data = json.loads(json.dumps(data))
+        full_data["vim"] = {"mode": "NORMAL"}
+        full_data["agent"] = {"name": "Explore"}
+        full_data["worktree"] = {"branch": "fix/bug-123", "name": "bug-fix"}
+        print("  all fields (vim + agent + worktree):")
+        _print_indented(render(full_data, "default"))
+        print()
+    finally:
+        _self.get_session_tool_count = _orig_tool_count
+        _self.get_today_session_count = _orig_session_count
 
 
 def cmd_install(theme_name="default"):

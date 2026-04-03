@@ -39,6 +39,8 @@ THEMES = {
             "sessions": colors.CYAN,
         },
     },
+    # Minimal intentionally omits tools, cache, burn, budget, lines, and
+    # context_size to keep output compact — only essential metrics shown.
     "minimal": {
         "name": "minimal",
         "separator": " ",

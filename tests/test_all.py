@@ -954,7 +954,7 @@ class TestSessions(unittest.TestCase):
             sessions_mod._CLAUDE_DIR = orig
 
     def test_get_budget_config_valid(self):
-        from claude_statusline.sessions import get_budget_config
+        from claude_statusline.sessions import get_budget_config, _cache_path
         import claude_statusline.sessions as sessions_mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -964,6 +964,11 @@ class TestSessions(unittest.TestCase):
 
             orig = sessions_mod._CLAUDE_DIR
             sessions_mod._CLAUDE_DIR = tmpdir
+            # Invalidate cache to force re-read from new path
+            try:
+                os.unlink(_cache_path("budget_config"))
+            except OSError:
+                pass
             try:
                 result = get_budget_config()
                 self.assertAlmostEqual(result, 15.0)
@@ -971,7 +976,7 @@ class TestSessions(unittest.TestCase):
                 sessions_mod._CLAUDE_DIR = orig
 
     def test_get_budget_config_invalid_json(self):
-        from claude_statusline.sessions import get_budget_config
+        from claude_statusline.sessions import get_budget_config, _cache_path
         import claude_statusline.sessions as sessions_mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -981,6 +986,10 @@ class TestSessions(unittest.TestCase):
 
             orig = sessions_mod._CLAUDE_DIR
             sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("budget_config"))
+            except OSError:
+                pass
             try:
                 result = get_budget_config()
                 self.assertIsNone(result)
@@ -1031,11 +1040,16 @@ class TestSessions(unittest.TestCase):
             session_id = "test-session-abc123"
             jsonl_file = os.path.join(project_dir, "{}.jsonl".format(session_id))
             with open(jsonl_file, "w") as f:
+                # User message — no tool_use, should not count
                 f.write('{"type":"user","message":{"content":"hello"}}\n')
-                f.write('{"message":{"content":[{"type":"tool_use","name":"Bash"}]}}\n')
+                # Compact JSON tool_use — should count
+                f.write('{"message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}\n')
+                # Text block — should not count
                 f.write('{"message":{"content":[{"type":"text","text":"done"}]}}\n')
-                # Include spaced JSON format to verify both are counted
-                f.write('{"message":{"content":[{"type": "tool_use", "name": "Read"}]}}\n')
+                # Spaced JSON tool_use — should count
+                f.write('{"message":{"content":[{"type": "tool_use", "name": "Read", "input": {}}]}}\n')
+                # False positive guard: message mentioning tool_use in text
+                f.write('{"message":{"content":[{"type":"text","text":"the tool_use type is used"}]}}\n')
 
             orig_projects = sessions_mod._PROJECTS_DIR
             sessions_mod._PROJECTS_DIR = projects_dir
@@ -1074,7 +1088,9 @@ class TestBudgetSection(unittest.TestCase):
             result = render(data)
             # Should contain both current cost and budget formatted
             self.assertIn("$0.95", result)
-            self.assertIn("$1.0", result)
+            # Whole-number budgets should display without trailing .0
+            self.assertIn("$1", result)
+            self.assertNotIn("$1.0", result)
         finally:
             cli_mod.get_budget_config = orig
 
