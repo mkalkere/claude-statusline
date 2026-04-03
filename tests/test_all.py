@@ -1106,10 +1106,11 @@ class TestBudgetSection(unittest.TestCase):
                 "context_window": {"used_percentage": 30,
                                    "current_usage": {"input_tokens": 5000}},
                 "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
             }
             result = render(data)
-            # Should have cost but not budget format (cost/budget)
-            self.assertNotIn("/", result.replace("/min", "").replace("feat/", ""))
+            # Should have cost but not budget format ($X/$Y)
+            self.assertNotIn("/$", result)
         finally:
             cli_mod.get_budget_config = orig
 

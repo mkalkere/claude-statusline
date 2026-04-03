@@ -1,6 +1,6 @@
 # Contributing to claude-status
 
-Thanks for your interest in contributing! Here's how to get started.
+Thanks for your interest in contributing! Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before getting started.
 
 ## Development Setup
 
