@@ -7,6 +7,7 @@ Uses file-based caching to avoid expensive filesystem scans on every render.
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 
@@ -16,13 +17,26 @@ _CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
 _SESSIONS_DIR = os.path.join(_CLAUDE_DIR, "sessions")
 _PROJECTS_DIR = os.path.join(_CLAUDE_DIR, "projects")
 
+# Valid session IDs contain only alphanumeric chars, hyphens, and underscores.
+_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _cache_dir():
+    """Return a user-scoped cache directory to avoid multi-user collisions."""
+    user_hash = hashlib.md5(
+        os.path.expanduser("~").encode("utf-8", "replace")
+    ).hexdigest()[:8]
+    path = os.path.join(tempfile.gettempdir(), "claude_sl_{}".format(user_hash))
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        return tempfile.gettempdir()
+    return path
+
 
 def _cache_path(name):
     """Return a cache file path for a named metric."""
-    return os.path.join(
-        tempfile.gettempdir(),
-        "claude_sl_{}".format(name),
-    )
+    return os.path.join(_cache_dir(), name)
 
 
 def _read_cache(name):
@@ -39,12 +53,18 @@ def _read_cache(name):
 
 
 def _write_cache(name, value):
-    """Write a JSON value to the named cache file."""
+    """Write a JSON value to the named cache file atomically."""
+    target = _cache_path(name)
+    tmp = target + ".tmp"
     try:
-        with open(_cache_path(name), "w") as f:
+        with open(tmp, "w") as f:
             json.dump(value, f)
+        os.replace(tmp, target)
     except (OSError, IOError):
-        pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _today_str():
@@ -57,6 +77,7 @@ def get_today_session_count():
     """Count sessions started today by reading ~/.claude/sessions/*.json.
 
     Each file contains a JSON object with a 'startedAt' timestamp (ms epoch).
+    Uses os.scandir with mtime filtering to skip stale files efficiently.
 
     Returns:
         Number of sessions started today, or 0 on error.
@@ -73,22 +94,28 @@ def get_today_session_count():
             _write_cache("sessions_today", {"count": 0})
             return 0
 
-        for fname in os.listdir(_SESSIONS_DIR):
-            if not fname.endswith(".json"):
+        now = time.time()
+        for entry in os.scandir(_SESSIONS_DIR):
+            if not entry.name.endswith(".json") or not entry.is_file():
                 continue
-            fpath = os.path.join(_SESSIONS_DIR, fname)
+            # Skip files not modified in the last 24h
             try:
-                with open(fpath, "r", encoding="utf-8") as f:
+                if now - entry.stat().st_mtime > 86400:
+                    continue
+            except OSError:
+                continue
+            try:
+                with open(entry.path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 started_at = data.get("startedAt")
                 if started_at:
-                    # Convert ms epoch to date string
                     session_date = time.strftime(
                         "%Y-%m-%d", time.localtime(started_at / 1000)
                     )
                     if session_date == today:
                         count += 1
-            except (json.JSONDecodeError, OSError, IOError, ValueError):
+            except (json.JSONDecodeError, OSError, IOError,
+                    ValueError, TypeError, AttributeError):
                 continue
     except OSError:
         pass
@@ -112,6 +139,10 @@ def get_session_tool_count(session_id):
     if not session_id:
         return 0
 
+    # Validate session_id to prevent path traversal
+    if not _SESSION_ID_RE.match(session_id):
+        return 0
+
     cache_key = "tools_{}".format(
         hashlib.md5(session_id.encode("utf-8", errors="replace")).hexdigest()[:12]
     )
@@ -130,9 +161,11 @@ def get_session_tool_count(session_id):
             fpath = os.path.join(_PROJECTS_DIR, project, jsonl_name)
             if os.path.isfile(fpath):
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    with open(fpath, "r", encoding="utf-8",
+                              errors="replace") as f:
                         for line in f:
-                            if '"tool_use"' in line and '"type"' in line:
+                            if ('"type":"tool_use"' in line
+                                    or '"type": "tool_use"' in line):
                                 count += 1
                 except (OSError, IOError):
                     pass

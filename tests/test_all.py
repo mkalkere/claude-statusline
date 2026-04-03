@@ -926,6 +926,22 @@ class TestSessions(unittest.TestCase):
         result = get_session_tool_count("nonexistent-session-id-12345")
         self.assertEqual(result, 0)
 
+    def test_get_session_tool_count_path_traversal(self):
+        """Session IDs with path separators should be rejected."""
+        from claude_statusline.sessions import get_session_tool_count
+        self.assertEqual(get_session_tool_count("../../etc/passwd"), 0)
+        self.assertEqual(get_session_tool_count("foo/bar"), 0)
+        self.assertEqual(get_session_tool_count("foo\\bar"), 0)
+
+    def test_cache_path_is_user_scoped(self):
+        """Cache files should be in a user-specific directory."""
+        from claude_statusline.sessions import _cache_path
+        path = _cache_path("test")
+        # Should contain a hash-based subdirectory, not be flat in /tmp
+        self.assertIn("claude_sl_", path)
+        parent = os.path.basename(os.path.dirname(path))
+        self.assertTrue(parent.startswith("claude_sl_"))
+
     def test_get_budget_config_no_file(self):
         from claude_statusline.sessions import get_budget_config
         import claude_statusline.sessions as sessions_mod
