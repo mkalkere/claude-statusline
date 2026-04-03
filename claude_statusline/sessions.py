@@ -12,6 +12,7 @@ import tempfile
 import time
 
 _CACHE_TTL = 30  # seconds — longer than git cache since this is heavier
+_TOOL_CACHE_TTL = 10  # seconds — shorter for active session metrics
 
 _CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
 _SESSIONS_DIR = os.path.join(_CLAUDE_DIR, "sessions")
@@ -39,12 +40,12 @@ def _cache_path(name):
     return os.path.join(_cache_dir(), name)
 
 
-def _read_cache(name):
+def _read_cache(name, ttl=None):
     """Read a cached JSON value if still fresh."""
     try:
         path = _cache_path(name)
         stat = os.stat(path)
-        if time.time() - stat.st_mtime > _CACHE_TTL:
+        if time.time() - stat.st_mtime > (ttl or _CACHE_TTL):
             return None
         with open(path, "r") as f:
             return json.load(f)
@@ -52,8 +53,15 @@ def _read_cache(name):
         return None
 
 
+_last_cleanup = 0
+
+
 def _write_cache(name, value):
-    """Write a JSON value to the named cache file atomically."""
+    """Write a JSON value to the named cache file atomically.
+
+    Periodically cleans up stale cache files (at most once per hour).
+    """
+    global _last_cleanup
     target = _cache_path(name)
     tmp = target + ".tmp"
     try:
@@ -65,6 +73,28 @@ def _write_cache(name, value):
             os.unlink(tmp)
         except OSError:
             pass
+
+    # Periodic cleanup (at most once per hour)
+    now = time.time()
+    if now - _last_cleanup > 3600:
+        _last_cleanup = now
+        _cleanup_stale_cache()
+
+
+def _cleanup_stale_cache():
+    """Remove cache files older than 2 days to prevent accumulation."""
+    try:
+        cache_dir = _cache_dir()
+        now = time.time()
+        for entry in os.scandir(cache_dir):
+            if entry.is_file() and not entry.name.endswith(".tmp"):
+                try:
+                    if now - entry.stat().st_mtime > 172800:  # 2 days
+                        os.unlink(entry.path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 
 def _today_str():
@@ -82,16 +112,17 @@ def get_today_session_count():
     Returns:
         Number of sessions started today, or 0 on error.
     """
-    cached = _read_cache("sessions_today")
+    today = _today_str()
+    cache_key = "sessions_{}".format(today)
+    cached = _read_cache(cache_key)
     if cached is not None:
         return cached.get("count", 0)
 
     count = 0
-    today = _today_str()
 
     try:
         if not os.path.isdir(_SESSIONS_DIR):
-            _write_cache("sessions_today", {"count": 0})
+            _write_cache(cache_key, {"count": 0})
             return 0
 
         now = time.time()
@@ -120,7 +151,7 @@ def get_today_session_count():
     except OSError:
         pass
 
-    _write_cache("sessions_today", {"count": count})
+    _write_cache(cache_key, {"count": count})
     return count
 
 
@@ -146,7 +177,7 @@ def get_session_tool_count(session_id):
     cache_key = "tools_{}".format(
         hashlib.md5(session_id.encode("utf-8", errors="replace")).hexdigest()[:12]
     )
-    cached = _read_cache(cache_key)
+    cached = _read_cache(cache_key, ttl=_TOOL_CACHE_TTL)
     if cached is not None:
         return cached.get("count", 0)
 

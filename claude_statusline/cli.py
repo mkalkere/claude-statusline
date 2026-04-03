@@ -43,6 +43,14 @@ def _settings_path():
     return os.path.join(home, ".claude", "settings.json")
 
 
+def _first(*vals):
+    """Return the first value that is not None."""
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
 def _normalize(data):
     """Normalize Claude Code JSON into a flat dict for rendering.
 
@@ -56,29 +64,29 @@ def _normalize(data):
     cu = cw.get("current_usage") or {}
     flat_usage = data.get("current_usage") or {}
 
-    out["used_percentage"] = cw.get("used_percentage") or flat_usage.get("used_percentage")
-    out["input_tokens"] = cu.get("input_tokens") or flat_usage.get("input_tokens")
-    out["output_tokens"] = cu.get("output_tokens") or flat_usage.get("output_tokens")
-    out["cache_read"] = (
-        cu.get("cache_read_input_tokens")
-        or flat_usage.get("cache_read_tokens")
+    out["used_percentage"] = _first(cw.get("used_percentage"), flat_usage.get("used_percentage"))
+    out["input_tokens"] = _first(cu.get("input_tokens"), flat_usage.get("input_tokens"))
+    out["output_tokens"] = _first(cu.get("output_tokens"), flat_usage.get("output_tokens"))
+    out["cache_read"] = _first(
+        cu.get("cache_read_input_tokens"),
+        flat_usage.get("cache_read_tokens"),
     )
-    out["cache_create"] = (
-        cu.get("cache_creation_input_tokens")
-        or flat_usage.get("cache_create_tokens")
+    out["cache_create"] = _first(
+        cu.get("cache_creation_input_tokens"),
+        flat_usage.get("cache_create_tokens"),
     )
-    out["context_size"] = (
-        cw.get("context_window_size")
-        or flat_usage.get("context_size")
+    out["context_size"] = _first(
+        cw.get("context_window_size"),
+        flat_usage.get("context_size"),
     )
 
     # Cost (nested or flat)
     cost_obj = data.get("cost") or {}
-    out["cost"] = cost_obj.get("total_cost_usd") or data.get("cost_usd")
-    out["duration"] = cost_obj.get("total_duration_ms") or data.get("session_duration_ms")
-    out["api_duration"] = cost_obj.get("total_api_duration_ms") or data.get("api_duration_ms")
-    out["lines_added"] = cost_obj.get("total_lines_added") or data.get("lines_added")
-    out["lines_removed"] = cost_obj.get("total_lines_removed") or data.get("lines_removed")
+    out["cost"] = _first(cost_obj.get("total_cost_usd"), data.get("cost_usd"))
+    out["duration"] = _first(cost_obj.get("total_duration_ms"), data.get("session_duration_ms"))
+    out["api_duration"] = _first(cost_obj.get("total_api_duration_ms"), data.get("api_duration_ms"))
+    out["lines_added"] = _first(cost_obj.get("total_lines_added"), data.get("lines_added"))
+    out["lines_removed"] = _first(cost_obj.get("total_lines_removed"), data.get("lines_removed"))
 
     # Booleans
     out["exceeds_200k"] = data.get("exceeds_200k_tokens", False)
@@ -149,7 +157,7 @@ def _render_sections(n, order, theme):
     pct = n["used_percentage"]
 
     total_input = (input_tokens or 0) + (cache_read or 0) + (cache_create or 0)
-    total_tokens = (input_tokens or 0) + (output_tokens or 0) + (cache_read or 0)
+    total_tokens = (input_tokens or 0) + (output_tokens or 0) + (cache_read or 0) + (cache_create or 0)
 
     for section in order:
         if section == "bar" and pct is not None:
@@ -318,7 +326,7 @@ _COMPACT_DROP = [
     "sessions", "tools", "latency", "context_size",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
-    "cache", "burn", "lines", "budget", "agent",
+    "cache", "burn", "lines", "budget", "agent", "model",
 ]
 
 
@@ -470,7 +478,9 @@ def cmd_install(theme_name="default"):
             with open(settings_file, "r", encoding="utf-8") as f:
                 settings = json.load(f)
         except (json.JSONDecodeError, IOError):
-            print("Warning: could not parse existing settings.json, creating new one")
+            print("Warning: could not parse existing settings.json")
+            print("  Backup saved to: {}.bak".format(settings_file))
+            print("  Creating new settings with statusLine config only")
 
     # Build command
     cmd = "claude-status"
@@ -648,7 +658,8 @@ def main():
                         choices=["default", "minimal", "powerline",
                                  "nord", "tokyo-night", "gruvbox", "rose-pine",
                                  "custom"],
-                        help="Theme to use (default: default). "
+                        help="Theme for this render (default: default). "
+                             "Use --install --theme NAME or --setup to persist. "
                              "'custom' loads ~/.claude/claude-status-theme.json")
 
     args = parser.parse_args()

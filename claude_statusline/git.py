@@ -8,6 +8,7 @@ import tempfile
 import time
 
 _CACHE_TTL = 5  # seconds
+_NO_GIT_CACHE_TTL = 60  # seconds — longer TTL when git is not available
 
 
 def _cache_file():
@@ -25,14 +26,21 @@ def _cache_file():
 
 
 def _read_cache():
-    """Read cached git branch if still fresh."""
+    """Read cached git branch if still fresh.
+
+    Uses a longer TTL for empty values (git not available) to avoid
+    repeated subprocess timeouts on systems without git.
+    """
     try:
         path = _cache_file()
         stat = os.stat(path)
-        if time.time() - stat.st_mtime > _CACHE_TTL:
-            return None
         with open(path, "r") as f:
-            return f.read().strip()
+            value = f.read().strip()
+        # Use longer TTL when git is not available (empty cache)
+        ttl = _NO_GIT_CACHE_TTL if not value else _CACHE_TTL
+        if time.time() - stat.st_mtime > ttl:
+            return None
+        return value
     except (OSError, IOError):
         return None
 
