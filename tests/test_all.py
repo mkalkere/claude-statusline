@@ -454,6 +454,32 @@ class TestRender(unittest.TestCase):
         self.assertNotIn("Opus", result)
         self.assertNotIn("Sonnet", result)
 
+    def test_zero_values_not_dropped(self):
+        """Zero values should be preserved, not treated as None."""
+        data = {
+            "context_window": {
+                "used_percentage": 0,
+                "context_window_size": 200_000,
+                "current_usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+            },
+            "cost": {
+                "total_cost_usd": 0,
+                "total_duration_ms": 0,
+                "total_lines_added": 0,
+                "total_lines_removed": 0,
+            },
+            "git_branch": "main",
+        }
+        result = render(data)
+        self.assertIsInstance(result, str)
+        # Cost of 0 should render as "0c" not disappear
+        self.assertIn("0c", result)
+
     def test_real_schema_full(self):
         """Test with a complete real Claude Code JSON payload."""
         data = {
@@ -1019,7 +1045,8 @@ class TestSessions(unittest.TestCase):
             sessions_mod._SESSIONS_DIR = sessions_dir
 
             # Clear cache to force re-read
-            _write_cache("sessions_today", None)
+            # Clear date-keyed cache
+            _write_cache("sessions_{}".format(time.strftime("%Y-%m-%d")), None)
 
             try:
                 count = get_today_session_count()
@@ -1401,7 +1428,7 @@ class TestResponsiveLayout(unittest.TestCase):
         """Narrow terminal (<80) should show only essentials."""
         from claude_statusline.cli import _apply_responsive
         sections = ["bar", "tokens", "cache", "cost", "burn",
-                    "git_extras", "version", "clock", "lines", "budget"]
+                    "git_extras", "version", "clock", "lines", "budget", "model"]
         result = _apply_responsive(sections, 60)
         self.assertIn("bar", result)
         self.assertIn("tokens", result)
@@ -1410,6 +1437,7 @@ class TestResponsiveLayout(unittest.TestCase):
         self.assertNotIn("burn", result)
         self.assertNotIn("lines", result)
         self.assertNotIn("budget", result)
+        self.assertNotIn("model", result)
 
 
 if __name__ == "__main__":

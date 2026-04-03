@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-04-03
+
+### Fixed
+- **Critical**: `_normalize()` no longer drops zero values — `0` for cost, tokens, duration, etc. is now correctly preserved instead of being treated as `None`
+- **Critical**: `--theme` help text now clarifies it's per-render only; directs users to `--install --theme` or `--setup` for persistence
+- Burn rate calculation now includes `cache_create` tokens — previously understated consumption
+- Bar color with compaction threshold uses raw context percentage — no more misleading red bar at 55% actual usage
+- Session count cache key includes date — prevents stale counts across midnight
+- Tool count cache TTL reduced from 30s to 10s — more responsive during active sessions
+- Git cache uses 60s TTL for "not available" state — avoids repeated subprocess timeouts when git is missing
+- Corrupt `settings.json` warning now mentions the `.bak` backup file
+- Narrow layout (<80 cols) drops `model` section to prevent line wrapping
+
 ## [0.2.1] - 2026-04-03
 
 ### Added

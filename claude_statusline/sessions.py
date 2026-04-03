@@ -12,6 +12,7 @@ import tempfile
 import time
 
 _CACHE_TTL = 30  # seconds — longer than git cache since this is heavier
+_TOOL_CACHE_TTL = 10  # seconds — shorter for active session metrics
 
 _CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
 _SESSIONS_DIR = os.path.join(_CLAUDE_DIR, "sessions")
@@ -39,12 +40,12 @@ def _cache_path(name):
     return os.path.join(_cache_dir(), name)
 
 
-def _read_cache(name):
+def _read_cache(name, ttl=None):
     """Read a cached JSON value if still fresh."""
     try:
         path = _cache_path(name)
         stat = os.stat(path)
-        if time.time() - stat.st_mtime > _CACHE_TTL:
+        if time.time() - stat.st_mtime > (ttl or _CACHE_TTL):
             return None
         with open(path, "r") as f:
             return json.load(f)
@@ -82,16 +83,17 @@ def get_today_session_count():
     Returns:
         Number of sessions started today, or 0 on error.
     """
-    cached = _read_cache("sessions_today")
+    today = _today_str()
+    cache_key = "sessions_{}".format(today)
+    cached = _read_cache(cache_key)
     if cached is not None:
         return cached.get("count", 0)
 
     count = 0
-    today = _today_str()
 
     try:
         if not os.path.isdir(_SESSIONS_DIR):
-            _write_cache("sessions_today", {"count": 0})
+            _write_cache(cache_key, {"count": 0})
             return 0
 
         now = time.time()
@@ -120,7 +122,7 @@ def get_today_session_count():
     except OSError:
         pass
 
-    _write_cache("sessions_today", {"count": count})
+    _write_cache(cache_key, {"count": count})
     return count
 
 
@@ -146,7 +148,7 @@ def get_session_tool_count(session_id):
     cache_key = "tools_{}".format(
         hashlib.md5(session_id.encode("utf-8", errors="replace")).hexdigest()[:12]
     )
-    cached = _read_cache(cache_key)
+    cached = _read_cache(cache_key, ttl=_TOOL_CACHE_TTL)
     if cached is not None:
         return cached.get("count", 0)
 
