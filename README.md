@@ -224,6 +224,9 @@ Tokens consumed per minute — a metric unique to claude-status. Helps you gauge
 **Does it add any latency to Claude Code?**
 No. It runs as a pure stdin-to-stdout pipe in single-digit milliseconds. No daemon, no network calls, no background processes.
 
+**Why does the session count seem low on Windows with WSL?**
+Windows and WSL have separate `~/.claude/` directories, so sessions are counted independently. The status line shows sessions from the platform it's running on.
+
 ## Troubleshooting
 
 If claude-status doesn't appear after installation:
