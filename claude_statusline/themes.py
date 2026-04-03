@@ -18,8 +18,9 @@ THEMES = {
             "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "tools", "sessions",
-            "vim", "agent", "worktree", "model",
+            "duration", "latency", "lines", "branch", "git_extras",
+            "tools", "sessions", "vim", "agent", "worktree", "model",
+            "version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -37,6 +38,10 @@ THEMES = {
             "model": colors.BRIGHT_MAGENTA,
             "latency": colors.CYAN,
             "sessions": colors.CYAN,
+            "version": colors.BRIGHT_BLACK,
+            "clock": colors.BRIGHT_BLACK,
+            "git_stash": colors.YELLOW,
+            "git_sync": colors.BRIGHT_BLACK,
         },
     },
     # Minimal intentionally omits tools, cache, burn, budget, lines, and
@@ -52,7 +57,7 @@ THEMES = {
             "bar", "tokens", "cost", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "branch", "sessions", "model",
+            "duration", "latency", "branch", "sessions", "model", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -70,6 +75,10 @@ THEMES = {
             "model": colors.BRIGHT_MAGENTA,
             "latency": colors.CYAN,
             "sessions": colors.CYAN,
+            "version": colors.BRIGHT_BLACK,
+            "clock": colors.BRIGHT_BLACK,
+            "git_stash": colors.YELLOW,
+            "git_sync": colors.BRIGHT_BLACK,
         },
     },
     "powerline": {
@@ -83,8 +92,9 @@ THEMES = {
             "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "tools", "sessions",
-            "vim", "agent", "worktree", "model",
+            "duration", "latency", "lines", "branch", "git_extras",
+            "tools", "sessions", "vim", "agent", "worktree", "model",
+            "version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -102,6 +112,10 @@ THEMES = {
             "model": colors.BRIGHT_MAGENTA,
             "latency": colors.CYAN,
             "sessions": colors.CYAN,
+            "version": colors.BRIGHT_BLACK,
+            "clock": colors.BRIGHT_BLACK,
+            "git_stash": colors.YELLOW,
+            "git_sync": colors.BRIGHT_BLACK,
         },
     },
     "nord": {
@@ -115,8 +129,9 @@ THEMES = {
             "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "tools", "sessions",
-            "vim", "agent", "worktree", "model",
+            "duration", "latency", "lines", "branch", "git_extras",
+            "tools", "sessions", "vim", "agent", "worktree", "model",
+            "version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -134,6 +149,10 @@ THEMES = {
             "model": colors.BRIGHT_CYAN,
             "latency": colors.BRIGHT_BLUE,
             "sessions": colors.BRIGHT_CYAN,
+            "version": colors.BRIGHT_BLACK,
+            "clock": colors.BRIGHT_BLACK,
+            "git_stash": colors.BRIGHT_YELLOW,
+            "git_sync": colors.BRIGHT_BLACK,
         },
     },
     "tokyo-night": {
@@ -147,8 +166,9 @@ THEMES = {
             "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "tools", "sessions",
-            "vim", "agent", "worktree", "model",
+            "duration", "latency", "lines", "branch", "git_extras",
+            "tools", "sessions", "vim", "agent", "worktree", "model",
+            "version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -166,6 +186,10 @@ THEMES = {
             "model": colors.BRIGHT_MAGENTA,
             "latency": colors.BRIGHT_CYAN,
             "sessions": colors.BRIGHT_CYAN,
+            "version": colors.BRIGHT_BLACK,
+            "clock": colors.BRIGHT_BLACK,
+            "git_stash": colors.BRIGHT_YELLOW,
+            "git_sync": colors.BRIGHT_BLACK,
         },
     },
     "gruvbox": {
@@ -179,8 +203,9 @@ THEMES = {
             "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "tools", "sessions",
-            "vim", "agent", "worktree", "model",
+            "duration", "latency", "lines", "branch", "git_extras",
+            "tools", "sessions", "vim", "agent", "worktree", "model",
+            "version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -198,6 +223,10 @@ THEMES = {
             "model": colors.BRIGHT_MAGENTA,
             "latency": colors.CYAN,
             "sessions": colors.BRIGHT_CYAN,
+            "version": colors.BRIGHT_BLACK,
+            "clock": colors.BRIGHT_BLACK,
+            "git_stash": colors.YELLOW,
+            "git_sync": colors.BRIGHT_BLACK,
         },
     },
     "rose-pine": {
@@ -211,8 +240,9 @@ THEMES = {
             "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "tools", "sessions",
-            "vim", "agent", "worktree", "model",
+            "duration", "latency", "lines", "branch", "git_extras",
+            "tools", "sessions", "vim", "agent", "worktree", "model",
+            "version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -230,6 +260,10 @@ THEMES = {
             "model": colors.MAGENTA,
             "latency": colors.CYAN,
             "sessions": colors.CYAN,
+            "version": colors.BRIGHT_BLACK,
+            "clock": colors.BRIGHT_BLACK,
+            "git_stash": colors.YELLOW,
+            "git_sync": colors.BRIGHT_BLACK,
         },
     },
 }

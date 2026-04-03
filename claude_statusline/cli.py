@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import sys
+import time
 
 from . import __version__
 from .bar import render_bar
@@ -16,8 +17,11 @@ from .colors import (
 from .formatters import (
     fmt_burn_rate, fmt_cache_pct, fmt_cost, fmt_duration, fmt_lines, fmt_tokens,
 )
-from .git import get_branch
-from .sessions import get_budget_config, get_session_tool_count, get_today_session_count
+from .git import get_branch, get_git_extras
+from .sessions import (
+    get_budget_config, get_compaction_threshold,
+    get_session_tool_count, get_today_session_count,
+)
 from .themes import THEMES, get_theme
 
 # Percentage of context window usage that triggers the !CTX warning.
@@ -149,7 +153,8 @@ def _render_sections(n, order, theme):
 
     for section in order:
         if section == "bar" and pct is not None:
-            sections.append(render_bar(pct, 20, theme))
+            compaction = get_compaction_threshold()
+            sections.append(render_bar(pct, 20, theme, compaction))
 
         elif section == "tokens" and (input_tokens is not None or output_tokens is not None):
             inp = fmt_tokens(input_tokens)
@@ -270,14 +275,78 @@ def _render_sections(n, order, theme):
                     label = "{}/{}".format(fmt_cost(cost), budget_str)
                     sections.append(colorize(label, bc, BOLD))
 
+        elif section == "version":
+            vc = tc.get("version", BRIGHT_BLACK)
+            sections.append(colorize("v" + __version__, vc))
+
+        elif section == "clock":
+            cc = tc.get("clock", BRIGHT_BLACK)
+            sections.append(colorize(time.strftime("%H:%M"), cc))
+
+        elif section == "git_extras":
+            branch = n["git_branch"] or get_branch()
+            if branch:
+                extras = get_git_extras()
+                parts = []
+                if extras.get("stash", 0) > 0:
+                    parts.append(colorize(
+                        "stash:{}".format(extras["stash"]),
+                        tc.get("git_stash", YELLOW)
+                    ))
+                ahead = extras.get("ahead", 0)
+                behind = extras.get("behind", 0)
+                if ahead or behind:
+                    sync_parts = []
+                    if ahead:
+                        sync_parts.append("+{}".format(ahead))
+                    if behind:
+                        sync_parts.append("-{}".format(behind))
+                    sc = tc.get("git_sync", BRIGHT_BLACK)
+                    parts.append(colorize(
+                        "sync:" + "/".join(sync_parts), sc
+                    ))
+                if parts:
+                    sections.append(" ".join(parts))
+
     return sections
+
+
+# Sections to drop at each width breakpoint (widest first).
+# Below 120 cols: drop least-essential sections progressively.
+_COMPACT_DROP = [
+    "git_extras", "version", "clock", "worktree",
+    "sessions", "tools", "latency", "context_size",
+]
+_NARROW_DROP = _COMPACT_DROP + [
+    "cache", "burn", "lines", "budget", "agent",
+]
+
+
+def _apply_responsive(sections_list, term_width):
+    """Filter section list based on terminal width.
+
+    >= 120 cols: full layout (no changes)
+    80-119 cols: compact (drop non-essential extras)
+    < 80 cols:   narrow (essentials only)
+    """
+    if term_width >= 120:
+        return sections_list
+
+    if term_width >= 80:
+        drop = set(_COMPACT_DROP)
+    else:
+        drop = set(_NARROW_DROP)
+
+    return [s for s in sections_list if s not in drop]
 
 
 def render(data, theme_name="default"):
     """Render the statusline as one or two lines.
 
-    Line 1: context bar, tokens, cache, cost, burn rate, context size, warnings
-    Line 2: duration, lines changed, git branch, vim mode, agent, worktree
+    Automatically adapts layout based on terminal width:
+    - >= 120 cols: full detail
+    - 80-119 cols: compact (drops extras like git_extras, version, clock)
+    - < 80 cols: narrow (essentials only — bar, tokens, cost, duration, branch)
 
     Args:
         data: Parsed JSON dict from Claude Code.
@@ -290,8 +359,12 @@ def render(data, theme_name="default"):
     n = _normalize(data)
     sep = colorize(theme["separator"], theme["colors"]["separator"])
 
-    line1_sections = _render_sections(n, theme["line1"], theme)
-    line2_sections = _render_sections(n, theme["line2"], theme)
+    term_width = shutil.get_terminal_size((120, 24)).columns
+    line1 = _apply_responsive(theme["line1"], term_width)
+    line2 = _apply_responsive(theme["line2"], term_width)
+
+    line1_sections = _render_sections(n, line1, theme)
+    line2_sections = _render_sections(n, line2, theme)
 
     lines = []
     if line1_sections:

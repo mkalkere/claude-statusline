@@ -17,19 +17,27 @@ def _bar_color(pct):
     return colors.RED
 
 
-def render_bar(pct, width=20, theme=None):
+def render_bar(pct, width=20, theme=None, compaction_threshold=None):
     """Render a progress bar with adaptive coloring.
 
     Args:
         pct: Percentage (0-100) of context used.
         width: Character width of the bar.
         theme: Optional theme dict with 'bar_filled' and 'bar_empty' chars.
+        compaction_threshold: Optional percentage (0-100) at which context
+            compaction triggers. When set, the bar scales relative to this
+            threshold so 100% of the bar = compaction point.
 
     Returns:
         Colored string like [████████░░░░░░░░░░░░]
     """
     if pct is None:
         return ""
+
+    # Scale relative to compaction threshold if configured
+    if compaction_threshold and 0 < compaction_threshold <= 100:
+        pct = (pct / compaction_threshold) * 100
+
     pct = max(0, min(100, int(pct)))
 
     filled_char = "█"
