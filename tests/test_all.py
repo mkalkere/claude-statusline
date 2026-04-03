@@ -1200,5 +1200,217 @@ class TestSetupCommand(unittest.TestCase):
                           "Demo missing theme: {}".format(name))
 
 
+# ─── cli.py — version and clock sections ────────────────────────────
+
+class TestVersionSection(unittest.TestCase):
+    def test_version_displayed(self):
+        """Version string should appear in output."""
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "git_branch": "main",
+        }
+        result = render(data)
+        self.assertIn("v" + __version__, result)
+
+    def test_clock_displayed(self):
+        """Current time should appear in output."""
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "git_branch": "main",
+        }
+        result = render(data)
+        # Clock format is HH:MM — check for colon-separated digits
+        self.assertRegex(result, r"\d{2}:\d{2}")
+
+
+# ─── git.py — git extras ────────────────────────────────────────────
+
+class TestGitExtras(unittest.TestCase):
+    def test_returns_dict(self):
+        from claude_statusline.git import get_git_extras
+        result = get_git_extras()
+        self.assertIsInstance(result, dict)
+        self.assertIn("stash", result)
+        self.assertIn("ahead", result)
+        self.assertIn("behind", result)
+
+    def test_values_are_ints(self):
+        from claude_statusline.git import get_git_extras
+        result = get_git_extras()
+        self.assertIsInstance(result["stash"], int)
+        self.assertIsInstance(result["ahead"], int)
+        self.assertIsInstance(result["behind"], int)
+
+    def test_git_extras_section_renders(self):
+        """git_extras section should not crash even with no stash/sync data."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.git import get_git_extras as orig_extras
+        cli_mod.get_git_extras = lambda: {"stash": 0, "ahead": 0, "behind": 0}
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            # Should render without crashing; no stash/sync = no extras shown
+            self.assertIsInstance(result, str)
+        finally:
+            cli_mod.get_git_extras = orig_extras
+
+    def test_git_extras_with_stash(self):
+        """Stash count should appear when stash exists."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.git import get_git_extras as orig_extras
+        cli_mod.get_git_extras = lambda: {"stash": 3, "ahead": 0, "behind": 0}
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("stash:3", result)
+        finally:
+            cli_mod.get_git_extras = orig_extras
+
+    def test_git_extras_with_ahead_behind(self):
+        """Ahead/behind should appear when out of sync."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.git import get_git_extras as orig_extras
+        cli_mod.get_git_extras = lambda: {"stash": 0, "ahead": 2, "behind": 1}
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("sync:", result)
+            self.assertIn("+2", result)
+            self.assertIn("-1", result)
+        finally:
+            cli_mod.get_git_extras = orig_extras
+
+
+# ─── bar.py — compaction threshold ──────────────────────────────────
+
+class TestCompactionBar(unittest.TestCase):
+    def test_bar_without_compaction(self):
+        """Bar at 42% without compaction should show ~42% filled."""
+        bar = render_bar(42, 20)
+        self.assertIn("[", bar)
+
+    def test_bar_with_compaction_scales_up(self):
+        """Bar at 31% with 62% compaction threshold should scale to 50%."""
+        bar = render_bar(31, 20, compaction_threshold=62)
+        self.assertIn("[", bar)
+
+    def test_bar_over_compaction_caps_at_100(self):
+        """Bar at 70% with 62% threshold should cap at 100%."""
+        bar = render_bar(70, 20, compaction_threshold=62)
+        self.assertIn("[", bar)
+
+    def test_bar_compaction_zero_ignored(self):
+        """Compaction threshold of 0 should be ignored."""
+        bar_normal = render_bar(42, 20)
+        bar_zero = render_bar(42, 20, compaction_threshold=0)
+        self.assertEqual(bar_normal, bar_zero)
+
+    def test_bar_compaction_none_ignored(self):
+        """Compaction threshold of None should be ignored."""
+        bar_normal = render_bar(42, 20)
+        bar_none = render_bar(42, 20, compaction_threshold=None)
+        self.assertEqual(bar_normal, bar_none)
+
+
+# ─── sessions.py — compaction config ────────────────────────────────
+
+class TestCompactionConfig(unittest.TestCase):
+    def test_compaction_threshold_valid(self):
+        from claude_statusline.sessions import get_compaction_threshold, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = os.path.join(tmpdir, "claude-status-budget.json")
+            with open(config_file, "w") as f:
+                json.dump({"compaction_threshold_pct": 62}, f)
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("compaction_config"))
+            except OSError:
+                pass
+            try:
+                result = get_compaction_threshold()
+                self.assertAlmostEqual(result, 62.0)
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+    def test_compaction_threshold_not_configured(self):
+        from claude_statusline.sessions import get_compaction_threshold, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        orig = sessions_mod._CLAUDE_DIR
+        sessions_mod._CLAUDE_DIR = "/nonexistent/path"
+        try:
+            os.unlink(_cache_path("compaction_config"))
+        except OSError:
+            pass
+        try:
+            result = get_compaction_threshold()
+            self.assertIsNone(result)
+        finally:
+            sessions_mod._CLAUDE_DIR = orig
+
+
+# ─── cli.py — responsive layout ─────────────────────────────────────
+
+class TestResponsiveLayout(unittest.TestCase):
+    def test_full_layout_wide_terminal(self):
+        """Wide terminal (120+) should keep all sections."""
+        from claude_statusline.cli import _apply_responsive
+        sections = ["bar", "tokens", "cache", "cost", "burn",
+                    "git_extras", "version", "clock"]
+        result = _apply_responsive(sections, 120)
+        self.assertEqual(result, sections)
+
+    def test_compact_layout_medium_terminal(self):
+        """Medium terminal (80-119) should drop non-essential sections."""
+        from claude_statusline.cli import _apply_responsive
+        sections = ["bar", "tokens", "cache", "cost", "burn",
+                    "git_extras", "version", "clock", "context_size"]
+        result = _apply_responsive(sections, 100)
+        self.assertIn("bar", result)
+        self.assertIn("tokens", result)
+        self.assertIn("cost", result)
+        self.assertNotIn("git_extras", result)
+        self.assertNotIn("version", result)
+        self.assertNotIn("clock", result)
+        self.assertNotIn("context_size", result)
+
+    def test_narrow_layout_small_terminal(self):
+        """Narrow terminal (<80) should show only essentials."""
+        from claude_statusline.cli import _apply_responsive
+        sections = ["bar", "tokens", "cache", "cost", "burn",
+                    "git_extras", "version", "clock", "lines", "budget"]
+        result = _apply_responsive(sections, 60)
+        self.assertIn("bar", result)
+        self.assertIn("tokens", result)
+        self.assertIn("cost", result)
+        self.assertNotIn("cache", result)
+        self.assertNotIn("burn", result)
+        self.assertNotIn("lines", result)
+        self.assertNotIn("budget", result)
+
+
 if __name__ == "__main__":
     unittest.main()

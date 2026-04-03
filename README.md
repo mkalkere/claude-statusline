@@ -11,7 +11,7 @@
 
 ```
 Line 1:  [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ $0.73/$10 │ burn:36K/min │ (200K)
-Line 2:  12m05s │ api:5m12s │ +247 -38 │ ⎇ myapp/feat/statusline │ tools:42 │ sessions:3 │ Opus 4.6 (1M context)
+Line 2:  12m05s │ api:5m12s │ +247 -38 │ ⎇ myapp/feat/statusline │ stash:2 │ tools:42 │ sessions:3 │ Opus │ v0.2.1 │ 15:30
 ```
 
 ## Quick Start
@@ -27,7 +27,8 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 
 - **Zero dependencies** — pure Python stdlib. No `psutil`, no `colorama`, no compilation. Installs in under 2 seconds
 - **Two-line layout** — glanceable metrics on line 1, context details on line 2. Nothing gets truncated
-- **Every metric that matters** — 17 data points including burn rate (tokens/min), a metric no other statusline tracks
+- **Every metric that matters** — 20 data points including burn rate (tokens/min), a metric no other statusline tracks
+- **Responsive layout** — automatically adapts to your terminal width (full/compact/narrow)
 - **7 built-in themes** — default, minimal, powerline, nord, tokyo-night, gruvbox, rose-pine
 - **Budget monitoring** — set a daily spend limit, get color-coded warnings as you approach it
 - **Session analytics** — tool call count and today's session count at a glance
@@ -55,12 +56,16 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 | API Latency | `api:5m12s` | Time spent in API calls |
 | Lines Changed | `+247 -38` | Git-diff style — green additions, red removals |
 | Git Branch | `⎇ feat/statusline` | Green for main/master, yellow for feature branches |
+| Git Stash | `stash:2` | Number of stashed changes |
+| Git Sync | `sync:+2/-1` | Commits ahead/behind remote |
 | Tool Calls | `tools:42` | Number of tool calls in current session |
 | Sessions Today | `sessions:3` | How many sessions you've started today |
 | Vim Mode | `NORMAL` | Blue for NORMAL, green for INSERT (when vim mode is on) |
 | Agent | `[Explore]` | Shows which subagent is active |
 | Worktree | `wt:fix/bug-123` | Worktree branch indicator |
 | Model | `Opus 4.6 (1M context)` | Active model name |
+| Version | `v0.2.1` | claude-status version |
+| Clock | `15:30` | Current time |
 
 ## Themes
 
@@ -159,6 +164,26 @@ The budget indicator changes color based on usage:
 - **Green**: under 70% of budget
 - **Yellow**: 70–90% of budget
 - **Red (bold)**: 90%+ of budget
+
+### Compaction Threshold
+
+Scale the context bar relative to your compaction threshold instead of the full context window:
+
+```json
+{
+  "daily_budget_usd": 10.00,
+  "compaction_threshold_pct": 62
+}
+```
+
+With this set, the context bar shows 100% when you reach 62% of the context window — the point where compaction triggers.
+
+### Responsive Layout
+
+The status line automatically adapts to your terminal width:
+- **120+ columns**: full detail (all sections)
+- **80–119 columns**: compact (drops extras like git stash, version, clock)
+- **Under 80 columns**: narrow (essentials only — bar, tokens, cost, duration, branch)
 
 ## Manual Configuration
 

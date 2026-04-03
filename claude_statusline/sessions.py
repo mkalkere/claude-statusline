@@ -216,3 +216,33 @@ def get_budget_config():
         pass
     _write_cache("budget_config", {"budget": None})
     return None
+
+
+def get_compaction_threshold():
+    """Read compaction threshold from ~/.claude/claude-status-budget.json.
+
+    Expected format: {"compaction_threshold_pct": 62}
+    Uses 30s cache (shares budget_config cache key).
+
+    Returns:
+        Compaction threshold as float (0-100), or None if not configured.
+    """
+    cached = _read_cache("compaction_config")
+    if cached is not None:
+        val = cached.get("threshold")
+        return float(val) if val is not None else None
+
+    path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        threshold = data.get("compaction_threshold_pct")
+        if threshold is not None:
+            threshold = float(threshold)
+            if 0 < threshold <= 100:
+                _write_cache("compaction_config", {"threshold": threshold})
+                return threshold
+    except (OSError, IOError, json.JSONDecodeError, ValueError, TypeError):
+        pass
+    _write_cache("compaction_config", {"threshold": None})
+    return None
