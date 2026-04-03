@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Git cache uses 60s TTL for "not available" state — avoids repeated subprocess timeouts when git is missing
 - Corrupt `settings.json` warning now mentions the `.bak` backup file
 - Narrow layout (<80 cols) drops `model` section to prevent line wrapping
+- Bar color threshold uses float precision — `85.5%` now correctly shows red, not yellow
+- Periodic cache cleanup removes files older than 2 days to prevent accumulation
 
 ## [0.2.1] - 2026-04-03
 

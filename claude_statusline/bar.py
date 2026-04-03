@@ -35,7 +35,7 @@ def render_bar(pct, width=20, theme=None, compaction_threshold=None):
         return ""
 
     # Use raw percentage for color (reflects actual context fill)
-    color = _bar_color(max(0, min(100, int(pct))))
+    color = _bar_color(max(0, min(100, float(pct))))
 
     # Scale fill width relative to compaction threshold if configured
     if compaction_threshold and 0 < compaction_threshold <= 100:

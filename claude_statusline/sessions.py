@@ -53,8 +53,15 @@ def _read_cache(name, ttl=None):
         return None
 
 
+_last_cleanup = 0
+
+
 def _write_cache(name, value):
-    """Write a JSON value to the named cache file atomically."""
+    """Write a JSON value to the named cache file atomically.
+
+    Periodically cleans up stale cache files (at most once per hour).
+    """
+    global _last_cleanup
     target = _cache_path(name)
     tmp = target + ".tmp"
     try:
@@ -66,6 +73,28 @@ def _write_cache(name, value):
             os.unlink(tmp)
         except OSError:
             pass
+
+    # Periodic cleanup (at most once per hour)
+    now = time.time()
+    if now - _last_cleanup > 3600:
+        _last_cleanup = now
+        _cleanup_stale_cache()
+
+
+def _cleanup_stale_cache():
+    """Remove cache files older than 2 days to prevent accumulation."""
+    try:
+        cache_dir = _cache_dir()
+        now = time.time()
+        for entry in os.scandir(cache_dir):
+            if entry.is_file() and not entry.name.endswith(".tmp"):
+                try:
+                    if now - entry.stat().st_mtime > 172800:  # 2 days
+                        os.unlink(entry.path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 
 def _today_str():
