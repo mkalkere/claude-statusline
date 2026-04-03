@@ -114,6 +114,8 @@ def get_git_extras():
     """Get stash count and ahead/behind remote tracking info.
 
     Uses fast, index-only git operations with 5s TTL cache.
+    Returns early with zeros if not in a git repo (avoids wasted
+    subprocess calls for non-git or non-VCS projects).
 
     Returns:
         Dict with keys 'stash' (int), 'ahead' (int), 'behind' (int).
@@ -123,6 +125,11 @@ def get_git_extras():
         return cached
 
     result = {"stash": 0, "ahead": 0, "behind": 0}
+
+    # Quick check: skip if not in a git repo
+    if not get_branch():
+        _write_extras_cache(result)
+        return result
 
     # Stash count
     try:
