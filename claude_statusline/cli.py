@@ -397,6 +397,7 @@ def _render_sections(n, order, theme):
 _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
     "sessions", "tools", "latency", "context_size", "session_name",
+    "rate_limits",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",
