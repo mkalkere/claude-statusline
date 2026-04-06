@@ -52,6 +52,16 @@ def _first(*vals):
     return None
 
 
+def _safe_num(val):
+    """Coerce to float or return None. Prevents crashes on non-numeric input."""
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize(data):
     """Normalize Claude Code JSON into a flat dict for rendering.
 
@@ -130,13 +140,16 @@ def _normalize(data):
     out["cc_version"] = data.get("version") or ""
 
     # Rate limits (Pro/Max only, added in Claude Code v2.1.80)
-    rl = data.get("rate_limits") or {}
-    five_h = rl.get("five_hour") or {}
-    seven_d = rl.get("seven_day") or {}
-    out["rate_limit_5h_pct"] = five_h.get("used_percentage")
-    out["rate_limit_5h_resets"] = five_h.get("resets_at")
-    out["rate_limit_7d_pct"] = seven_d.get("used_percentage")
-    out["rate_limit_7d_resets"] = seven_d.get("resets_at")
+    rl = data.get("rate_limits")
+    rl = rl if isinstance(rl, dict) else {}
+    five_h = rl.get("five_hour")
+    five_h = five_h if isinstance(five_h, dict) else {}
+    seven_d = rl.get("seven_day")
+    seven_d = seven_d if isinstance(seven_d, dict) else {}
+    out["rate_limit_5h_pct"] = _safe_num(five_h.get("used_percentage"))
+    out["rate_limit_5h_resets"] = _safe_num(five_h.get("resets_at"))
+    out["rate_limit_7d_pct"] = _safe_num(seven_d.get("used_percentage"))
+    out["rate_limit_7d_resets"] = _safe_num(seven_d.get("resets_at"))
 
     return out
 
@@ -326,31 +339,26 @@ def _render_sections(n, order, theme):
             rl_7d = n.get("rate_limit_7d_pct")
             if rl_5h is not None or rl_7d is not None:
                 parts = []
-                for label, pct_val, resets in [
+                nearest_reset = None
+                for label, pct_val, resets_at in [
                     ("5h", rl_5h, n.get("rate_limit_5h_resets")),
                     ("7d", rl_7d, n.get("rate_limit_7d_resets")),
                 ]:
                     if pct_val is not None:
-                        if pct_val >= 85:
+                        clamped = max(0, min(100, pct_val))
+                        if clamped >= 85:
                             rc = tc.get("rate_limit_danger", BRIGHT_RED)
-                        elif pct_val >= 60:
+                        elif clamped >= 60:
                             rc = tc.get("rate_limit_warn", YELLOW)
                         else:
                             rc = tc.get("rate_limit_ok", GREEN)
                         parts.append(colorize(
-                            "{}:{}%".format(label, int(pct_val)), rc
+                            "{}:{}%".format(label, int(clamped)), rc
                         ))
-                # Show countdown to nearest reset
-                resets_5h = n.get("rate_limit_5h_resets")
-                resets_7d = n.get("rate_limit_7d_resets")
-                nearest = None
-                if resets_5h and resets_7d:
-                    nearest = min(resets_5h, resets_7d)
-                elif resets_5h:
-                    nearest = resets_5h
-                elif resets_7d:
-                    nearest = resets_7d
-                countdown = fmt_countdown(nearest)
+                    if resets_at is not None:
+                        if nearest_reset is None or resets_at < nearest_reset:
+                            nearest_reset = resets_at
+                countdown = fmt_countdown(nearest_reset)
                 if countdown:
                     parts.append(colorize(countdown, BRIGHT_BLACK))
                 if parts:

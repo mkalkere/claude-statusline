@@ -1505,12 +1505,99 @@ class TestRateLimits(unittest.TestCase):
         self.assertIn("5h:50%", result)
         self.assertIn("~", result)  # countdown prefix
 
+    def test_rate_limits_only_7d(self):
+        """Should handle only 7-day limit present."""
+        data = self._data_with_limits(seven_d_pct=45)
+        result = render(data)
+        self.assertIn("7d:45%", result)
+        self.assertNotIn("5h:", result)
+
+    def test_rate_limits_high_percentage(self):
+        """100% should display correctly."""
+        data = self._data_with_limits(five_h_pct=100)
+        result = render(data)
+        self.assertIn("5h:100%", result)
+
+    def test_rate_limits_float_percentage(self):
+        """Float percentage should be truncated to int."""
+        data = self._data_with_limits(five_h_pct=99.7)
+        result = render(data)
+        self.assertIn("5h:99%", result)
+
+    def test_rate_limits_clamped_above_100(self):
+        """Values above 100% should be clamped."""
+        data = self._data_with_limits(five_h_pct=105)
+        result = render(data)
+        self.assertIn("5h:100%", result)
+
+    def test_rate_limits_nearest_reset(self):
+        """Should show countdown to the nearest reset when both present."""
+        now = int(time.time() * 1000)
+        data = self._data_with_limits(
+            five_h_pct=50, five_h_resets=now + 3_600_000,    # 1h
+            seven_d_pct=20, seven_d_resets=now + 86_400_000,  # 24h
+        )
+        result = render(data)
+        # Should show ~59m or ~1h, not ~24h
+        self.assertIn("~", result)
+
+
+class TestRateLimitsMalformed(unittest.TestCase):
+    """Rate limits must never crash on malformed input."""
+
+    def _base_data(self):
+        return {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "git_branch": "main",
+        }
+
+    def test_rate_limits_as_string(self):
+        data = self._base_data()
+        data["rate_limits"] = "rate_limited"
+        result = render(data)
+        self.assertIsInstance(result, str)
+
+    def test_rate_limits_as_list(self):
+        data = self._base_data()
+        data["rate_limits"] = [1, 2, 3]
+        result = render(data)
+        self.assertIsInstance(result, str)
+
+    def test_percentage_as_string(self):
+        data = self._base_data()
+        data["rate_limits"] = {"five_hour": {"used_percentage": "34%"}}
+        result = render(data)
+        self.assertIsInstance(result, str)
+
+    def test_resets_at_as_iso_string(self):
+        data = self._base_data()
+        data["rate_limits"] = {"five_hour": {
+            "used_percentage": 34,
+            "resets_at": "2026-04-05T12:00:00Z",
+        }}
+        result = render(data)
+        self.assertIsInstance(result, str)
+
+    def test_five_hour_as_non_dict(self):
+        data = self._base_data()
+        data["rate_limits"] = {"five_hour": "invalid"}
+        result = render(data)
+        self.assertIsInstance(result, str)
+
+    def test_negative_percentage(self):
+        data = self._base_data()
+        data["rate_limits"] = {"five_hour": {"used_percentage": -5}}
+        result = render(data)
+        self.assertIn("5h:0%", result)
+
 
 # ─── cli.py — session name section ──────────────────────────────────
 
 class TestSessionName(unittest.TestCase):
     def test_session_name_displayed(self):
-        """Session name should appear when set."""
+        """Session name should appear with icon when set."""
         data = {
             "context_window": {"used_percentage": 30,
                                "current_usage": {"input_tokens": 5000}},
@@ -1520,6 +1607,7 @@ class TestSessionName(unittest.TestCase):
         }
         result = render(data)
         self.assertIn("refactor auth", result)
+        self.assertIn("\u2726", result)
 
     def test_session_name_hidden_when_absent(self):
         """Session name should not appear when not set."""
@@ -1566,6 +1654,18 @@ class TestCCVersion(unittest.TestCase):
             "context_window": {"used_percentage": 30,
                                "current_usage": {"input_tokens": 5000}},
             "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "git_branch": "main",
+        }
+        result = render(data)
+        self.assertNotIn("CC:", result)
+
+    def test_cc_version_hidden_when_empty(self):
+        """Empty version string should not render."""
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "version": "",
             "git_branch": "main",
         }
         result = render(data)

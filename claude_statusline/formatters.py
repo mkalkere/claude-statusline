@@ -114,13 +114,17 @@ def fmt_cache_pct(cache_read, total_input):
 def fmt_countdown(resets_at_ms):
     """Format a reset countdown from a Unix epoch timestamp (ms).
 
-    Returns human-readable time remaining like '2h15m', '45m', or '5m'.
-    Returns empty string if the timestamp is in the past or invalid.
+    Returns human-readable time remaining like '~2h15m', '~45m', or '~5m'.
+    Returns empty string if the timestamp is in the past, invalid, or
+    less than 1 second remaining.
     """
     if resets_at_ms is None:
         return ""
-    now_ms = int(time.time() * 1000)
-    remaining_ms = int(resets_at_ms) - now_ms
-    if remaining_ms <= 0:
+    try:
+        now_ms = int(time.time() * 1000)
+        remaining_ms = int(resets_at_ms) - now_ms
+    except (TypeError, ValueError):
+        return ""
+    if remaining_ms < 1000:
         return ""
     return "~{}".format(fmt_duration(remaining_ms))

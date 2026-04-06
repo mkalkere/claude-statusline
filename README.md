@@ -77,20 +77,20 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 
 ### default — full detail, clean separators
 ```
-[████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:36K/min │ (200K)
-12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ tools:42 │ sessions:3 │ Opus 4.6 (1M context)
+[████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min │ 5h:34% 7d:18% ~2h │ (200K)
+12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ v0.3.0 │ CC:2.1.92 │ 15:30
 ```
 
 ### minimal — just the essentials
 ```
-●●●●●●●●·············· in:245K out:18K $0.73
-12m05s ⎇ feat/statusline sessions:3 Opus 4.6 (1M context)
+●●●●●●●●·············· in:245K out:18K $0.73 5h:34% 7d:18%
+12m05s ⎇ feat/statusline sessions:3 Opus 15:30
 ```
 
 ### powerline — Nerd Font separators
 ```
-████████░░░░░░░░░░░░  in:245K out:18K  cache:41%  $0.73  burn:36K/min  (200K)
-12m05s  +247 -38  ⎇ feat/statusline  tools:42  sessions:3  Opus 4.6 (1M context)
+████████░░░░░░░░░░░░  in:245K out:18K  cache:41%  $0.73  burn:37K/min  5h:34% 7d:18% ~2h  (200K)
+12m05s  +247 -38  ⎇ feat/statusline  ✦ refactor auth  Opus  v0.3.0  CC:2.1.92  15:30
 ```
 
 ### nord — cool blue tones
