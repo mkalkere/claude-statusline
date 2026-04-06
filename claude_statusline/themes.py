@@ -15,12 +15,13 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn",
+            "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "vim", "agent", "worktree", "model",
-            "version", "clock",
+            "tools", "sessions", "session_name", "vim", "agent", "worktree",
+            "model", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -38,10 +39,15 @@ THEMES = {
             "model": colors.BRIGHT_MAGENTA,
             "latency": colors.CYAN,
             "sessions": colors.CYAN,
+            "session_name": colors.CYAN,
             "version": colors.BRIGHT_BLACK,
+            "cc_version": colors.BRIGHT_BLACK,
             "clock": colors.BRIGHT_BLACK,
             "git_stash": colors.YELLOW,
             "git_sync": colors.BRIGHT_BLACK,
+            "rate_limit_ok": colors.GREEN,
+            "rate_limit_warn": colors.YELLOW,
+            "rate_limit_danger": colors.BRIGHT_RED,
         },
     },
     # Minimal intentionally omits tools, cache, burn, budget, lines, and
@@ -54,10 +60,11 @@ THEMES = {
         "bar_left": "",
         "bar_right": "",
         "line1": [
-            "bar", "tokens", "cost", "ctx_warning",
+            "bar", "tokens", "cost", "rate_limits", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "branch", "sessions", "model", "clock",
+            "duration", "latency", "branch", "sessions", "session_name",
+            "model", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -75,10 +82,15 @@ THEMES = {
             "model": colors.BRIGHT_MAGENTA,
             "latency": colors.CYAN,
             "sessions": colors.CYAN,
+            "session_name": colors.CYAN,
             "version": colors.BRIGHT_BLACK,
+            "cc_version": colors.BRIGHT_BLACK,
             "clock": colors.BRIGHT_BLACK,
             "git_stash": colors.YELLOW,
             "git_sync": colors.BRIGHT_BLACK,
+            "rate_limit_ok": colors.GREEN,
+            "rate_limit_warn": colors.YELLOW,
+            "rate_limit_danger": colors.BRIGHT_RED,
         },
     },
     "powerline": {
@@ -89,12 +101,13 @@ THEMES = {
         "bar_left": "",
         "bar_right": "",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn",
+            "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "vim", "agent", "worktree", "model",
-            "version", "clock",
+            "tools", "sessions", "session_name", "vim", "agent", "worktree",
+            "model", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -116,6 +129,11 @@ THEMES = {
             "clock": colors.BRIGHT_BLACK,
             "git_stash": colors.YELLOW,
             "git_sync": colors.BRIGHT_BLACK,
+            "session_name": colors.CYAN,
+            "cc_version": colors.BRIGHT_BLACK,
+            "rate_limit_ok": colors.GREEN,
+            "rate_limit_warn": colors.YELLOW,
+            "rate_limit_danger": colors.BRIGHT_RED,
         },
     },
     "nord": {
@@ -126,12 +144,13 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn",
+            "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "vim", "agent", "worktree", "model",
-            "version", "clock",
+            "tools", "sessions", "session_name", "vim", "agent", "worktree",
+            "model", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -153,6 +172,11 @@ THEMES = {
             "clock": colors.BRIGHT_BLACK,
             "git_stash": colors.BRIGHT_YELLOW,
             "git_sync": colors.BRIGHT_BLACK,
+            "session_name": colors.CYAN,
+            "cc_version": colors.BRIGHT_BLACK,
+            "rate_limit_ok": colors.GREEN,
+            "rate_limit_warn": colors.YELLOW,
+            "rate_limit_danger": colors.BRIGHT_RED,
         },
     },
     "tokyo-night": {
@@ -163,12 +187,13 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn",
+            "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "vim", "agent", "worktree", "model",
-            "version", "clock",
+            "tools", "sessions", "session_name", "vim", "agent", "worktree",
+            "model", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -190,6 +215,11 @@ THEMES = {
             "clock": colors.BRIGHT_BLACK,
             "git_stash": colors.BRIGHT_YELLOW,
             "git_sync": colors.BRIGHT_BLACK,
+            "session_name": colors.CYAN,
+            "cc_version": colors.BRIGHT_BLACK,
+            "rate_limit_ok": colors.GREEN,
+            "rate_limit_warn": colors.YELLOW,
+            "rate_limit_danger": colors.BRIGHT_RED,
         },
     },
     "gruvbox": {
@@ -200,12 +230,13 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn",
+            "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "vim", "agent", "worktree", "model",
-            "version", "clock",
+            "tools", "sessions", "session_name", "vim", "agent", "worktree",
+            "model", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -227,6 +258,11 @@ THEMES = {
             "clock": colors.BRIGHT_BLACK,
             "git_stash": colors.YELLOW,
             "git_sync": colors.BRIGHT_BLACK,
+            "session_name": colors.CYAN,
+            "cc_version": colors.BRIGHT_BLACK,
+            "rate_limit_ok": colors.GREEN,
+            "rate_limit_warn": colors.YELLOW,
+            "rate_limit_danger": colors.BRIGHT_RED,
         },
     },
     "rose-pine": {
@@ -237,12 +273,13 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn",
+            "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "vim", "agent", "worktree", "model",
-            "version", "clock",
+            "tools", "sessions", "session_name", "vim", "agent", "worktree",
+            "model", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -264,6 +301,11 @@ THEMES = {
             "clock": colors.BRIGHT_BLACK,
             "git_stash": colors.YELLOW,
             "git_sync": colors.BRIGHT_BLACK,
+            "session_name": colors.CYAN,
+            "cc_version": colors.BRIGHT_BLACK,
+            "rate_limit_ok": colors.GREEN,
+            "rate_limit_warn": colors.YELLOW,
+            "rate_limit_danger": colors.BRIGHT_RED,
         },
     },
 }

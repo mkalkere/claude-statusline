@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-05
+
+### Added
+- **Rate limit display** — shows 5-hour and 7-day API usage percentages with color-coded thresholds (green/yellow/red at 60%/85%) and reset countdown timer. Only appears for Claude.ai Pro/Max subscribers. Data comes from Claude Code's stdin JSON — no network calls. Closes #31.
+- **Session name display** — shows custom session name set via `claude --name` or `/rename` command. Uses ✦ prefix for visual distinction. Closes #32.
+- **Claude Code version** — shows `CC:X.Y.Z` alongside the tool version. Closes #33.
+- `fmt_countdown()` formatter for human-readable reset countdown timers
+
+### Changed
+- All themes updated with `rate_limits`, `session_name`, and `cc_version` sections
+- Responsive layout drops `session_name` and `cc_version` in compact mode
+- Issue #13 closed — superseded by #31 (rate limits now available in stdin JSON)
+
 ## [0.2.2] - 2026-04-03
 
 ### Fixed

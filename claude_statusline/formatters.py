@@ -1,5 +1,7 @@
 """Formatting functions for tokens, cost, duration, and burn rate."""
 
+import time
+
 
 def fmt_tokens(n):
     """Format token count with human-readable suffix.
@@ -107,3 +109,18 @@ def fmt_cache_pct(cache_read, total_input):
         return ""
     pct = (cache_read / total_input) * 100
     return "{}%".format(int(pct))
+
+
+def fmt_countdown(resets_at_ms):
+    """Format a reset countdown from a Unix epoch timestamp (ms).
+
+    Returns human-readable time remaining like '2h15m', '45m', or '5m'.
+    Returns empty string if the timestamp is in the past or invalid.
+    """
+    if resets_at_ms is None:
+        return ""
+    now_ms = int(time.time() * 1000)
+    remaining_ms = int(resets_at_ms) - now_ms
+    if remaining_ms <= 0:
+        return ""
+    return "~{}".format(fmt_duration(remaining_ms))
