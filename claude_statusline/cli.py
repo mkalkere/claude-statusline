@@ -15,7 +15,8 @@ from .colors import (
     YELLOW, colorize,
 )
 from .formatters import (
-    fmt_burn_rate, fmt_cache_pct, fmt_cost, fmt_duration, fmt_lines, fmt_tokens,
+    fmt_burn_rate, fmt_cache_pct, fmt_cost, fmt_countdown, fmt_duration,
+    fmt_lines, fmt_tokens,
 )
 from .git import get_branch, get_git_extras
 from .sessions import (
@@ -49,6 +50,16 @@ def _first(*vals):
         if v is not None:
             return v
     return None
+
+
+def _safe_num(val):
+    """Coerce to float or return None. Prevents crashes on non-numeric input."""
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize(data):
@@ -121,6 +132,24 @@ def _normalize(data):
 
     # Session ID (for tool call counting)
     out["session_id"] = data.get("session_id") or ""
+
+    # Session name (custom name via --name or /rename)
+    out["session_name"] = data.get("session_name") or ""
+
+    # Claude Code version
+    out["cc_version"] = data.get("version") or ""
+
+    # Rate limits (Pro/Max only, added in Claude Code v2.1.80)
+    rl = data.get("rate_limits")
+    rl = rl if isinstance(rl, dict) else {}
+    five_h = rl.get("five_hour")
+    five_h = five_h if isinstance(five_h, dict) else {}
+    seven_d = rl.get("seven_day")
+    seven_d = seven_d if isinstance(seven_d, dict) else {}
+    out["rate_limit_5h_pct"] = _safe_num(five_h.get("used_percentage"))
+    out["rate_limit_5h_resets"] = _safe_num(five_h.get("resets_at"))
+    out["rate_limit_7d_pct"] = _safe_num(seven_d.get("used_percentage"))
+    out["rate_limit_7d_resets"] = _safe_num(seven_d.get("resets_at"))
 
     return out
 
@@ -291,6 +320,50 @@ def _render_sections(n, order, theme):
             cc = tc.get("clock", BRIGHT_BLACK)
             sections.append(colorize(time.strftime("%H:%M"), cc))
 
+        elif section == "cc_version":
+            cc_ver = n.get("cc_version", "")
+            if cc_ver:
+                cvc = tc.get("cc_version", BRIGHT_BLACK)
+                sections.append(colorize("CC:" + cc_ver, cvc))
+
+        elif section == "session_name":
+            sname = n.get("session_name", "")
+            if sname:
+                snc = tc.get("session_name", CYAN)
+                sections.append(colorize(
+                    "\u2726 {}".format(sname), snc
+                ))
+
+        elif section == "rate_limits":
+            rl_5h = n.get("rate_limit_5h_pct")
+            rl_7d = n.get("rate_limit_7d_pct")
+            if rl_5h is not None or rl_7d is not None:
+                parts = []
+                nearest_reset = None
+                for label, pct_val, resets_at in [
+                    ("5h", rl_5h, n.get("rate_limit_5h_resets")),
+                    ("7d", rl_7d, n.get("rate_limit_7d_resets")),
+                ]:
+                    if pct_val is not None:
+                        clamped = max(0, min(100, pct_val))
+                        if clamped >= 85:
+                            rc = tc.get("rate_limit_danger", BRIGHT_RED)
+                        elif clamped >= 60:
+                            rc = tc.get("rate_limit_warn", YELLOW)
+                        else:
+                            rc = tc.get("rate_limit_ok", GREEN)
+                        parts.append(colorize(
+                            "{}:{}%".format(label, int(clamped)), rc
+                        ))
+                    if resets_at is not None:
+                        if nearest_reset is None or resets_at < nearest_reset:
+                            nearest_reset = resets_at
+                countdown = fmt_countdown(nearest_reset)
+                if countdown:
+                    parts.append(colorize(countdown, BRIGHT_BLACK))
+                if parts:
+                    sections.append(" ".join(parts))
+
         elif section == "git_extras":
             branch = n["git_branch"] or get_branch()
             if branch:
@@ -322,8 +395,9 @@ def _render_sections(n, order, theme):
 # Sections to drop at each width breakpoint (widest first).
 # Below 120 cols: drop least-essential sections progressively.
 _COMPACT_DROP = [
-    "git_extras", "version", "clock", "worktree",
-    "sessions", "tools", "latency", "context_size",
+    "git_extras", "version", "cc_version", "clock", "worktree",
+    "sessions", "tools", "latency", "context_size", "session_name",
+    "rate_limits",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",
@@ -414,6 +488,18 @@ def _demo_data():
             "display_name": "Opus 4.6 (1M context)",
         },
         "session_id": "demo-session",
+        "session_name": "refactor auth",
+        "version": "2.1.92",
+        "rate_limits": {
+            "five_hour": {
+                "used_percentage": 34,
+                "resets_at": int(time.time() * 1000) + 7_200_000,
+            },
+            "seven_day": {
+                "used_percentage": 18,
+                "resets_at": int(time.time() * 1000) + 432_000_000,
+            },
+        },
     }
 
 

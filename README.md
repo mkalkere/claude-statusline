@@ -10,8 +10,8 @@
 [![Downloads](https://img.shields.io/pypi/dm/claude-status)](https://pypi.org/project/claude-status/)
 
 ```
-Line 1:  [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ $0.73/$10 │ burn:36K/min │ (200K)
-Line 2:  12m05s │ api:5m12s │ +247 -38 │ ⎇ myapp/feat/statusline │ stash:2 │ tools:42 │ sessions:3 │ Opus │ v0.2.1 │ 15:30
+Line 1:  [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min │ 5h:34% 7d:18% ~2h │ (200K)
+Line 2:  12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ stash:2 │ ✦ refactor auth │ Opus │ v0.3.0 │ CC:2.1.92 │ 15:30
 ```
 
 ## Quick Start
@@ -27,7 +27,8 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 
 - **Zero dependencies** — pure Python stdlib. No `psutil`, no `colorama`, no compilation. Installs in under 2 seconds
 - **Two-line layout** — glanceable metrics on line 1, context details on line 2. Nothing gets truncated
-- **Every metric that matters** — 20 data points including burn rate (tokens/min), a metric no other statusline tracks
+- **Every metric that matters** — 23 data points including burn rate (tokens/min) and rate limit tracking with reset countdown
+- **Rate limit awareness** — see your 5-hour and 7-day API usage at a glance with color-coded warnings
 - **Responsive layout** — automatically adapts to your terminal width (full/compact/narrow)
 - **7 built-in themes** — default, minimal, powerline, nord, tokyo-night, gruvbox, rose-pine
 - **Budget monitoring** — set a daily spend limit, get color-coded warnings as you approach it
@@ -47,6 +48,7 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 | Burn Rate | `burn:36K/min` | Tokens/min consumption — unique to claude-status |
 | Context Size | `(200K)` | Know if you're on 200K or 1M context |
 | Budget | `$0.73/$10` | Color-coded daily budget tracker (green/yellow/red) |
+| Rate Limits | `5h:34% 7d:18% ~2h` | API usage limits with reset countdown (Pro/Max only) |
 | Context Warning | `!CTX` | Bold red alert when you exceed 200K tokens |
 
 ### Line 2 — Session Context
@@ -62,9 +64,11 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 | Sessions Today | `sessions:3` | How many sessions you've started today |
 | Vim Mode | `NORMAL` | Blue for NORMAL, green for INSERT (when vim mode is on) |
 | Agent | `[Explore]` | Shows which subagent is active |
+| Session Name | `✦ refactor auth` | Custom session name (via `--name` or `/rename`) |
 | Worktree | `wt:fix/bug-123` | Worktree branch indicator |
 | Model | `Opus 4.6 (1M context)` | Active model name |
-| Version | `v0.2.1` | claude-status version |
+| Version | `v0.3.0` | claude-status version |
+| CC Version | `CC:2.1.92` | Claude Code application version |
 | Clock | `15:30` | Current time |
 
 ## Themes
@@ -73,20 +77,20 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 
 ### default — full detail, clean separators
 ```
-[████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:36K/min │ (200K)
-12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ tools:42 │ sessions:3 │ Opus 4.6 (1M context)
+[████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min │ 5h:34% 7d:18% ~2h │ (200K)
+12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ v0.3.0 │ CC:2.1.92 │ 15:30
 ```
 
 ### minimal — just the essentials
 ```
-●●●●●●●●·············· in:245K out:18K $0.73
-12m05s ⎇ feat/statusline sessions:3 Opus 4.6 (1M context)
+●●●●●●●●·············· in:245K out:18K $0.73 5h:34% 7d:18%
+12m05s ⎇ feat/statusline sessions:3 Opus 15:30
 ```
 
 ### powerline — Nerd Font separators
 ```
-████████░░░░░░░░░░░░  in:245K out:18K  cache:41%  $0.73  burn:36K/min  (200K)
-12m05s  +247 -38  ⎇ feat/statusline  tools:42  sessions:3  Opus 4.6 (1M context)
+████████░░░░░░░░░░░░  in:245K out:18K  cache:41%  $0.73  burn:37K/min  5h:34% 7d:18% ~2h  (200K)
+12m05s  +247 -38  ⎇ feat/statusline  ✦ refactor auth  Opus  v0.3.0  CC:2.1.92  15:30
 ```
 
 ### nord — cool blue tones
@@ -223,6 +227,7 @@ Claude Code pipes session JSON to your `statusLine` command via stdin on every r
 | **Cross-platform** | Windows, macOS, Linux | Windows, macOS, Linux | Partial |
 | **Themes** | 7 + custom | 100 | 1 |
 | **Burn rate** | Yes | No | No |
+| **Rate limit tracking** | Yes | No | No |
 | **Budget monitoring** | Yes | No | No |
 | **Session analytics** | Yes | No | No |
 | **Two-line layout** | Yes | Yes | No |
@@ -245,6 +250,9 @@ Create `~/.claude/claude-status-budget.json` with `{"daily_budget_usd": 10.00}`.
 
 **What is burn rate?**
 Tokens consumed per minute — a metric unique to claude-status. Helps you gauge how fast you're using context in a session.
+
+**Do I need a Pro/Max subscription for rate limit tracking?**
+Yes. The `rate_limits` field is only included in the Claude Code JSON payload for Pro/Max subscribers. The section is automatically hidden for other users — no configuration needed.
 
 **Does it add any latency to Claude Code?**
 No. It runs as a pure stdin-to-stdout pipe in single-digit milliseconds. No daemon, no network calls, no background processes.
