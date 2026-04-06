@@ -55,8 +55,8 @@ THEMES = {
             "effort_low": colors.BRIGHT_BLACK,
         },
     },
-    # Minimal intentionally omits tools, cache, burn, budget, lines, and
-    # context_size to keep output compact — only essential metrics shown.
+    # Minimal shows only essential metrics — see line1/line2 lists below
+    # for exactly what's included. All other sections are omitted.
     "minimal": {
         "name": "minimal",
         "separator": " ",
