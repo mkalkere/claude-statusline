@@ -817,7 +817,8 @@ def main():
 
     try:
         output = render(data, args.theme)
-    except Exception:
+    except Exception as exc:
+        print("claude-status: render error: {}".format(exc), file=sys.stderr)
         output = ""
     if output:
         print(output)

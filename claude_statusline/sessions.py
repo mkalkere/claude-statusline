@@ -309,7 +309,8 @@ def get_effort_level():
             effort = raw.lower()
     except (OSError, IOError, json.JSONDecodeError, ValueError,
             TypeError, AttributeError):
-        pass
+        # Don't cache failure — retry next cycle
+        return None
 
     # Only return non-default levels (medium is the default, skip it)
     if effort == "medium":
