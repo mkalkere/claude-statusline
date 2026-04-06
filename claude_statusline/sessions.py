@@ -275,3 +275,39 @@ def get_compaction_threshold():
     config = _read_status_config()
     val = config.get("threshold")
     return float(val) if val is not None else None
+
+
+_VALID_EFFORT_LEVELS = {"low", "medium", "high"}
+
+
+def get_effort_level():
+    """Read thinking effort level from ~/.claude/settings.json.
+
+    Valid values: "low", "medium", "high". Returns None if not
+    configured, invalid, or set to the default "medium".
+    Uses 30s cache to avoid hitting disk on every render.
+
+    Returns:
+        Effort level string ("low" or "high"), or None if medium/absent.
+    """
+    cached = _read_cache("effort_level")
+    if cached is not None:
+        val = cached.get("effort")
+        return val if val in _VALID_EFFORT_LEVELS else None
+
+    settings_path = os.path.join(_CLAUDE_DIR, "settings.json")
+    effort = None
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        raw = data.get("effortLevel", "")
+        if isinstance(raw, str) and raw.lower() in _VALID_EFFORT_LEVELS:
+            effort = raw.lower()
+    except (OSError, IOError, json.JSONDecodeError, ValueError, TypeError):
+        pass
+
+    # Only return non-default levels (medium is the default, skip it)
+    if effort == "medium":
+        effort = None
+    _write_cache("effort_level", {"effort": effort})
+    return effort

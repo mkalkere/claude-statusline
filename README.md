@@ -27,7 +27,7 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 
 - **Zero dependencies** — pure Python stdlib. No `psutil`, no `colorama`, no compilation. Installs in under 2 seconds
 - **Two-line layout** — glanceable metrics on line 1, context details on line 2. Nothing gets truncated
-- **Every metric that matters** — 23 data points including burn rate (tokens/min) and rate limit tracking with reset countdown
+- **Every metric that matters** — 26 data points including burn rate (tokens/min), rate limit tracking, and effort level
 - **Rate limit awareness** — see your 5-hour and 7-day API usage at a glance with color-coded warnings
 - **Responsive layout** — automatically adapts to your terminal width (full/compact/narrow)
 - **7 built-in themes** — default, minimal, powerline, nord, tokyo-night, gruvbox, rose-pine
@@ -67,7 +67,10 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 | Session Name | `✦ refactor auth` | Custom session name (via `--name` or `/rename`) |
 | Worktree | `wt:fix/bug-123` | Worktree branch indicator |
 | Model | `Opus 4.6 (1M context)` | Active model name |
-| Version | `v0.3.0` | claude-status version |
+| Output Style | `style:explanatory` | Active output style when set |
+| Added Dirs | `dirs:+2` | Extra directories added via `/add-dir` |
+| Effort Level | `effort:high` | Thinking effort (shown when non-default) |
+| Version | `v0.3.1` | claude-status version |
 | CC Version | `CC:2.1.92` | Claude Code application version |
 | Clock | `15:30` | Current time |
 

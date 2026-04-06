@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-04-06
+
+### Added
+- **Output style indicator** — displays active output style (e.g., `style:explanatory`) when configured. Hidden when not set. Closes #35.
+- **Added directories count** — shows `dirs:+N` when extra workspace directories are added via `/add-dir`. Closes #36.
+- **Thinking effort level** — displays `effort:high` or `effort:low` when set to non-default. Reads from `~/.claude/settings.json` with 30s cache. Hidden at default (medium). Closes #37.
+
+### Changed
+- All themes updated with `output_style`, `added_dirs`, and `effort` sections
+- Minimal theme includes `effort` (high-impact setting worth showing even in compact view)
+- Responsive layout drops all three new sections in compact mode (<120 cols)
+
 ## [0.3.0] - 2026-04-05
 
 ### Added
