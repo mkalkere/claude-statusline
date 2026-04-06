@@ -154,7 +154,8 @@ def _normalize(data):
     # Output style
     style_obj = data.get("output_style")
     style_obj = style_obj if isinstance(style_obj, dict) else {}
-    out["output_style"] = style_obj.get("name") or ""
+    style_name = style_obj.get("name")
+    out["output_style"] = style_name if isinstance(style_name, str) and style_name else ""
 
     # Added directories count
     added_dirs = workspace.get("added_dirs")
@@ -814,7 +815,10 @@ def main():
     except KeyboardInterrupt:
         return
 
-    output = render(data, args.theme)
+    try:
+        output = render(data, args.theme)
+    except Exception:
+        output = ""
     if output:
         print(output)
 

@@ -293,17 +293,22 @@ def get_effort_level():
     cached = _read_cache("effort_level")
     if cached is not None:
         val = cached.get("effort")
-        return val if val in _VALID_EFFORT_LEVELS else None
+        if val in _VALID_EFFORT_LEVELS and val != "medium":
+            return val
+        return None
 
     settings_path = os.path.join(_CLAUDE_DIR, "settings.json")
     effort = None
     try:
         with open(settings_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
         raw = data.get("effortLevel", "")
         if isinstance(raw, str) and raw.lower() in _VALID_EFFORT_LEVELS:
             effort = raw.lower()
-    except (OSError, IOError, json.JSONDecodeError, ValueError, TypeError):
+    except (OSError, IOError, json.JSONDecodeError, ValueError,
+            TypeError, AttributeError):
         pass
 
     # Only return non-default levels (medium is the default, skip it)
