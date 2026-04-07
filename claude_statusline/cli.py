@@ -20,7 +20,7 @@ from .formatters import (
 )
 from .git import get_branch, get_git_extras
 from .sessions import (
-    get_budget_config, get_compaction_threshold,
+    get_budget_config, get_compaction_threshold, get_effort_level,
     get_session_tool_count, get_today_session_count,
 )
 from .themes import THEMES, get_theme
@@ -150,6 +150,16 @@ def _normalize(data):
     out["rate_limit_5h_resets"] = _safe_num(five_h.get("resets_at"))
     out["rate_limit_7d_pct"] = _safe_num(seven_d.get("used_percentage"))
     out["rate_limit_7d_resets"] = _safe_num(seven_d.get("resets_at"))
+
+    # Output style
+    style_obj = data.get("output_style")
+    style_obj = style_obj if isinstance(style_obj, dict) else {}
+    style_name = style_obj.get("name")
+    out["output_style"] = style_name if isinstance(style_name, str) and style_name else ""
+
+    # Added directories count
+    added_dirs = workspace.get("added_dirs")
+    out["added_dirs_count"] = len(added_dirs) if isinstance(added_dirs, list) else 0
 
     return out
 
@@ -364,6 +374,31 @@ def _render_sections(n, order, theme):
                 if parts:
                     sections.append(" ".join(parts))
 
+        elif section == "output_style":
+            style = n.get("output_style", "")
+            if style:
+                osc = tc.get("output_style", BRIGHT_BLACK)
+                sections.append(colorize("style:" + style, osc))
+
+        elif section == "added_dirs":
+            dirs_count = n.get("added_dirs_count", 0)
+            if dirs_count > 0:
+                adc = tc.get("added_dirs", BRIGHT_BLACK)
+                sections.append(colorize(
+                    "dirs:+{}".format(dirs_count), adc
+                ))
+
+        elif section == "effort":
+            effort = get_effort_level()
+            if effort:
+                if effort == "high":
+                    ec = tc.get("effort_high", BRIGHT_MAGENTA)
+                else:
+                    ec = tc.get("effort_low", BRIGHT_BLACK)
+                sections.append(colorize(
+                    "effort:" + effort, ec, BOLD
+                ))
+
         elif section == "git_extras":
             branch = n["git_branch"] or get_branch()
             if branch:
@@ -397,7 +432,7 @@ def _render_sections(n, order, theme):
 _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
     "sessions", "tools", "latency", "context_size", "session_name",
-    "rate_limits",
+    "rate_limits", "output_style", "added_dirs", "effort",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",
@@ -483,6 +518,7 @@ def _demo_data():
         "workspace": {
             "project_dir": "/home/user/projects/myapp",
             "current_dir": "/home/user/projects/myapp/src",
+            "added_dirs": ["/home/user/projects/shared-lib"],
         },
         "model": {
             "display_name": "Opus 4.6 (1M context)",
@@ -490,6 +526,7 @@ def _demo_data():
         "session_id": "demo-session",
         "session_name": "refactor auth",
         "version": "2.1.92",
+        "output_style": {"name": "explanatory"},
         "rate_limits": {
             "five_hour": {
                 "used_percentage": 34,
@@ -778,7 +815,11 @@ def main():
     except KeyboardInterrupt:
         return
 
-    output = render(data, args.theme)
+    try:
+        output = render(data, args.theme)
+    except Exception as exc:
+        print("claude-status: render error: {}".format(exc), file=sys.stderr)
+        output = ""
     if output:
         print(output)
 

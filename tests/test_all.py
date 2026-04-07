@@ -1696,5 +1696,335 @@ class TestFmtCountdown(unittest.TestCase):
         self.assertEqual(fmt_countdown(None), "")
 
 
+# ─── cli.py — output style section ──────────────────────────────────
+
+class TestOutputStyle(unittest.TestCase):
+    def _base_data(self, **extra):
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "git_branch": "main",
+        }
+        data.update(extra)
+        return data
+
+    def test_output_style_displayed(self):
+        data = self._base_data(output_style={"name": "explanatory"})
+        result = render(data)
+        self.assertIn("style:explanatory", result)
+
+    def test_output_style_hidden_when_absent(self):
+        data = self._base_data()
+        result = render(data)
+        self.assertNotIn("style:", result)
+
+    def test_output_style_hidden_when_empty(self):
+        data = self._base_data(output_style={"name": ""})
+        result = render(data)
+        self.assertNotIn("style:", result)
+
+    def test_output_style_non_dict(self):
+        """Non-dict output_style should not crash."""
+        data = self._base_data(output_style="concise")
+        result = render(data)
+        self.assertIsInstance(result, str)
+
+    def test_output_style_null_name(self):
+        data = self._base_data(output_style={"name": None})
+        result = render(data)
+        self.assertNotIn("style:", result)
+
+
+# ─── cli.py — added directories section ─────────────────────────────
+
+class TestAddedDirs(unittest.TestCase):
+    def _base_data(self, **extra):
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "git_branch": "main",
+        }
+        data.update(extra)
+        return data
+
+    def test_added_dirs_displayed(self):
+        data = self._base_data(workspace={
+            "project_dir": "/home/user/myapp",
+            "added_dirs": ["/lib1", "/lib2"],
+        })
+        result = render(data)
+        self.assertIn("dirs:+2", result)
+
+    def test_added_dirs_hidden_when_empty(self):
+        data = self._base_data(workspace={
+            "project_dir": "/home/user/myapp",
+            "added_dirs": [],
+        })
+        result = render(data)
+        self.assertNotIn("dirs:", result)
+
+    def test_added_dirs_hidden_when_absent(self):
+        data = self._base_data()
+        result = render(data)
+        self.assertNotIn("dirs:", result)
+
+    def test_added_dirs_non_list(self):
+        """Non-list added_dirs should not crash."""
+        data = self._base_data(workspace={
+            "project_dir": "/home/user/myapp",
+            "added_dirs": "not a list",
+        })
+        result = render(data)
+        self.assertIsInstance(result, str)
+        self.assertNotIn("dirs:", result)
+
+
+# ─── sessions.py — effort level ─────────────────────────────────────
+
+class TestEffortLevel(unittest.TestCase):
+    def test_effort_high(self):
+        from claude_statusline.sessions import get_effort_level, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                json.dump({"effortLevel": "high"}, f)
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("effort_level"))
+            except OSError:
+                pass
+            try:
+                result = get_effort_level()
+                self.assertEqual(result, "high")
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+    def test_effort_medium_returns_none(self):
+        """Medium is the default — should return None to hide the section."""
+        from claude_statusline.sessions import get_effort_level, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                json.dump({"effortLevel": "medium"}, f)
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("effort_level"))
+            except OSError:
+                pass
+            try:
+                result = get_effort_level()
+                self.assertIsNone(result)
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+    def test_effort_low(self):
+        from claude_statusline.sessions import get_effort_level, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                json.dump({"effortLevel": "low"}, f)
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("effort_level"))
+            except OSError:
+                pass
+            try:
+                result = get_effort_level()
+                self.assertEqual(result, "low")
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+    def test_effort_absent_returns_none(self):
+        from claude_statusline.sessions import get_effort_level, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        orig = sessions_mod._CLAUDE_DIR
+        sessions_mod._CLAUDE_DIR = "/nonexistent/path"
+        try:
+            os.unlink(_cache_path("effort_level"))
+        except OSError:
+            pass
+        try:
+            result = get_effort_level()
+            self.assertIsNone(result)
+        finally:
+            sessions_mod._CLAUDE_DIR = orig
+
+    def test_effort_invalid_value(self):
+        from claude_statusline.sessions import get_effort_level, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                json.dump({"effortLevel": "ultrathink"}, f)
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("effort_level"))
+            except OSError:
+                pass
+            try:
+                result = get_effort_level()
+                self.assertIsNone(result)
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+
+class TestEffortSection(unittest.TestCase):
+    def test_effort_high_rendered(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: "high"
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("effort:high", result)
+        finally:
+            cli_mod.get_effort_level = orig
+
+    def test_effort_hidden_when_none(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: None
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertNotIn("effort:", result)
+        finally:
+            cli_mod.get_effort_level = orig
+
+    def test_effort_low_rendered(self):
+        """Effort low should display with dim color."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: "low"
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("effort:low", result)
+        finally:
+            cli_mod.get_effort_level = orig
+
+
+class TestEffortLevelCorrupted(unittest.TestCase):
+    def test_corrupted_settings_returns_none(self):
+        """Invalid JSON in settings.json should return None gracefully."""
+        from claude_statusline.sessions import get_effort_level, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                f.write("{not valid json")
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("effort_level"))
+            except OSError:
+                pass
+            try:
+                result = get_effort_level()
+                self.assertIsNone(result)
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+    def test_non_dict_settings_returns_none(self):
+        """settings.json containing a JSON array should not crash."""
+        from claude_statusline.sessions import get_effort_level, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                json.dump([1, 2, 3], f)
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("effort_level"))
+            except OSError:
+                pass
+            try:
+                result = get_effort_level()
+                self.assertIsNone(result)
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+
+class TestAddedDirsExtra(unittest.TestCase):
+    def test_single_added_dir(self):
+        """Single added directory should show dirs:+1."""
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "git_branch": "main",
+            "workspace": {
+                "project_dir": "/home/user/myapp",
+                "added_dirs": ["/lib1"],
+            },
+        }
+        result = render(data)
+        self.assertIn("dirs:+1", result)
+
+
+class TestOutputStyleExtra(unittest.TestCase):
+    def test_output_style_non_string_name(self):
+        """Non-string name value should not crash."""
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "git_branch": "main",
+            "output_style": {"name": ["not", "a", "string"]},
+        }
+        result = render(data)
+        self.assertNotIn("style:", result)
+
+    def test_output_style_missing_name_key(self):
+        """output_style dict without name key should not crash."""
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "git_branch": "main",
+            "output_style": {},
+        }
+        result = render(data)
+        self.assertNotIn("style:", result)
+
+
 if __name__ == "__main__":
     unittest.main()

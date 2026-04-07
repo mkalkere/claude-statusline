@@ -21,7 +21,8 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "version", "cc_version", "clock",
+            "model", "output_style", "added_dirs", "effort",
+            "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -48,10 +49,14 @@ THEMES = {
             "rate_limit_ok": colors.GREEN,
             "rate_limit_warn": colors.YELLOW,
             "rate_limit_danger": colors.BRIGHT_RED,
+            "output_style": colors.BRIGHT_BLACK,
+            "added_dirs": colors.BRIGHT_BLACK,
+            "effort_high": colors.BRIGHT_MAGENTA,
+            "effort_low": colors.BRIGHT_BLACK,
         },
     },
-    # Minimal intentionally omits tools, cache, burn, budget, lines, and
-    # context_size to keep output compact — only essential metrics shown.
+    # Minimal shows only essential metrics — see line1/line2 lists below
+    # for exactly what's included. All other sections are omitted.
     "minimal": {
         "name": "minimal",
         "separator": " ",
@@ -64,7 +69,7 @@ THEMES = {
         ],
         "line2": [
             "duration", "latency", "branch", "sessions", "session_name",
-            "model", "clock",
+            "model", "effort", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -91,6 +96,10 @@ THEMES = {
             "rate_limit_ok": colors.GREEN,
             "rate_limit_warn": colors.YELLOW,
             "rate_limit_danger": colors.BRIGHT_RED,
+            "output_style": colors.BRIGHT_BLACK,
+            "added_dirs": colors.BRIGHT_BLACK,
+            "effort_high": colors.BRIGHT_MAGENTA,
+            "effort_low": colors.BRIGHT_BLACK,
         },
     },
     "powerline": {
@@ -107,7 +116,8 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "version", "cc_version", "clock",
+            "model", "output_style", "added_dirs", "effort",
+            "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -134,6 +144,10 @@ THEMES = {
             "rate_limit_ok": colors.GREEN,
             "rate_limit_warn": colors.YELLOW,
             "rate_limit_danger": colors.BRIGHT_RED,
+            "output_style": colors.BRIGHT_BLACK,
+            "added_dirs": colors.BRIGHT_BLACK,
+            "effort_high": colors.BRIGHT_MAGENTA,
+            "effort_low": colors.BRIGHT_BLACK,
         },
     },
     "nord": {
@@ -150,7 +164,8 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "version", "cc_version", "clock",
+            "model", "output_style", "added_dirs", "effort",
+            "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -177,6 +192,10 @@ THEMES = {
             "rate_limit_ok": colors.GREEN,
             "rate_limit_warn": colors.YELLOW,
             "rate_limit_danger": colors.BRIGHT_RED,
+            "output_style": colors.BRIGHT_BLACK,
+            "added_dirs": colors.BRIGHT_BLACK,
+            "effort_high": colors.BRIGHT_MAGENTA,
+            "effort_low": colors.BRIGHT_BLACK,
         },
     },
     "tokyo-night": {
@@ -193,7 +212,8 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "version", "cc_version", "clock",
+            "model", "output_style", "added_dirs", "effort",
+            "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -220,6 +240,10 @@ THEMES = {
             "rate_limit_ok": colors.GREEN,
             "rate_limit_warn": colors.YELLOW,
             "rate_limit_danger": colors.BRIGHT_RED,
+            "output_style": colors.BRIGHT_BLACK,
+            "added_dirs": colors.BRIGHT_BLACK,
+            "effort_high": colors.BRIGHT_MAGENTA,
+            "effort_low": colors.BRIGHT_BLACK,
         },
     },
     "gruvbox": {
@@ -236,7 +260,8 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "version", "cc_version", "clock",
+            "model", "output_style", "added_dirs", "effort",
+            "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -263,6 +288,10 @@ THEMES = {
             "rate_limit_ok": colors.GREEN,
             "rate_limit_warn": colors.YELLOW,
             "rate_limit_danger": colors.BRIGHT_RED,
+            "output_style": colors.BRIGHT_BLACK,
+            "added_dirs": colors.BRIGHT_BLACK,
+            "effort_high": colors.BRIGHT_MAGENTA,
+            "effort_low": colors.BRIGHT_BLACK,
         },
     },
     "rose-pine": {
@@ -279,7 +308,8 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "version", "cc_version", "clock",
+            "model", "output_style", "added_dirs", "effort",
+            "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -306,6 +336,10 @@ THEMES = {
             "rate_limit_ok": colors.GREEN,
             "rate_limit_warn": colors.YELLOW,
             "rate_limit_danger": colors.BRIGHT_RED,
+            "output_style": colors.BRIGHT_BLACK,
+            "added_dirs": colors.BRIGHT_BLACK,
+            "effort_high": colors.BRIGHT_MAGENTA,
+            "effort_low": colors.BRIGHT_BLACK,
         },
     },
 }
