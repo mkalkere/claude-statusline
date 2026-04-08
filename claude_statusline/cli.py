@@ -146,14 +146,14 @@ def _normalize(data):
     five_h = five_h if isinstance(five_h, dict) else {}
     seven_d = rl.get("seven_day")
     seven_d = seven_d if isinstance(seven_d, dict) else {}
-    out["rate_limit_5h_pct"] = _safe_num(five_h.get("used_percentage"))
-    out["rate_limit_7d_pct"] = _safe_num(seven_d.get("used_percentage"))
     # resets_at is Unix epoch seconds per Claude Code docs — convert to ms
     # for fmt_countdown() which expects milliseconds
-    resets_5h = _safe_num(five_h.get("resets_at"))
-    out["rate_limit_5h_resets"] = resets_5h * 1000 if resets_5h is not None else None
-    resets_7d = _safe_num(seven_d.get("resets_at"))
-    out["rate_limit_7d_resets"] = resets_7d * 1000 if resets_7d is not None else None
+    for period, rl_dict in [("5h", five_h), ("7d", seven_d)]:
+        out["rate_limit_{}_pct".format(period)] = _safe_num(rl_dict.get("used_percentage"))
+        resets_sec = _safe_num(rl_dict.get("resets_at"))
+        out["rate_limit_{}_resets".format(period)] = (
+            resets_sec * 1000 if resets_sec is not None else None
+        )
 
     # Output style
     style_obj = data.get("output_style")
