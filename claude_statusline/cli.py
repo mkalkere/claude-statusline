@@ -149,7 +149,7 @@ def _normalize(data):
     out["rate_limit_5h_pct"] = _safe_num(five_h.get("used_percentage"))
     out["rate_limit_7d_pct"] = _safe_num(seven_d.get("used_percentage"))
     # resets_at is Unix epoch seconds per Claude Code docs — convert to ms
-    # so fmt_countdown() can use a consistent ms-based pipeline
+    # for fmt_countdown() which expects milliseconds
     resets_5h = _safe_num(five_h.get("resets_at"))
     out["rate_limit_5h_resets"] = resets_5h * 1000 if resets_5h is not None else None
     resets_7d = _safe_num(seven_d.get("resets_at"))
