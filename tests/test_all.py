@@ -1499,8 +1499,8 @@ class TestRateLimits(unittest.TestCase):
 
     def test_rate_limits_with_countdown(self):
         """Reset countdown should appear when resets_at is in the future."""
-        future_ms = int(time.time() * 1000) + 7_200_000  # 2 hours from now
-        data = self._data_with_limits(five_h_pct=50, five_h_resets=future_ms)
+        future_sec = int(time.time()) + 7_200  # 2 hours from now (seconds)
+        data = self._data_with_limits(five_h_pct=50, five_h_resets=future_sec)
         result = render(data)
         self.assertIn("5h:50%", result)
         self.assertIn("~", result)  # countdown prefix
@@ -1532,14 +1532,51 @@ class TestRateLimits(unittest.TestCase):
 
     def test_rate_limits_nearest_reset(self):
         """Should show countdown to the nearest reset when both present."""
-        now = int(time.time() * 1000)
+        now = int(time.time())
         data = self._data_with_limits(
-            five_h_pct=50, five_h_resets=now + 3_600_000,    # 1h
-            seven_d_pct=20, seven_d_resets=now + 86_400_000,  # 24h
+            five_h_pct=50, five_h_resets=now + 3_600,      # 1h (seconds)
+            seven_d_pct=20, seven_d_resets=now + 86_400,   # 24h (seconds)
         )
         result = render(data)
         # Should show ~59m or ~1h, not ~24h
         self.assertIn("~", result)
+
+
+class TestRateLimitsResetConversion(unittest.TestCase):
+    """Verify resets_at seconds-to-milliseconds conversion."""
+
+    def test_resets_at_seconds_converted_to_ms(self):
+        """resets_at in seconds should produce a valid countdown."""
+        from claude_statusline.cli import _normalize
+        # Real Claude Code sends epoch seconds (roughly 1.7 billion)
+        future_sec = int(time.time()) + 3600  # 1 hour from now
+        data = {
+            "rate_limits": {
+                "five_hour": {
+                    "used_percentage": 50,
+                    "resets_at": future_sec,
+                },
+            },
+        }
+        n = _normalize(data)
+        # Should be converted to milliseconds internally
+        self.assertIsNotNone(n["rate_limit_5h_resets"])
+        self.assertGreater(n["rate_limit_5h_resets"], future_sec)
+        # Should be roughly future_sec * 1000
+        self.assertAlmostEqual(
+            n["rate_limit_5h_resets"], future_sec * 1000, delta=1000
+        )
+
+    def test_resets_at_none_stays_none(self):
+        """Missing resets_at should remain None after conversion."""
+        from claude_statusline.cli import _normalize
+        data = {
+            "rate_limits": {
+                "five_hour": {"used_percentage": 50},
+            },
+        }
+        n = _normalize(data)
+        self.assertIsNone(n["rate_limit_5h_resets"])
 
 
 class TestRateLimitsMalformed(unittest.TestCase):

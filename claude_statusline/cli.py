@@ -147,9 +147,13 @@ def _normalize(data):
     seven_d = rl.get("seven_day")
     seven_d = seven_d if isinstance(seven_d, dict) else {}
     out["rate_limit_5h_pct"] = _safe_num(five_h.get("used_percentage"))
-    out["rate_limit_5h_resets"] = _safe_num(five_h.get("resets_at"))
     out["rate_limit_7d_pct"] = _safe_num(seven_d.get("used_percentage"))
-    out["rate_limit_7d_resets"] = _safe_num(seven_d.get("resets_at"))
+    # resets_at is Unix epoch seconds per Claude Code docs — convert to ms
+    # so fmt_countdown() can use a consistent ms-based pipeline
+    resets_5h = _safe_num(five_h.get("resets_at"))
+    out["rate_limit_5h_resets"] = resets_5h * 1000 if resets_5h is not None else None
+    resets_7d = _safe_num(seven_d.get("resets_at"))
+    out["rate_limit_7d_resets"] = resets_7d * 1000 if resets_7d is not None else None
 
     # Output style
     style_obj = data.get("output_style")
@@ -530,11 +534,11 @@ def _demo_data():
         "rate_limits": {
             "five_hour": {
                 "used_percentage": 34,
-                "resets_at": int(time.time() * 1000) + 7_200_000,
+                "resets_at": int(time.time()) + 7_200,  # 2 hours from now (seconds)
             },
             "seven_day": {
                 "used_percentage": 18,
-                "resets_at": int(time.time() * 1000) + 432_000_000,
+                "resets_at": int(time.time()) + 432_000,  # 5 days from now (seconds)
             },
         },
     }
