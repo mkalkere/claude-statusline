@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-status"
-version = "0.3.1"
+version = "0.3.2"
 description = "Beautiful, informative status line for Claude Code — zero dependencies, cross-platform"
 readme = "README.md"
 license = {text = "MIT"}
