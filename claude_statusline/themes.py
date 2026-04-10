@@ -21,7 +21,7 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "effort",
+            "model", "output_style", "added_dirs", "git_worktree", "effort",
             "version", "cc_version", "clock",
         ],
         "colors": {
@@ -53,6 +53,7 @@ THEMES = {
             "added_dirs": colors.BRIGHT_BLACK,
             "effort_high": colors.BRIGHT_MAGENTA,
             "effort_low": colors.BRIGHT_BLACK,
+            "git_worktree": colors.YELLOW,
         },
     },
     # Minimal shows only essential metrics — see line1/line2 lists below
@@ -100,6 +101,7 @@ THEMES = {
             "added_dirs": colors.BRIGHT_BLACK,
             "effort_high": colors.BRIGHT_MAGENTA,
             "effort_low": colors.BRIGHT_BLACK,
+            "git_worktree": colors.YELLOW,
         },
     },
     "powerline": {
@@ -116,7 +118,7 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "effort",
+            "model", "output_style", "added_dirs", "git_worktree", "effort",
             "version", "cc_version", "clock",
         ],
         "colors": {
@@ -148,6 +150,7 @@ THEMES = {
             "added_dirs": colors.BRIGHT_BLACK,
             "effort_high": colors.BRIGHT_MAGENTA,
             "effort_low": colors.BRIGHT_BLACK,
+            "git_worktree": colors.YELLOW,
         },
     },
     "nord": {
@@ -164,7 +167,7 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "effort",
+            "model", "output_style", "added_dirs", "git_worktree", "effort",
             "version", "cc_version", "clock",
         ],
         "colors": {
@@ -196,6 +199,7 @@ THEMES = {
             "added_dirs": colors.BRIGHT_BLACK,
             "effort_high": colors.BRIGHT_MAGENTA,
             "effort_low": colors.BRIGHT_BLACK,
+            "git_worktree": colors.YELLOW,
         },
     },
     "tokyo-night": {
@@ -212,7 +216,7 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "effort",
+            "model", "output_style", "added_dirs", "git_worktree", "effort",
             "version", "cc_version", "clock",
         ],
         "colors": {
@@ -244,6 +248,7 @@ THEMES = {
             "added_dirs": colors.BRIGHT_BLACK,
             "effort_high": colors.BRIGHT_MAGENTA,
             "effort_low": colors.BRIGHT_BLACK,
+            "git_worktree": colors.YELLOW,
         },
     },
     "gruvbox": {
@@ -260,7 +265,7 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "effort",
+            "model", "output_style", "added_dirs", "git_worktree", "effort",
             "version", "cc_version", "clock",
         ],
         "colors": {
@@ -292,6 +297,7 @@ THEMES = {
             "added_dirs": colors.BRIGHT_BLACK,
             "effort_high": colors.BRIGHT_MAGENTA,
             "effort_low": colors.BRIGHT_BLACK,
+            "git_worktree": colors.YELLOW,
         },
     },
     "rose-pine": {
@@ -308,7 +314,7 @@ THEMES = {
         "line2": [
             "duration", "latency", "lines", "branch", "git_extras",
             "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "effort",
+            "model", "output_style", "added_dirs", "git_worktree", "effort",
             "version", "cc_version", "clock",
         ],
         "colors": {
@@ -340,6 +346,53 @@ THEMES = {
             "added_dirs": colors.BRIGHT_BLACK,
             "effort_high": colors.BRIGHT_MAGENTA,
             "effort_low": colors.BRIGHT_BLACK,
+            "git_worktree": colors.YELLOW,
+        },
+    },
+    # Focus: single-line theme for minimal vertical footprint.
+    # Shows only the most essential at-a-glance metrics.
+    "focus": {
+        "name": "focus",
+        "separator": " │ ",
+        "bar_filled": "█",
+        "bar_empty": "░",
+        "bar_left": "[",
+        "bar_right": "]",
+        "bar_width": 12,
+        "line1": [
+            "bar", "cost", "rate_limits", "branch", "effort", "clock",
+        ],
+        "line2": [],
+        "colors": {
+            "separator": colors.BRIGHT_BLACK,
+            "label": colors.BRIGHT_BLACK,
+            "value": colors.WHITE,
+            "cost": colors.YELLOW,
+            "branch_main": colors.GREEN,
+            "branch_feature": colors.YELLOW,
+            "warning": colors.BRIGHT_RED,
+            "added": colors.GREEN,
+            "removed": colors.RED,
+            "agent": colors.CYAN,
+            "vim_normal": colors.BLUE,
+            "vim_insert": colors.GREEN,
+            "model": colors.BRIGHT_MAGENTA,
+            "latency": colors.CYAN,
+            "sessions": colors.CYAN,
+            "session_name": colors.CYAN,
+            "version": colors.BRIGHT_BLACK,
+            "cc_version": colors.BRIGHT_BLACK,
+            "clock": colors.BRIGHT_BLACK,
+            "git_stash": colors.YELLOW,
+            "git_sync": colors.BRIGHT_BLACK,
+            "rate_limit_ok": colors.GREEN,
+            "rate_limit_warn": colors.YELLOW,
+            "rate_limit_danger": colors.BRIGHT_RED,
+            "output_style": colors.BRIGHT_BLACK,
+            "added_dirs": colors.BRIGHT_BLACK,
+            "effort_high": colors.BRIGHT_MAGENTA,
+            "effort_low": colors.BRIGHT_BLACK,
+            "git_worktree": colors.YELLOW,
         },
     },
 }
@@ -441,5 +494,9 @@ def get_theme(name):
         custom = load_custom_theme()
         if custom:
             return custom
-        # Fall through to default if custom file not found
+        import sys
+        path = _custom_theme_path()
+        if os.path.isfile(path):
+            print("Warning: could not load custom theme from {}".format(path),
+                  file=sys.stderr)
     return THEMES.get(name, THEMES["default"])

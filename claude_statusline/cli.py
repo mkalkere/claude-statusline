@@ -165,6 +165,9 @@ def _normalize(data):
     added_dirs = workspace.get("added_dirs")
     out["added_dirs_count"] = len(added_dirs) if isinstance(added_dirs, list) else 0
 
+    # Native git worktree indicator (v2.1.97+)
+    out["git_worktree"] = bool(workspace.get("git_worktree"))
+
     return out
 
 
@@ -205,7 +208,8 @@ def _render_sections(n, order, theme):
     for section in order:
         if section == "bar" and pct is not None:
             compaction = get_compaction_threshold()
-            sections.append(render_bar(pct, 20, theme, compaction))
+            bar_width = theme.get("bar_width", 20)
+            sections.append(render_bar(pct, bar_width, theme, compaction))
 
         elif section == "tokens" and (input_tokens is not None or output_tokens is not None):
             inp = fmt_tokens(input_tokens)
@@ -392,6 +396,11 @@ def _render_sections(n, order, theme):
                     "dirs:+{}".format(dirs_count), adc
                 ))
 
+        elif section == "git_worktree":
+            if n.get("git_worktree"):
+                gwtc = tc.get("git_worktree", YELLOW)
+                sections.append(colorize("gwt", gwtc))
+
         elif section == "effort":
             effort = get_effort_level()
             if effort:
@@ -436,7 +445,7 @@ def _render_sections(n, order, theme):
 _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
     "sessions", "tools", "latency", "context_size", "session_name",
-    "rate_limits", "output_style", "added_dirs", "effort",
+    "rate_limits", "output_style", "added_dirs", "effort", "git_worktree",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",
@@ -523,6 +532,7 @@ def _demo_data():
             "project_dir": "/home/user/projects/myapp",
             "current_dir": "/home/user/projects/myapp/src",
             "added_dirs": ["/home/user/projects/shared-lib"],
+            "git_worktree": False,
         },
         "model": {
             "display_name": "Opus 4.6 (1M context)",
@@ -563,7 +573,7 @@ def cmd_demo():
 
     try:
         print("claude-status v{} — theme demos\n".format(__version__))
-        for name in ("default", "minimal", "powerline", "nord", "tokyo-night", "gruvbox", "rose-pine"):
+        for name in ("default", "minimal", "powerline", "nord", "tokyo-night", "gruvbox", "rose-pine", "focus"):
             print("  {}:".format(name))
             _print_indented(render(data, name))
             print()
@@ -585,8 +595,14 @@ def cmd_demo():
         _print_indented(render(full_data, "default"))
         print()
     finally:
-        _self.get_session_tool_count = _orig_tool_count
-        _self.get_today_session_count = _orig_session_count
+        try:
+            _self.get_session_tool_count = _orig_tool_count
+        except Exception:
+            pass
+        try:
+            _self.get_today_session_count = _orig_session_count
+        except Exception:
+            pass
 
 
 def cmd_install(theme_name="default"):
@@ -599,8 +615,9 @@ def cmd_install(theme_name="default"):
         backup_file = settings_file + ".bak"
         try:
             shutil.copy2(settings_file, backup_file)
-        except OSError:
-            pass  # Best-effort backup
+        except OSError as e:
+            print("Warning: could not create backup: {}".format(e),
+                  file=sys.stderr)
         try:
             with open(settings_file, "r", encoding="utf-8") as f:
                 settings = json.load(f)
@@ -634,29 +651,104 @@ def cmd_install(theme_name="default"):
     print("Restart Claude Code to see your new status line!")
 
 
+def cmd_uninstall():
+    """Remove claude-status from Claude Code settings.
+
+    Removes the statusLine key from settings.json. If a .bak backup
+    exists with a previous statusLine config, offers to restore it.
+    """
+    settings_file = _settings_path()
+
+    if not os.path.exists(settings_file):
+        print("No settings file found at {}".format(settings_file))
+        return
+
+    try:
+        with open(settings_file, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+        if not isinstance(settings, dict):
+            settings = {}
+    except (json.JSONDecodeError, IOError) as e:
+        print("Error: could not read {}: {}".format(settings_file, e))
+        return
+
+    if "statusLine" not in settings:
+        print("claude-status is not installed (no statusLine in settings).")
+        return
+
+    # Check for backup with previous statusLine config
+    backup_file = settings_file + ".bak"
+    restored = False
+    if os.path.exists(backup_file):
+        try:
+            with open(backup_file, "r", encoding="utf-8") as f:
+                backup = json.load(f)
+            if not isinstance(backup, dict):
+                backup = {}
+            prev_sl = backup.get("statusLine")
+            if prev_sl and prev_sl != settings.get("statusLine"):
+                settings["statusLine"] = prev_sl
+                restored = True
+        except (json.JSONDecodeError, IOError) as e:
+            print("Warning: backup exists but could not be read: {}".format(e),
+                  file=sys.stderr)
+
+    if not restored:
+        del settings["statusLine"]
+
+    try:
+        with open(settings_file, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+    except IOError as e:
+        print("Error writing settings: {}".format(e))
+        return
+
+    if restored:
+        print("Restored previous statusLine config from backup.")
+        print("  statusLine: {}".format(settings.get("statusLine")))
+    else:
+        print("Removed statusLine from {}".format(settings_file))
+
+    print()
+    print("Restart Claude Code for the change to take effect.")
+    print("To fully uninstall: pip uninstall claude-status")
+
+
+_THEME_DESCRIPTIONS = {
+    "default": "full detail, clean separators",
+    "minimal": "essentials only, compact",
+    "powerline": "Nerd Font separators",
+    "nord": "cool blue tones",
+    "tokyo-night": "purple and blue accents",
+    "gruvbox": "warm retro palette",
+    "rose-pine": "soft muted pinks",
+    "focus": "single line, minimal footprint",
+}
+
+
 def cmd_setup():
     """Interactive setup wizard for first-time configuration."""
     print("claude-status v{} — setup wizard\n".format(__version__))
 
-    # Step 1: Show themes and let user pick
-    data = _demo_data()
+    # Step 1: Show theme list with short descriptions
     theme_names = ["default", "minimal", "powerline",
-                   "nord", "tokyo-night", "gruvbox", "rose-pine"]
+                   "nord", "tokyo-night", "gruvbox", "rose-pine", "focus"]
 
     print("Available themes:\n")
     for i, name in enumerate(theme_names, 1):
-        print("  [{}] {}".format(i, name))
-        _print_indented(render(data, name), "      ")
-        print()
+        desc = _THEME_DESCRIPTIONS.get(name, "")
+        print("  [{}] {:12s} — {}".format(i, name, desc))
 
-    print("  [{}] custom (load from ~/.claude/claude-status-theme.json)".format(
-        len(theme_names) + 1
+    custom_idx = len(theme_names) + 1
+    print("  [{}] {:12s} — load from ~/.claude/claude-status-theme.json".format(
+        custom_idx, "custom"
     ))
     print()
 
     try:
         choice = input("Choose a theme [1-{}] (default: 1): ".format(
-            len(theme_names) + 1
+            custom_idx
         )).strip()
     except (EOFError, KeyboardInterrupt):
         print("\nSetup cancelled.")
@@ -678,8 +770,30 @@ def cmd_setup():
             print("Invalid choice, using default.")
             theme_choice = "default"
 
+    # Show preview of selected theme
+    data = _demo_data()
+
+    import claude_statusline.cli as _self
+    _orig_tool_count = _self.get_session_tool_count
+    _orig_session_count = _self.get_today_session_count
+    _self.get_session_tool_count = lambda sid: 42
+    _self.get_today_session_count = lambda: 3
+
+    try:
+        print("\n  Preview:")
+        _print_indented(render(data, theme_choice), "    ")
+        print()
+    finally:
+        try:
+            _self.get_session_tool_count = _orig_tool_count
+        except Exception:
+            pass
+        try:
+            _self.get_today_session_count = _orig_session_count
+        except Exception:
+            pass
+
     # Step 2: Budget configuration
-    print()
     try:
         budget_input = input(
             "Set a daily budget in USD? (e.g., 10.00, or press Enter to skip): "
@@ -712,7 +826,7 @@ def cmd_setup():
         except OSError as e:
             print("  Warning: could not save budget config: {}".format(e))
 
-    # Step 4: Install
+    # Step 4: Install statusLine config
     print()
     cmd_install(theme_choice)
 
@@ -723,8 +837,12 @@ def cmd_setup():
     if budget is not None:
         print("  Budget: ${:.2f}/day".format(budget))
     print()
-    print("Preview: claude-status --demo")
+    print("Tip: Add \"refreshInterval\": 10 to your statusLine config")
+    print("     for periodic updates (clock, sessions, rate limits).")
+    print()
+    print("Preview all themes: claude-status --demo")
     print("Diagnostics: claude-status --doctor")
+    print("Uninstall: claude-status --uninstall")
 
 
 def cmd_doctor():
@@ -749,7 +867,7 @@ def cmd_doctor():
             sl = settings.get("statusLine", "(not configured)")
             print("  statusLine: {}".format(sl))
         except Exception as e:
-            print("  Error reading settings: {}".format(e))
+            print("  Error reading settings: {}: {}".format(type(e).__name__, e))
     else:
         print("  Settings file not found")
     print()
@@ -779,12 +897,13 @@ def main():
     parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
     parser.add_argument("--demo", action="store_true", help="Show demo output for all themes")
     parser.add_argument("--install", action="store_true", help="Install into Claude Code settings")
+    parser.add_argument("--uninstall", action="store_true", help="Remove from Claude Code settings")
     parser.add_argument("--setup", action="store_true", help="Interactive setup wizard")
     parser.add_argument("--doctor", action="store_true", help="Run diagnostics")
     parser.add_argument("--theme", default="default",
                         choices=["default", "minimal", "powerline",
                                  "nord", "tokyo-night", "gruvbox", "rose-pine",
-                                 "custom"],
+                                 "focus", "custom"],
                         help="Theme for this render (default: default). "
                              "Use --install --theme NAME or --setup to persist. "
                              "'custom' loads ~/.claude/claude-status-theme.json")
@@ -797,6 +916,10 @@ def main():
 
     if args.install:
         cmd_install(args.theme)
+        return
+
+    if args.uninstall:
+        cmd_uninstall()
         return
 
     if args.setup:

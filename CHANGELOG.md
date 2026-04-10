@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-10
+
+### Added
+- **`--uninstall` command** — cleanly removes statusLine from settings.json and restores previous config from backup if available. Closes #43.
+- **`focus` theme** — single-line layout showing only essentials (bar, cost, rate limits, branch, effort, clock) with a narrow 12-char bar for minimal vertical footprint. Closes #44.
+- **Git worktree indicator** (`gwt`) — displays when inside a native git worktree (from `workspace.git_worktree`, Claude Code v2.1.97+). Closes #41.
+- **`refreshInterval` documentation** — README now documents periodic status line updates via the `refreshInterval` setting (Claude Code v2.1.97+). Closes #42.
+
+### Changed
+- **Setup wizard redesigned** — shows compact 1-line descriptions per theme instead of full 2-line renders. Previews only the selected theme after choice. Mentions `refreshInterval` and `--uninstall` in summary. Closes #45.
+- **Comprehensive README refresh** — new 30-Second Setup section, updated feature tables (27+ data points), complete CLI reference with `--uninstall`, `refreshInterval` in all config examples, expanded FAQ, improved Uninstall section. Closes #46.
+- 8 built-in themes (was 7) — all updated with `git_worktree` section and color key
+- Bar width now configurable per theme via `bar_width` key
+
 ## [0.3.2] - 2026-04-08
 
 ### Fixed
