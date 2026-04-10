@@ -33,7 +33,7 @@ Custom themes: `~/.claude/claude-status-theme.json`
 ## Metrics Displayed
 
 Line 1: context bar, tokens (in/out), cache %, cost, budget, burn rate, rate limits (5h/7d with countdown), context size, context warning
-Line 2: duration, API latency, lines changed, git branch, git stash, git sync, git worktree, tool calls, sessions today, session name, vim mode, agent, worktree, model, output style, added dirs, effort level, version, CC version, clock
+Line 2: duration, API latency, lines changed, git branch, git extras (stash/sync), tool calls, sessions today, session name, vim mode, agent, worktree, model, output style, added dirs, git worktree, effort level, version, CC version, clock
 
 ## Configuration Files
 
