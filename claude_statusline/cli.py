@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import sys
+import tempfile
 import time
 
 from . import __version__
@@ -930,7 +931,6 @@ def cmd_doctor():
         ))
     else:
         print("  ~/.claude/: directory not found")
-    import tempfile
     tmp = tempfile.gettempdir()
     print("  Temp dir:   {} ({})".format(
         tmp, "writable" if os.access(tmp, os.W_OK) else "NOT WRITABLE"
