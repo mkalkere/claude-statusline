@@ -11,30 +11,30 @@
 
 ```
 Line 1:  [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min │ 5h:34% 7d:18% ~2h │ (200K)
-Line 2:  12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ style:explanatory │ effort:high │ v0.3.1 │ CC:2.1.92 │ 15:30
+Line 2:  12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ effort:high │ v0.4.0 │ CC:2.1.92 │ 15:30
 ```
 
-## Quick Start
+## 30-Second Setup
 
 ```bash
 pip install claude-status
-claude-status --install
+claude-status --setup
 ```
 
-Restart Claude Code. That's it — two lines of pure signal at the bottom of your terminal.
+The setup wizard walks you through theme selection, budget configuration, and installs everything automatically. Restart Claude Code and you're done.
 
 ## Why claude-status?
 
 - **Zero dependencies** — pure Python stdlib. No `psutil`, no `colorama`, no compilation. Installs in under 2 seconds
-- **Two-line layout** — glanceable metrics on line 1, context details on line 2. Nothing gets truncated
-- **Every metric that matters** — 26 data points including burn rate (tokens/min), rate limit tracking, and effort level
-- **Rate limit awareness** — see your 5-hour and 7-day API usage at a glance with color-coded warnings
+- **Every metric that matters** — 27+ data points including burn rate (tokens/min), rate limit tracking, and effort level
+- **Rate limit awareness** — see your 5-hour and 7-day API usage at a glance with color-coded warnings and reset countdown
 - **Responsive layout** — automatically adapts to your terminal width (full/compact/narrow)
-- **7 built-in themes** — default, minimal, powerline, nord, tokyo-night, gruvbox, rose-pine
+- **8 built-in themes** — default, minimal, powerline, nord, tokyo-night, gruvbox, rose-pine, focus
 - **Budget monitoring** — set a daily spend limit, get color-coded warnings as you approach it
 - **Session analytics** — tool call count and today's session count at a glance
 - **Cross-platform** — tested on Windows, macOS, and Linux across Python 3.8–3.14 (21 CI jobs)
 - **Interactive setup** — `--setup` wizard walks you through theme selection and budget config
+- **Clean uninstall** — `--uninstall` restores your previous configuration
 
 ## Features
 
@@ -45,11 +45,11 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 | Token Counts | `in:245K out:18K` | Human-readable (K/M) — no squinting at raw numbers |
 | Cache Efficiency | `cache:41%` | See how much prompt cache is saving you |
 | Cost | `$0.73` | Session cost in real-time — cents for small, dollars for large |
-| Burn Rate | `burn:36K/min` | Tokens/min consumption — unique to claude-status |
-| Context Size | `(200K)` | Know if you're on 200K or 1M context |
 | Budget | `$0.73/$10` | Color-coded daily budget tracker (green/yellow/red) |
+| Burn Rate | `burn:37K/min` | Tokens/min consumption — unique to claude-status |
 | Rate Limits | `5h:34% 7d:18% ~2h` | API usage limits with reset countdown (Pro/Max only) |
-| Context Warning | `!CTX` | Bold red alert when you exceed 200K tokens |
+| Context Size | `(200K)` | Know if you're on 200K or 1M context |
+| Context Warning | `!CTX` | Bold red alert at 85%+ context usage |
 
 ### Line 2 — Session Context
 | Feature | What You See | Why It Matters |
@@ -57,31 +57,32 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 | Duration | `12m05s` | Wall-clock session time |
 | API Latency | `api:5m12s` | Time spent in API calls |
 | Lines Changed | `+247 -38` | Git-diff style — green additions, red removals |
-| Git Branch | `⎇ feat/statusline` | Green for main/master, yellow for feature branches |
+| Git Branch | `⎇ myapp/feat/statusline` | Project name + branch, color-coded |
 | Git Stash | `stash:2` | Number of stashed changes |
 | Git Sync | `sync:+2/-1` | Commits ahead/behind remote |
+| Git Worktree | `gwt` | Indicator when inside a native git worktree |
 | Tool Calls | `tools:42` | Number of tool calls in current session |
 | Sessions Today | `sessions:3` | How many sessions you've started today |
-| Vim Mode | `NORMAL` | Blue for NORMAL, green for INSERT (when vim mode is on) |
-| Agent | `[Explore]` | Shows which subagent is active |
 | Session Name | `✦ refactor auth` | Custom session name (via `--name` or `/rename`) |
-| Worktree | `wt:fix/bug-123` | Worktree branch indicator |
-| Model | `Opus 4.6 (1M context)` | Active model name |
+| Vim Mode | `NORMAL` | Blue for NORMAL, green for INSERT |
+| Agent | `[Explore]` | Shows which subagent is active |
+| Worktree | `wt:fix/bug-123` | Claude Code worktree branch indicator |
+| Model | `Opus` | Active model name |
 | Output Style | `style:explanatory` | Active output style when set |
 | Added Dirs | `dirs:+2` | Extra directories added via `/add-dir` |
 | Effort Level | `effort:high` | Thinking effort (shown when non-default) |
-| Version | `v0.3.1` | claude-status version |
+| Version | `v0.4.0` | claude-status version |
 | CC Version | `CC:2.1.92` | Claude Code application version |
 | Clock | `15:30` | Current time |
 
 ## Themes
 
-7 built-in themes to match your terminal aesthetic. Preview all live with `claude-status --demo`.
+8 built-in themes to match your terminal aesthetic. Preview all live with `claude-status --demo`.
 
 ### default — full detail, clean separators
 ```
 [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min │ 5h:34% 7d:18% ~2h │ (200K)
-12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ v0.3.1 │ CC:2.1.92 │ 15:30
+12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ v0.4.0 │ CC:2.1.92 │ 15:30
 ```
 
 ### minimal — just the essentials
@@ -93,7 +94,12 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 ### powerline — Nerd Font separators
 ```
 ████████░░░░░░░░░░░░  in:245K out:18K  cache:41%  $0.73  burn:37K/min  5h:34% 7d:18% ~2h  (200K)
-12m05s  +247 -38  ⎇ feat/statusline  ✦ refactor auth  Opus  v0.3.1  CC:2.1.92  15:30
+12m05s  +247 -38  ⎇ feat/statusline  ✦ refactor auth  Opus  v0.4.0  CC:2.1.92  15:30
+```
+
+### focus — single line, minimal footprint
+```
+[████████░░░░] │ $0.73 │ 5h:34% 7d:18% ~2h │ ⎇ main │ effort:high │ 15:30
 ```
 
 ### nord — cool blue tones
@@ -106,18 +112,18 @@ Restart Claude Code. That's it — two lines of pure signal at the bottom of you
 ### pip (recommended)
 ```bash
 pip install claude-status
-claude-status --install
+claude-status --setup
 ```
 
 ### pipx (isolated — no venv pollution)
 ```bash
 pipx install claude-status
-claude-status --install
+claude-status --setup
 ```
 
 ### uvx (fast, modern)
 ```bash
-uvx claude-status --install
+uvx claude-status --setup
 ```
 
 ### From source (contributors)
@@ -125,19 +131,15 @@ uvx claude-status --install
 git clone https://github.com/mkalkere/claude-statusline.git
 cd claude-statusline
 pip install -e .
-claude-status --install
+claude-status --setup
 ```
 
-### What `--install` does
+### What `--setup` does
 
-Reads your `~/.claude/settings.json`, adds the `statusLine` entry, preserves everything else. Use `--theme` to pick a theme:
-
-```bash
-claude-status --install --theme powerline
-```
+Walks you through theme selection with a compact preview, optional budget configuration, and writes the statusLine entry to `~/.claude/settings.json`. Preserves all your existing settings.
 
 > **Command not found?** Ensure your Python scripts directory is in `PATH`.
-> Fallback: `python -m claude_statusline --install`
+> Fallback: `python -m claude_statusline --setup`
 
 ## CLI Reference
 
@@ -146,7 +148,8 @@ claude-status --install --theme powerline
 | `claude-status --setup` | Interactive setup wizard (recommended for first use) |
 | `claude-status --install` | Auto-configure Claude Code settings |
 | `claude-status --install --theme nord` | Install with a specific theme |
-| `claude-status --demo` | Preview all 7 themes with sample data |
+| `claude-status --uninstall` | Remove from Claude Code settings (restores previous config) |
+| `claude-status --demo` | Preview all 8 themes with sample data |
 | `claude-status --doctor` | Diagnostics: Python version, OS, terminal, current settings |
 | `claude-status --version` | Show version |
 | `claude-status --help` | Show usage |
@@ -163,33 +166,39 @@ Or manually create `~/.claude/claude-status-budget.json`:
 
 ```json
 {
-  "daily_budget_usd": 10.00
-}
-```
-
-The budget indicator changes color based on usage:
-- **Green**: under 70% of budget
-- **Yellow**: 70–90% of budget
-- **Red (bold)**: 90%+ of budget
-
-### Compaction Threshold
-
-Scale the context bar relative to your compaction threshold instead of the full context window:
-
-```json
-{
   "daily_budget_usd": 10.00,
   "compaction_threshold_pct": 62
 }
 ```
 
-With this set, the context bar shows 100% when you reach 62% of the context window — the point where compaction triggers.
+**Budget thresholds:**
+- **Green**: under 70% of budget
+- **Yellow**: 70–90% of budget
+- **Red (bold)**: 90%+ of budget
 
-### Responsive Layout
+**Compaction threshold:** When set, the context bar scales relative to the compaction point instead of the full context window. At 62%, the bar shows 100% when you reach 62% of the context window — the point where compaction triggers.
+
+## Periodic Updates
+
+By default, the status line updates after each assistant message. Add `refreshInterval` to your config for periodic updates — this keeps the clock, session count, and rate limit countdown current:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "claude-status --theme default",
+    "refreshInterval": 10
+  }
+}
+```
+
+This runs the status line every 10 seconds in addition to the standard update triggers.
+
+## Responsive Layout
 
 The status line automatically adapts to your terminal width:
 - **120+ columns**: full detail (all sections)
-- **80–119 columns**: compact (drops extras like git stash, version, clock)
+- **80–119 columns**: compact (drops extras like git stash, version, clock, rate limits)
 - **Under 80 columns**: narrow (essentials only — bar, tokens, cost, duration, branch)
 
 ## Manual Configuration
@@ -200,7 +209,8 @@ Add to `~/.claude/settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "claude-status"
+    "command": "claude-status",
+    "refreshInterval": 10
   }
 }
 ```
@@ -211,34 +221,15 @@ With a theme:
 {
   "statusLine": {
     "type": "command",
-    "command": "claude-status --theme minimal"
+    "command": "claude-status --theme focus",
+    "refreshInterval": 10
   }
 }
 ```
 
 ## How It Works
 
-Claude Code pipes session JSON to your `statusLine` command via stdin on every render cycle. `claude-status` parses it, formats 14 metrics across 2 lines, and prints to stdout. No daemon, no database, no background process — just a pure stdin-to-stdout pipe that runs in milliseconds.
-
-## Comparison
-
-| | claude-status | claude-statusline | ccstatusline |
-|---|:-:|:-:|:-:|
-| **Language** | Python | Python | Node.js |
-| **Dependencies** | **0** | 2 (psutil, colorama) | npm |
-| **Install time** | ~2s | ~10s | ~15s |
-| **Cross-platform** | Windows, macOS, Linux | Windows, macOS, Linux | Partial |
-| **Themes** | 7 + custom | 100 | 1 |
-| **Burn rate** | Yes | No | No |
-| **Rate limit tracking** | Yes | No | No |
-| **Budget monitoring** | Yes | No | No |
-| **Session analytics** | Yes | No | No |
-| **Two-line layout** | Yes | Yes | No |
-| **Interactive setup** | `--setup` | `init` | Manual |
-| **Analytics/Dashboard** | No | Yes | No |
-| **Background daemon** | No | Yes | No |
-
-**Our philosophy:** Do one thing well. Show every metric you need, nothing you don't. Install in 2 seconds, work everywhere, break never.
+Claude Code pipes session JSON to your `statusLine` command via stdin on every render cycle (and every `refreshInterval` seconds if configured). `claude-status` parses it, formats 27+ metrics across up to 2 lines, and prints to stdout. No daemon, no database, no background process — just a pure stdin-to-stdout pipe that runs in milliseconds.
 
 ## FAQ
 
@@ -252,10 +243,16 @@ Yes — use `--theme custom` with a `~/.claude/claude-status-theme.json` file. O
 Create `~/.claude/claude-status-budget.json` with `{"daily_budget_usd": 10.00}`. The cost indicator turns yellow at 70% and red at 90% of your daily limit.
 
 **What is burn rate?**
-Tokens consumed per minute — a metric unique to claude-status. Helps you gauge how fast you're using context in a session.
+Tokens consumed per minute. Helps you gauge how fast you're using context in a session.
 
 **Do I need a Pro/Max subscription for rate limit tracking?**
 Yes. The `rate_limits` field is only included in the Claude Code JSON payload for Pro/Max subscribers. The section is automatically hidden for other users — no configuration needed.
+
+**How often does the status line update?**
+By default, after each assistant message. Add `"refreshInterval": 10` to your statusLine config for periodic updates every 10 seconds — recommended for keeping the clock and rate limit countdown current.
+
+**Can I use a single-line layout?**
+Yes — use the `focus` theme: `claude-status --install --theme focus`. It shows only the essentials on one line.
 
 **Does it add any latency to Claude Code?**
 No. It runs as a pure stdin-to-stdout pipe in single-digit milliseconds. No daemon, no network calls, no background processes.
@@ -270,16 +267,20 @@ If claude-status doesn't appear after installation:
 1. Run `claude-status --doctor` to check your setup
 2. Verify `~/.claude/settings.json` contains the `statusLine` entry
 3. Ensure your Python scripts directory is in your `PATH`
-4. Try `python -m claude_statusline --install` as a fallback
+4. Try `python -m claude_statusline --setup` as a fallback
 5. Restart Claude Code after any configuration change
 
 ## Uninstall
 
 ```bash
-pip uninstall claude-status
+claude-status --uninstall
 ```
 
-Then remove `"statusLine"` from `~/.claude/settings.json`.
+This removes the statusLine entry from your settings and restores your previous configuration if a backup exists. Then:
+
+```bash
+pip uninstall claude-status
+```
 
 ## Contributing
 

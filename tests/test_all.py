@@ -257,10 +257,10 @@ class TestGitBranch(unittest.TestCase):
 # ─── themes.py ────────────────────────────────────────────────────────
 
 class TestThemes(unittest.TestCase):
-    def test_all_three_exist(self):
-        self.assertIn("default", THEMES)
-        self.assertIn("minimal", THEMES)
-        self.assertIn("powerline", THEMES)
+    def test_all_builtin_themes_exist(self):
+        for name in ("default", "minimal", "powerline", "nord",
+                     "tokyo-night", "gruvbox", "rose-pine", "focus"):
+            self.assertIn(name, THEMES, "Missing theme: {}".format(name))
 
     def test_required_keys(self):
         required = ["name", "separator", "bar_filled", "bar_empty",
@@ -2061,6 +2061,274 @@ class TestOutputStyleExtra(unittest.TestCase):
         }
         result = render(data)
         self.assertNotIn("style:", result)
+
+
+# ─── cli.py — git worktree indicator ────────────────────────────────
+
+class TestGitWorktree(unittest.TestCase):
+    def _base_data(self, **extra):
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "git_branch": "main",
+        }
+        data.update(extra)
+        return data
+
+    def test_git_worktree_shown_when_true(self):
+        data = self._base_data(workspace={
+            "project_dir": "/home/user/myapp",
+            "git_worktree": True,
+        })
+        result = render(data)
+        self.assertIn("gwt", result)
+
+    def test_git_worktree_hidden_when_false(self):
+        data = self._base_data(workspace={
+            "project_dir": "/home/user/myapp",
+            "git_worktree": False,
+        })
+        result = render(data)
+        self.assertNotIn("gwt", result)
+
+    def test_git_worktree_hidden_when_absent(self):
+        data = self._base_data()
+        result = render(data)
+        self.assertNotIn("gwt", result)
+
+    def test_git_worktree_non_boolean(self):
+        """Non-boolean value should not crash."""
+        data = self._base_data(workspace={
+            "project_dir": "/home/user/myapp",
+            "git_worktree": "yes",
+        })
+        result = render(data)
+        # Truthy string should show the indicator
+        self.assertIn("gwt", result)
+
+
+# ─── cli.py — uninstall command ─────────────────────────────────────
+
+class TestUninstall(unittest.TestCase):
+    def test_uninstall_removes_statusline(self):
+        """--uninstall should remove statusLine from settings."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                json.dump({
+                    "statusLine": {"type": "command", "command": "claude-status"},
+                    "otherKey": "preserved",
+                }, f)
+
+            import claude_statusline.cli as cli_mod
+            orig = cli_mod._settings_path
+            cli_mod._settings_path = lambda: settings_file
+            try:
+                cli_mod.cmd_uninstall()
+                with open(settings_file, "r") as f:
+                    settings = json.load(f)
+                self.assertNotIn("statusLine", settings)
+                self.assertEqual(settings["otherKey"], "preserved")
+            finally:
+                cli_mod._settings_path = orig
+
+    def test_uninstall_restores_from_backup(self):
+        """--uninstall should restore previous config from .bak."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            backup_file = settings_file + ".bak"
+
+            # Current settings
+            with open(settings_file, "w") as f:
+                json.dump({
+                    "statusLine": {"type": "command", "command": "claude-status"},
+                }, f)
+            # Backup with different statusLine
+            with open(backup_file, "w") as f:
+                json.dump({
+                    "statusLine": {"type": "command", "command": "old-tool"},
+                }, f)
+
+            import claude_statusline.cli as cli_mod
+            orig = cli_mod._settings_path
+            cli_mod._settings_path = lambda: settings_file
+            try:
+                cli_mod.cmd_uninstall()
+                with open(settings_file, "r") as f:
+                    settings = json.load(f)
+                self.assertEqual(
+                    settings["statusLine"]["command"], "old-tool"
+                )
+            finally:
+                cli_mod._settings_path = orig
+
+    def test_uninstall_when_not_installed(self):
+        """--uninstall should handle missing statusLine gracefully."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                json.dump({"otherKey": "value"}, f)
+
+            import claude_statusline.cli as cli_mod
+            orig = cli_mod._settings_path
+            cli_mod._settings_path = lambda: settings_file
+            try:
+                cli_mod.cmd_uninstall()  # should not crash
+            finally:
+                cli_mod._settings_path = orig
+
+    def test_uninstall_missing_file(self):
+        """--uninstall should handle missing settings file."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod._settings_path
+        cli_mod._settings_path = lambda: "/nonexistent/settings.json"
+        try:
+            cli_mod.cmd_uninstall()  # should not crash
+        finally:
+            cli_mod._settings_path = orig
+
+
+# ─── themes.py — focus theme ────────────────────────────────────────
+
+class TestUninstallEdgeCases(unittest.TestCase):
+    def test_uninstall_corrupt_settings(self):
+        """Corrupt settings.json should not crash uninstall."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                f.write("{not valid json")
+
+            import claude_statusline.cli as cli_mod
+            orig = cli_mod._settings_path
+            cli_mod._settings_path = lambda: settings_file
+            try:
+                cli_mod.cmd_uninstall()  # should not crash
+            finally:
+                cli_mod._settings_path = orig
+
+    def test_uninstall_backup_same_as_current(self):
+        """When backup has same statusLine, should remove it."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            backup_file = settings_file + ".bak"
+            sl = {"type": "command", "command": "claude-status"}
+
+            with open(settings_file, "w") as f:
+                json.dump({"statusLine": sl}, f)
+            with open(backup_file, "w") as f:
+                json.dump({"statusLine": sl}, f)
+
+            import claude_statusline.cli as cli_mod
+            orig = cli_mod._settings_path
+            cli_mod._settings_path = lambda: settings_file
+            try:
+                cli_mod.cmd_uninstall()
+                with open(settings_file, "r") as f:
+                    settings = json.load(f)
+                self.assertNotIn("statusLine", settings)
+            finally:
+                cli_mod._settings_path = orig
+
+    def test_uninstall_corrupt_backup(self):
+        """Corrupt backup should not crash, should remove statusLine."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            backup_file = settings_file + ".bak"
+
+            with open(settings_file, "w") as f:
+                json.dump({"statusLine": {"type": "command", "command": "claude-status"}}, f)
+            with open(backup_file, "w") as f:
+                f.write("{corrupt backup")
+
+            import claude_statusline.cli as cli_mod
+            orig = cli_mod._settings_path
+            cli_mod._settings_path = lambda: settings_file
+            try:
+                cli_mod.cmd_uninstall()
+                with open(settings_file, "r") as f:
+                    settings = json.load(f)
+                self.assertNotIn("statusLine", settings)
+            finally:
+                cli_mod._settings_path = orig
+
+
+class TestFocusTheme(unittest.TestCase):
+    def test_focus_theme_exists(self):
+        self.assertIn("focus", THEMES)
+
+    def test_focus_theme_single_line(self):
+        """Focus theme should produce a single line."""
+        data = {
+            "context_window": {"used_percentage": 42,
+                               "context_window_size": 200_000,
+                               "current_usage": {"input_tokens": 50000}},
+            "cost": {"total_cost_usd": 0.73, "total_duration_ms": 300000},
+            "git_branch": "main",
+        }
+        result = render(data, "focus")
+        lines = result.split("\n")
+        self.assertEqual(len(lines), 1,
+                         "Focus theme should produce 1 line, got {}".format(len(lines)))
+
+    def test_focus_theme_has_narrow_bar(self):
+        """Focus theme should use a narrower bar width."""
+        self.assertEqual(THEMES["focus"].get("bar_width", 20), 12)
+
+    def test_focus_theme_empty_line2(self):
+        """Focus theme line2 should be empty."""
+        self.assertEqual(THEMES["focus"]["line2"], [])
+
+    def test_focus_theme_has_required_colors(self):
+        """Focus theme should have all required color keys."""
+        required = ["separator", "label", "value", "cost",
+                     "branch_main", "branch_feature"]
+        for key in required:
+            self.assertIn(key, THEMES["focus"]["colors"],
+                          "focus theme missing color: {}".format(key))
+
+
+# ─── cli.py — setup wizard ──────────────────────────────────────────
+
+class TestSetupWizardUpdated(unittest.TestCase):
+    def test_setup_flag_accepted(self):
+        """--setup should be recognized."""
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_statusline", "--setup"],
+            capture_output=True, timeout=5,
+            input="1\n\n",
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("setup wizard", result.stdout)
+        # Should show compact theme list, not full renders
+        self.assertIn("full detail", result.stdout)
+        self.assertIn("focus", result.stdout)
+
+    def test_uninstall_flag_accepted(self):
+        """--uninstall should be recognized."""
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_statusline", "--uninstall"],
+            capture_output=True, timeout=5,
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        self.assertEqual(result.returncode, 0)
+
+    def test_demo_shows_all_themes(self):
+        """Demo should show all 8 themes including focus."""
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_statusline", "--demo"],
+            capture_output=True, timeout=10,
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        self.assertEqual(result.returncode, 0)
+        for name in ("default", "minimal", "powerline", "nord",
+                     "tokyo-night", "gruvbox", "rose-pine", "focus"):
+            self.assertIn("{}:".format(name), result.stdout,
+                          "Demo missing theme: {}".format(name))
 
 
 if __name__ == "__main__":
