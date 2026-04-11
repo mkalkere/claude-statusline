@@ -247,7 +247,7 @@ def get_git_state():
 def get_last_commit_age_ms():
     """Get milliseconds since the last commit.
 
-    Uses 5s cache via the extras cache.
+    Cached with 5s TTL via the shared extras cache.
 
     Returns:
         Milliseconds since last commit, or None if unavailable.
@@ -282,7 +282,7 @@ def get_last_commit_age_ms():
 def get_remote_url():
     """Get the HTTPS URL of the git remote origin.
 
-    Converts SSH URLs to HTTPS. Cached with branch (5s TTL).
+    Converts SSH URLs to HTTPS. Cached with 5s TTL via shared extras cache.
 
     Returns:
         HTTPS URL string, or empty string if unavailable.

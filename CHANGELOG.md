@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Token speed display** (`speed:1.2K/s`) — real-time token throughput computed from tokens / API duration. Closes #57.
 - **Progress bar style presets** — 4 named styles: default, dots, blocks, thin. Configurable via `bar_style` key in themes. Closes #59.
-- **Git merge/rebase/conflict indicators** — detects repo state via fast file checks (.git/MERGE_HEAD, rebase-merge/). Red for conflicts, yellow for merge/rebase. Closes #60.
+- **Git merge/rebase/conflict indicators** — detects repo state via .git file checks and lightweight git commands. Red for conflicts, yellow for merge/rebase. Closes #60.
 - **Time since last commit** (`last:5m`) — shows how long ago the last commit was made. Closes #61.
 - **NO_COLOR / FORCE_COLOR support** — respects the NO_COLOR standard (https://no-color.org/) and FORCE_COLOR override. Closes #62.
 - **Clickable OSC 8 links** — git branch section is now clickable in supported terminals (iTerm2, Kitty, WezTerm). Opens repo URL in browser. Closes #63.
