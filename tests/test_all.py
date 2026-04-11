@@ -2354,5 +2354,340 @@ class TestSetupWizardUpdated(unittest.TestCase):
                           "Demo missing theme: {}".format(name))
 
 
+# ─── formatters.py — speed ───────────────────────────────────────────
+
+class TestFmtSpeed(unittest.TestCase):
+    def test_normal_speed(self):
+        from claude_statusline.formatters import fmt_speed
+        result = fmt_speed(10000, 10000)  # 10K tokens in 10s = 1K/s
+        self.assertIn("/s", result)
+        self.assertIn("1K", result)
+
+    def test_zero_duration(self):
+        from claude_statusline.formatters import fmt_speed
+        self.assertEqual(fmt_speed(1000, 0), "")
+
+    def test_none_tokens(self):
+        from claude_statusline.formatters import fmt_speed
+        self.assertEqual(fmt_speed(None, 1000), "")
+
+    def test_none_duration(self):
+        from claude_statusline.formatters import fmt_speed
+        self.assertEqual(fmt_speed(1000, None), "")
+
+
+# ─── cli.py — speed section ─────────────────────────────────────────
+
+class TestSpeedSection(unittest.TestCase):
+    def test_speed_displayed(self):
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 50000,
+                                                 "output_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000,
+                     "total_api_duration_ms": 10000},
+            "git_branch": "main",
+        }
+        result = render(data)
+        self.assertIn("speed:", result)
+        self.assertIn("/s", result)
+
+    def test_speed_hidden_no_api_duration(self):
+        data = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+            "git_branch": "main",
+        }
+        result = render(data)
+        self.assertNotIn("speed:", result)
+
+
+# ─── colors.py — NO_COLOR support ───────────────────────────────────
+
+class TestNoColor(unittest.TestCase):
+    def test_colorize_respects_no_color(self):
+        from claude_statusline import colors
+        orig = colors._NO_COLOR
+        colors._NO_COLOR = True
+        try:
+            result = colors.colorize("hello", colors.GREEN)
+            self.assertEqual(result, "hello")
+            self.assertNotIn("\033", result)
+        finally:
+            colors._NO_COLOR = orig
+
+    def test_colorize_normal_with_color(self):
+        from claude_statusline import colors
+        orig = colors._NO_COLOR
+        colors._NO_COLOR = False
+        try:
+            result = colors.colorize("hello", colors.GREEN)
+            self.assertIn("\033", result)
+            self.assertIn("hello", result)
+        finally:
+            colors._NO_COLOR = orig
+
+
+# ─── git.py — git state and commit age ──────────────────────────────
+
+class TestGitState(unittest.TestCase):
+    def test_returns_string(self):
+        from claude_statusline.git import get_git_state
+        result = get_git_state()
+        self.assertIsInstance(result, str)
+
+    def test_clean_repo_empty(self):
+        """Clean repo should return empty string."""
+        from claude_statusline.git import get_git_state
+        result = get_git_state()
+        # We're in a clean repo, should be empty
+        self.assertEqual(result, "")
+
+
+class TestLastCommitAge(unittest.TestCase):
+    def test_returns_int_or_none(self):
+        from claude_statusline.git import get_last_commit_age_ms
+        result = get_last_commit_age_ms()
+        # In a git repo, should return an int
+        if result is not None:
+            self.assertIsInstance(result, int)
+            self.assertGreaterEqual(result, 0)
+
+
+class TestRemoteUrl(unittest.TestCase):
+    def test_returns_string(self):
+        from claude_statusline.git import get_remote_url
+        result = get_remote_url()
+        self.assertIsInstance(result, str)
+
+
+# ─── cli.py — git state section ─────────────────────────────────────
+
+class TestGitStateSection(unittest.TestCase):
+    def test_git_state_hidden_when_clean(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_git_state
+        cli_mod.get_git_state = lambda: ""
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertNotIn("merge", result)
+            self.assertNotIn("rebase", result)
+            self.assertNotIn("conflict", result)
+        finally:
+            cli_mod.get_git_state = orig
+
+    def test_git_state_merge(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_git_state
+        cli_mod.get_git_state = lambda: "merge"
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("merge", result)
+        finally:
+            cli_mod.get_git_state = orig
+
+    def test_git_state_conflict(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_git_state
+        cli_mod.get_git_state = lambda: "conflict"
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("conflict", result)
+        finally:
+            cli_mod.get_git_state = orig
+
+
+# ─── cli.py — commit age section ────────────────────────────────────
+
+class TestCommitAgeSection(unittest.TestCase):
+    def test_commit_age_displayed(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_last_commit_age_ms
+        cli_mod.get_last_commit_age_ms = lambda: 300000  # 5 minutes
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("last:", result)
+        finally:
+            cli_mod.get_last_commit_age_ms = orig
+
+    def test_commit_age_hidden_when_none(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_last_commit_age_ms
+        cli_mod.get_last_commit_age_ms = lambda: None
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertNotIn("last:", result)
+        finally:
+            cli_mod.get_last_commit_age_ms = orig
+
+
+# ─── cli.py — OSC 8 links ───────────────────────────────────────────
+
+class TestOSC8Links(unittest.TestCase):
+    def test_osc8_link_with_url(self):
+        from claude_statusline.cli import _osc8_link
+        result = _osc8_link("https://github.com/test", "branch")
+        self.assertIn("branch", result)
+        self.assertIn("\033]8;;", result)
+
+    def test_osc8_link_no_url(self):
+        from claude_statusline.cli import _osc8_link
+        result = _osc8_link("", "branch")
+        self.assertEqual(result, "branch")
+
+    def test_osc8_link_none_url(self):
+        from claude_statusline.cli import _osc8_link
+        result = _osc8_link(None, "branch")
+        self.assertEqual(result, "branch")
+
+
+# ─── sessions.py — disabled sections ────────────────────────────────
+
+class TestDisabledSections(unittest.TestCase):
+    def test_disabled_sections_filters(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_disabled_sections
+        cli_mod.get_disabled_sections = lambda: ["cache", "latency"]
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000,
+                                                     "cache_read_input_tokens": 3000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000,
+                         "total_api_duration_ms": 5000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertNotIn("cache:", result)
+            self.assertNotIn("api:", result)
+        finally:
+            cli_mod.get_disabled_sections = orig
+
+    def test_no_disabled_sections(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_disabled_sections
+        cli_mod.get_disabled_sections = lambda: []
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000,
+                                                     "cache_read_input_tokens": 3000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("cache:", result)
+        finally:
+            cli_mod.get_disabled_sections = orig
+
+
+# ─── bar.py — bar styles ────────────────────────────────────────────
+
+class TestBarStyles(unittest.TestCase):
+    def test_default_style(self):
+        from claude_statusline.bar import BAR_STYLES
+        self.assertIn("default", BAR_STYLES)
+        self.assertIn("filled", BAR_STYLES["default"])
+
+    def test_all_styles_exist(self):
+        from claude_statusline.bar import BAR_STYLES
+        for name in ("default", "dots", "blocks", "thin"):
+            self.assertIn(name, BAR_STYLES, "Missing bar style: {}".format(name))
+
+    def test_bar_style_in_theme(self):
+        """bar_style key in theme should resolve to style chars."""
+        bar = render_bar(50, 20, {"bar_style": "dots"})
+        self.assertIn("[", bar)
+        self.assertTrue(len(bar) > 0)
+
+    def test_explicit_chars_override_style(self):
+        """Explicit bar_filled should override bar_style."""
+        bar = render_bar(50, 20, {
+            "bar_style": "dots",
+            "bar_filled": "#",
+        })
+        self.assertIn("#", bar)
+
+
+# ─── Additional edge case tests ─────────────────────────────────────
+
+class TestOSC8NoColor(unittest.TestCase):
+    def test_osc8_suppressed_with_no_color(self):
+        """OSC 8 links should be plain text when NO_COLOR is set."""
+        from claude_statusline import colors as _cm
+        from claude_statusline.cli import _osc8_link
+        orig = _cm._NO_COLOR
+        _cm._NO_COLOR = True
+        try:
+            result = _osc8_link("https://example.com", "branch")
+            self.assertEqual(result, "branch")
+            self.assertNotIn("\033", result)
+        finally:
+            _cm._NO_COLOR = orig
+
+
+class TestFmtSpeedNegative(unittest.TestCase):
+    def test_negative_duration(self):
+        from claude_statusline.formatters import fmt_speed
+        self.assertEqual(fmt_speed(1000, -500), "")
+
+
+class TestBarStyleUnknown(unittest.TestCase):
+    def test_unknown_style_uses_default(self):
+        """Unknown bar_style should fall back to default chars."""
+        bar = render_bar(50, 20, {"bar_style": "nonexistent"})
+        self.assertIn("[", bar)
+        self.assertTrue(len(bar) > 0)
+
+
+class TestGitStateRebase(unittest.TestCase):
+    def test_rebase_renders(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_git_state
+        cli_mod.get_git_state = lambda: "rebase"
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("rebase", result)
+        finally:
+            cli_mod.get_git_state = orig
+
+
 if __name__ == "__main__":
     unittest.main()

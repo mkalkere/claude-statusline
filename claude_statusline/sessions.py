@@ -230,7 +230,7 @@ def _read_status_config():
     if cached is not None:
         return cached
 
-    result = {"budget": None, "threshold": None}
+    result = {"budget": None, "threshold": None, "disabled": []}
     path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -243,6 +243,9 @@ def _read_status_config():
             threshold = float(threshold)
             if 0 < threshold <= 100:
                 result["threshold"] = threshold
+        disabled = data.get("disabled_sections")
+        if isinstance(disabled, list):
+            result["disabled"] = [s for s in disabled if isinstance(s, str)]
     except (OSError, IOError, json.JSONDecodeError, ValueError, TypeError):
         pass
     _write_cache("status_config", result)
@@ -317,3 +320,16 @@ def get_effort_level():
         effort = None
     _write_cache("effort_level", {"effort": effort})
     return effort
+
+
+def get_disabled_sections():
+    """Read disabled sections from ~/.claude/claude-status-budget.json.
+
+    Expected format: {"disabled_sections": ["cache", "latency"]}
+    Uses 30s cache shared with budget/compaction config.
+
+    Returns:
+        List of section name strings to hide, or empty list.
+    """
+    config = _read_status_config()
+    return config.get("disabled", [])

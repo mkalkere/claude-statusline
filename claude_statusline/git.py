@@ -144,7 +144,7 @@ def get_git_extras():
         Dict with keys 'stash' (int), 'ahead' (int), 'behind' (int).
     """
     cached = _read_extras_cache()
-    if cached is not None:
+    if cached is not None and "stash" in cached:
         return cached
 
     result = {"stash": 0, "ahead": 0, "behind": 0}
@@ -180,5 +180,142 @@ def get_git_extras():
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         pass
 
-    _write_extras_cache(result)
+    cached = _read_extras_cache() or {}
+    cached.update(result)
+    _write_extras_cache(cached)
     return result
+
+
+def get_git_state():
+    """Detect if the repo is in a merge, rebase, or has conflicts.
+
+    Uses file-existence checks after resolving .git dir via subprocess.
+    Cached with 5s TTL.
+
+    Returns:
+        String: 'merge', 'rebase', 'conflict', or empty string.
+    """
+    cached = _read_extras_cache()
+    if cached is not None and "git_state" in cached:
+        return cached.get("git_state", "")
+
+    state = ""
+
+    if not get_branch():
+        return state
+
+    try:
+        # Find .git directory
+        proc = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if proc.returncode != 0:
+            return state
+        git_dir = proc.stdout.strip()
+
+        # Check for merge, rebase, cherry-pick, or revert
+        if os.path.isfile(os.path.join(git_dir, "MERGE_HEAD")):
+            state = "merge"
+        elif (os.path.isdir(os.path.join(git_dir, "rebase-merge"))
+              or os.path.isdir(os.path.join(git_dir, "rebase-apply"))):
+            state = "rebase"
+        elif os.path.isfile(os.path.join(git_dir, "CHERRY_PICK_HEAD")):
+            state = "cherry-pick"
+        elif os.path.isfile(os.path.join(git_dir, "REVERT_HEAD")):
+            state = "revert"
+
+        # Check for conflicts (during merge or rebase)
+        if state:
+            try:
+                proc = subprocess.run(
+                    ["git", "diff", "--name-only", "--diff-filter=U"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    state = "conflict"
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                pass
+
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    # Write to cache
+    cached = _read_extras_cache() or {}
+    cached["git_state"] = state
+    _write_extras_cache(cached)
+    return state
+
+
+def get_last_commit_age_ms():
+    """Get milliseconds since the last commit.
+
+    Cached with 5s TTL via the shared extras cache.
+
+    Returns:
+        Milliseconds since last commit, or None if unavailable.
+    """
+    cached = _read_extras_cache()
+    if cached is not None and "commit_age_ms" in cached:
+        val = cached.get("commit_age_ms")
+        return val
+
+    if not get_branch():
+        return None
+
+    try:
+        proc = subprocess.run(
+            ["git", "log", "-1", "--format=%ct"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            commit_epoch = int(proc.stdout.strip())
+            age_ms = int((time.time() - commit_epoch) * 1000)
+            result = max(0, age_ms)
+            cached = _read_extras_cache() or {}
+            cached["commit_age_ms"] = result
+            _write_extras_cache(cached)
+            return result
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        pass
+
+    return None
+
+
+def get_remote_url():
+    """Get the HTTPS URL of the git remote origin.
+
+    Converts SSH URLs to HTTPS. Cached with 5s TTL via shared extras cache.
+
+    Returns:
+        HTTPS URL string, or empty string if unavailable.
+    """
+    cached = _read_extras_cache()
+    if cached is not None and "remote_url" in cached:
+        return cached.get("remote_url", "")
+
+    url = ""
+    if not get_branch():
+        return url
+
+    try:
+        proc = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if proc.returncode == 0:
+            raw = proc.stdout.strip()
+            # Convert SSH to HTTPS
+            if raw.startswith("git@"):
+                raw = raw.replace(":", "/", 1).replace("git@", "https://", 1)
+            if raw.endswith(".git"):
+                raw = raw[:-4]
+            if raw.startswith("https://"):
+                url = raw
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    cached = _read_extras_cache() or {}
+    cached["remote_url"] = url
+    _write_extras_cache(cached)
+    return url
