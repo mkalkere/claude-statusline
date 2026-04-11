@@ -11,7 +11,7 @@
 
 ```
 Line 1:  [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min
-Line 2:  5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ effort:high │ v0.4.2 │ 15:30
+Line 2:  5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ effort:high │ v0.4.2 │ CC:2.1.92 │ 15:30
 ```
 
 ## 30-Second Setup
@@ -82,7 +82,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 ### default — full detail, clean separators
 ```
 [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min
-5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ effort:high │ v0.4.2 │ 15:30
+5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ effort:high │ v0.4.2 │ CC:2.1.92 │ 15:30
 ```
 
 ### minimal — just the essentials
@@ -94,7 +94,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 ### powerline — Nerd Font separators
 ```
 ████████░░░░░░░░░░░░  in:245K out:18K  cache:41%  $0.73  burn:37K/min
-5h:34% 7d:18% ~2h  (200K)  12m05s  +247 -38  ⎇ myapp/feat/statusline  ✦ refactor auth  effort:high  v0.4.2  15:30
+5h:34% 7d:18% ~2h  (200K)  12m05s  +247 -38  ⎇ myapp/feat/statusline  ✦ refactor auth  Opus  effort:high  v0.4.2  CC:2.1.92  15:30
 ```
 
 ### focus — single line, minimal footprint
@@ -255,7 +255,7 @@ By default, after each assistant message. Add `"refreshInterval": 10` to your st
 Yes — use the `focus` theme: `claude-status --install --theme focus`. It shows only the essentials on one line.
 
 **Why is only Line 1 showing / Line 2 is missing?**
-This is a known Claude Code rendering limitation where long Line 1 output causes Line 2 to be silently dropped. We've optimized the default layout to keep Line 1 short, but if you still see this, try the `focus` theme (`claude-status --install --theme focus`) for a guaranteed single-line display, or widen your terminal to 130+ columns.
+This is a known Claude Code rendering limitation where long Line 1 output causes Line 2 to be silently dropped. We've optimized all multi-line theme layouts to keep Line 1 short, but if you still see this, try the `focus` theme (`claude-status --install --theme focus`) for a guaranteed single-line display, or widen your terminal to 130+ columns.
 
 **Does it add any latency to Claude Code?**
 No. It runs as a pure stdin-to-stdout pipe in single-digit milliseconds. No daemon, no network calls, no background processes.
