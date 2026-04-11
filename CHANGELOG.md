@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-04-10
+
+### Fixed
+- **Line 2 disappearing on some terminals** — rebalanced default layout by moving `rate_limits` and `context_size` from Line 1 to Line 2, keeping Line 1 under ~90 characters. This works around a Claude Code rendering limitation (anthropics/claude-code#28750) where long Line 1 silently drops all subsequent lines. Closes #52.
+
+### Changed
+- Default, powerline, nord, tokyo-night, gruvbox, rose-pine themes all rebalanced
+- Line 2 now starts with rate limits and context size for immediate visibility
+- README FAQ documents the Line 2 visibility limitation and workarounds
+
 ## [0.4.1] - 2026-04-10
 
 ### Added

@@ -15,14 +15,13 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn",
-            "rate_limits", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "git_worktree", "effort",
-            "version", "cc_version", "clock",
+            "rate_limits", "context_size", "duration", "latency", "lines",
+            "branch", "git_extras", "tools", "sessions", "session_name",
+            "vim", "agent", "worktree", "model", "output_style", "added_dirs",
+            "git_worktree", "effort", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -112,14 +111,13 @@ THEMES = {
         "bar_left": "",
         "bar_right": "",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn",
-            "rate_limits", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "git_worktree", "effort",
-            "version", "cc_version", "clock",
+            "rate_limits", "context_size", "duration", "latency", "lines",
+            "branch", "git_extras", "tools", "sessions", "session_name",
+            "vim", "agent", "worktree", "model", "output_style", "added_dirs",
+            "git_worktree", "effort", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -161,14 +159,13 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn",
-            "rate_limits", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "git_worktree", "effort",
-            "version", "cc_version", "clock",
+            "rate_limits", "context_size", "duration", "latency", "lines",
+            "branch", "git_extras", "tools", "sessions", "session_name",
+            "vim", "agent", "worktree", "model", "output_style", "added_dirs",
+            "git_worktree", "effort", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -210,14 +207,13 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn",
-            "rate_limits", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "git_worktree", "effort",
-            "version", "cc_version", "clock",
+            "rate_limits", "context_size", "duration", "latency", "lines",
+            "branch", "git_extras", "tools", "sessions", "session_name",
+            "vim", "agent", "worktree", "model", "output_style", "added_dirs",
+            "git_worktree", "effort", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -259,14 +255,13 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn",
-            "rate_limits", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "git_worktree", "effort",
-            "version", "cc_version", "clock",
+            "rate_limits", "context_size", "duration", "latency", "lines",
+            "branch", "git_extras", "tools", "sessions", "session_name",
+            "vim", "agent", "worktree", "model", "output_style", "added_dirs",
+            "git_worktree", "effort", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
@@ -308,14 +303,13 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "burn",
-            "rate_limits", "context_size", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget", "burn", "ctx_warning",
         ],
         "line2": [
-            "duration", "latency", "lines", "branch", "git_extras",
-            "tools", "sessions", "session_name", "vim", "agent", "worktree",
-            "model", "output_style", "added_dirs", "git_worktree", "effort",
-            "version", "cc_version", "clock",
+            "rate_limits", "context_size", "duration", "latency", "lines",
+            "branch", "git_extras", "tools", "sessions", "session_name",
+            "vim", "agent", "worktree", "model", "output_style", "added_dirs",
+            "git_worktree", "effort", "version", "cc_version", "clock",
         ],
         "colors": {
             "separator": colors.BRIGHT_BLACK,
