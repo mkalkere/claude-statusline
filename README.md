@@ -11,7 +11,7 @@
 
 ```
 Line 1:  [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min
-Line 2:  5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ effort:high │ v0.4.2 │ CC:2.1.92 │ 15:30
+Line 2:  5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ effort:high │ v0.5.0 │ CC:2.1.92 │ 15:30
 ```
 
 ## 30-Second Setup
@@ -26,9 +26,12 @@ The setup wizard walks you through theme selection, budget configuration, and in
 ## Why claude-status?
 
 - **Zero dependencies** — pure Python stdlib. No `psutil`, no `colorama`, no compilation. Installs in under 2 seconds
-- **Every metric that matters** — 27+ data points including burn rate (tokens/min), rate limit tracking, and effort level
+- **Every metric that matters** — 30+ data points including burn rate (tokens/min), rate limit tracking, and effort level
 - **Rate limit awareness** — see your 5-hour and 7-day API usage at a glance with color-coded warnings and reset countdown
 - **Responsive layout** — automatically adapts to your terminal width (full/compact/narrow)
+- **NO_COLOR / FORCE_COLOR support** — respects terminal color standards
+- **Clickable git branch** — OSC 8 links open repo in browser (iTerm2, Kitty, WezTerm)
+- **Per-section toggle** — disable any section via config without a custom theme
 - **8 built-in themes** — default, minimal, powerline, nord, tokyo-night, gruvbox, rose-pine, focus
 - **Budget monitoring** — set a daily spend limit, get color-coded warnings as you approach it
 - **Session analytics** — tool call count and today's session count at a glance
@@ -60,6 +63,9 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Git Branch | `⎇ myapp/feat/statusline` | Project name + branch, color-coded |
 | Git Stash | `stash:2` | Number of stashed changes |
 | Git Sync | `sync:+2/-1` | Commits ahead/behind remote |
+| Git State | `merge` / `conflict` | Merge/rebase/conflict indicator |
+| Commit Age | `last:5m` | Time since last commit |
+| Token Speed | `speed:1.2K/s` | Token throughput (tokens/sec) |
 | Git Worktree | `gwt` | Indicator when inside a native git worktree |
 | Tool Calls | `tools:42` | Number of tool calls in current session |
 | Sessions Today | `sessions:3` | How many sessions you've started today |
@@ -71,7 +77,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Output Style | `style:explanatory` | Active output style when set |
 | Added Dirs | `dirs:+2` | Extra directories added via `/add-dir` |
 | Effort Level | `effort:high` | Thinking effort (shown when non-default) |
-| Version | `v0.4.2` | claude-status version |
+| Version | `v0.5.0` | claude-status version |
 | CC Version | `CC:2.1.92` | Claude Code application version |
 | Clock | `15:30` | Current time |
 
@@ -82,7 +88,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 ### default — full detail, clean separators
 ```
 [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min
-5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ effort:high │ v0.4.2 │ CC:2.1.92 │ 15:30
+5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ effort:high │ v0.5.0 │ CC:2.1.92 │ 15:30
 ```
 
 ### minimal — just the essentials
@@ -94,7 +100,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 ### powerline — Nerd Font separators
 ```
 ████████░░░░░░░░░░░░  in:245K out:18K  cache:41%  $0.73  burn:37K/min
-5h:34% 7d:18% ~2h  (200K)  12m05s  +247 -38  ⎇ myapp/feat/statusline  ✦ refactor auth  Opus  effort:high  v0.4.2  CC:2.1.92  15:30
+5h:34% 7d:18% ~2h  (200K)  12m05s  +247 -38  ⎇ myapp/feat/statusline  ✦ refactor auth  Opus  effort:high  v0.5.0  CC:2.1.92  15:30
 ```
 
 ### focus — single line, minimal footprint

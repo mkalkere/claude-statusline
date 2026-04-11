@@ -1,5 +1,12 @@
 """ANSI color constants and helpers."""
 
+import os
+
+# Respect NO_COLOR (https://no-color.org/) and FORCE_COLOR standards.
+# NO_COLOR: any non-empty value suppresses ANSI codes.
+# FORCE_COLOR: overrides NO_COLOR to force color output.
+_NO_COLOR = bool(os.environ.get("NO_COLOR")) and not os.environ.get("FORCE_COLOR")
+
 # Reset
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -42,7 +49,12 @@ BG_BRIGHT_GREEN = "\033[102m"
 
 
 def colorize(text, *codes):
-    """Wrap text with ANSI color codes and reset."""
+    """Wrap text with ANSI color codes and reset.
+
+    Respects NO_COLOR standard — returns plain text when NO_COLOR is set.
+    """
     if not text:
         return ""
+    if _NO_COLOR:
+        return str(text)
     return "".join(codes) + str(text) + RESET

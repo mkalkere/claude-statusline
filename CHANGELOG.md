@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-11
+
+### Added
+- **Token speed display** (`speed:1.2K/s`) — real-time token throughput computed from tokens / API duration. Closes #57.
+- **Progress bar style presets** — 4 named styles: default, dots, blocks, thin. Configurable via `bar_style` key in themes. Closes #59.
+- **Git merge/rebase/conflict indicators** — detects repo state via fast file checks (.git/MERGE_HEAD, rebase-merge/). Red for conflicts, yellow for merge/rebase. Closes #60.
+- **Time since last commit** (`last:5m`) — shows how long ago the last commit was made. Closes #61.
+- **NO_COLOR / FORCE_COLOR support** — respects the NO_COLOR standard (https://no-color.org/) and FORCE_COLOR override. Closes #62.
+- **Clickable OSC 8 links** — git branch section is now clickable in supported terminals (iTerm2, Kitty, WezTerm). Opens repo URL in browser. Closes #63.
+- **Per-section enable/disable** — configure `disabled_sections` in budget JSON to hide specific sections without a custom theme. Closes #64.
+- `fmt_speed()` formatter, `BAR_STYLES` dict, `get_git_state()`, `get_last_commit_age_ms()`, `get_remote_url()`, `get_disabled_sections()`
+
+### Changed
+- All full-detail themes updated with `speed`, `git_state`, `commit_age` sections and color keys
+- All new sections on Line 2 only (preserves Line 1 truncation workaround)
+- Compact layout drops all new sections at <120 cols
+
 ## [0.4.3] - 2026-04-11
 
 ### Fixed

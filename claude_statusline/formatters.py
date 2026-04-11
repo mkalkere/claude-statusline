@@ -128,3 +128,20 @@ def fmt_countdown(resets_at_ms):
     if remaining_ms < 1000:
         return ""
     return "~{}".format(fmt_duration(remaining_ms))
+
+
+def fmt_speed(total_tokens, api_duration_ms):
+    """Format token throughput as tokens per second.
+
+    Returns formatted string like '1.2K/s' or '850/s'.
+    Returns empty string if data is insufficient.
+    """
+    if total_tokens is None or api_duration_ms is None:
+        return ""
+    if api_duration_ms <= 0:
+        return ""
+    seconds = api_duration_ms / 1000
+    if seconds <= 0:
+        return ""
+    tps = total_tokens / seconds
+    return "{}/s".format(fmt_tokens(int(tps)))

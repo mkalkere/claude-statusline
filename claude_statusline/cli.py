@@ -11,18 +11,22 @@ import time
 
 from . import __version__
 from .bar import render_bar
+from . import colors as _colors_mod
 from .colors import (
     BOLD, BRIGHT_BLACK, BRIGHT_MAGENTA, BRIGHT_RED, CYAN, GREEN, RED, RESET,
     YELLOW, colorize,
 )
 from .formatters import (
     fmt_burn_rate, fmt_cache_pct, fmt_cost, fmt_countdown, fmt_duration,
-    fmt_lines, fmt_tokens,
+    fmt_lines, fmt_speed, fmt_tokens,
 )
-from .git import get_branch, get_git_extras
+from .git import (
+    get_branch, get_git_extras, get_git_state,
+    get_last_commit_age_ms, get_remote_url,
+)
 from .sessions import (
-    get_budget_config, get_compaction_threshold, get_effort_level,
-    get_session_tool_count, get_today_session_count,
+    get_budget_config, get_compaction_threshold, get_disabled_sections,
+    get_effort_level, get_session_tool_count, get_today_session_count,
 )
 from .themes import THEMES, get_theme
 
@@ -61,6 +65,17 @@ def _safe_num(val):
         return float(val)
     except (TypeError, ValueError):
         return None
+
+
+def _osc8_link(url, text):
+    """Wrap text in an OSC 8 hyperlink escape sequence.
+
+    Makes text clickable in supported terminals (iTerm2, Kitty, WezTerm).
+    Falls back to plain text in unsupported terminals (harmless).
+    """
+    if not url or _colors_mod._NO_COLOR:
+        return text
+    return "\033]8;;{}\033\\{}\033]8;;\033\\".format(url, text)
 
 
 def _normalize(data):
@@ -242,6 +257,14 @@ def _render_sections(n, order, theme):
                 colorize("api:", tc["label"]) + colorize(fmt_duration(api_duration), lc)
             )
 
+        elif section == "speed":
+            speed_str = fmt_speed(total_tokens, api_duration)
+            if speed_str:
+                spc = tc.get("speed", CYAN)
+                sections.append(
+                    colorize("speed:", tc["label"]) + colorize(speed_str, spc)
+                )
+
         elif section == "lines":
             lines_str = fmt_lines(lines_added, lines_removed)
             if lines_str:
@@ -257,13 +280,18 @@ def _render_sections(n, order, theme):
             if branch:
                 bc = tc["branch_main"] if branch in ("main", "master") else tc["branch_feature"]
                 project = n.get("project_name", "")
+                remote = get_remote_url()
                 if project:
-                    sections.append(
-                        colorize("\u2387 " + project, CYAN) +
-                        colorize("/" + branch, bc)
+                    branch_text = (
+                        colorize("\u2387 " + project, CYAN)
+                        + colorize("/" + branch, bc)
                     )
                 else:
-                    sections.append(colorize("\u2387 " + branch, bc))
+                    branch_text = colorize("\u2387 " + branch, bc)
+                # Wrap in clickable link if remote URL available
+                if remote:
+                    branch_text = _osc8_link(remote, branch_text)
+                sections.append(branch_text)
 
         elif section == "context_size" and context_size:
             label = "{}K".format(context_size // 1000) if context_size >= 1000 else str(context_size)
@@ -287,6 +315,28 @@ def _render_sections(n, order, theme):
         elif section == "model" and model_name:
             mc = tc.get("model", BRIGHT_MAGENTA)
             sections.append(colorize(model_name, mc))
+
+        elif section == "git_state":
+            branch = n["git_branch"] or get_branch()
+            if branch:
+                state = get_git_state()
+                if state:
+                    if state == "conflict":
+                        sc = tc.get("git_conflict", BRIGHT_RED)
+                    else:
+                        sc = tc.get("git_merge", YELLOW)
+                    sections.append(colorize(state, sc, BOLD))
+
+        elif section == "commit_age":
+            branch = n["git_branch"] or get_branch()
+            if branch:
+                age_ms = get_last_commit_age_ms()
+                if age_ms is not None:
+                    cac = tc.get("commit_age", BRIGHT_BLACK)
+                    sections.append(
+                        colorize("last:", tc["label"])
+                        + colorize(fmt_duration(age_ms), cac)
+                    )
 
         elif section == "tools":
             session_id = n.get("session_id", "")
@@ -442,6 +492,7 @@ _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
     "sessions", "tools", "latency", "context_size", "session_name",
     "rate_limits", "output_style", "added_dirs", "effort", "git_worktree",
+    "speed", "git_state", "commit_age",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",
@@ -488,6 +539,12 @@ def render(data, theme_name="default"):
     term_width = shutil.get_terminal_size((120, 24)).columns
     line1 = _apply_responsive(theme["line1"], term_width)
     line2 = _apply_responsive(theme["line2"], term_width)
+
+    # Apply user-disabled sections
+    disabled = set(get_disabled_sections())
+    if disabled:
+        line1 = [s for s in line1 if s not in disabled]
+        line2 = [s for s in line2 if s not in disabled]
 
     line1_sections = _render_sections(n, line1, theme)
     line2_sections = _render_sections(n, line2, theme)
