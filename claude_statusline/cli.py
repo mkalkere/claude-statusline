@@ -853,8 +853,7 @@ def cmd_doctor():
     # System info
     print("System:")
     print("  Python:   {} ({})".format(platform.python_version(), sys.executable))
-    py_ver = tuple(int(x) for x in platform.python_version().split(".")[:2])
-    if py_ver < (3, 8):
+    if sys.version_info[:2] < (3, 8):
         print("  WARNING:  Python 3.8+ required")
     print("  OS:       {} {}".format(platform.system(), platform.release()))
     print("  Platform: {}".format(platform.platform()))
@@ -946,7 +945,7 @@ def cmd_doctor():
     # Terminal capabilities
     print("Terminal:")
     term = os.environ.get("TERM", "(not set)")
-    cols = shutil.get_terminal_size((80, 24)).columns
+    cols = shutil.get_terminal_size((120, 24)).columns
     print("  TERM:    {}".format(term))
     print("  Columns: {}".format(cols))
     if cols >= 120:
