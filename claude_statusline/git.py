@@ -214,13 +214,16 @@ def get_git_state():
             return state
         git_dir = proc.stdout.strip()
 
-        # Check for merge
+        # Check for merge, rebase, cherry-pick, or revert
         if os.path.isfile(os.path.join(git_dir, "MERGE_HEAD")):
             state = "merge"
-        # Check for rebase
         elif (os.path.isdir(os.path.join(git_dir, "rebase-merge"))
               or os.path.isdir(os.path.join(git_dir, "rebase-apply"))):
             state = "rebase"
+        elif os.path.isfile(os.path.join(git_dir, "CHERRY_PICK_HEAD")):
+            state = "cherry-pick"
+        elif os.path.isfile(os.path.join(git_dir, "REVERT_HEAD")):
+            state = "revert"
 
         # Check for conflicts (during merge or rebase)
         if state:

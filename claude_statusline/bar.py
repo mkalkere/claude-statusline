@@ -56,7 +56,6 @@ def render_bar(pct, width=20, theme=None, compaction_threshold=None):
     empty_char = "\u2591"   # ░
     left_bracket = "["
     right_bracket = "]"
-    marker_char = "|"
 
     if theme:
         # Support bar_style shorthand (resolves to filled/empty chars)
@@ -71,7 +70,6 @@ def render_bar(pct, width=20, theme=None, compaction_threshold=None):
         empty_char = theme.get("bar_empty", empty_char)
         left_bracket = theme.get("bar_left", left_bracket)
         right_bracket = theme.get("bar_right", right_bracket)
-        marker_char = theme.get("bar_marker", marker_char)
 
     filled = int(width * pct / 100)
     empty = width - filled
