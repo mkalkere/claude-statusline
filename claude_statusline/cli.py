@@ -274,9 +274,8 @@ def _render_sections(n, order, theme):
             sections.append(colorize("({})".format(label), BRIGHT_BLACK))
 
         elif section == "ctx_warning":
-            # Prefer percentage-based warning (works for any context window size)
-            # Fall back to exceeds_200k_tokens for backward compatibility
-            if (pct is not None and pct >= CTX_WARNING_THRESHOLD_PCT) or exceeds_200k:
+            # Percentage-based warning — works for any context window size
+            if pct is not None and pct >= CTX_WARNING_THRESHOLD_PCT:
                 sections.append(colorize("!CTX", BRIGHT_RED, BOLD))
 
         elif section == "vim" and vim_mode:
