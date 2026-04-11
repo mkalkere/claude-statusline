@@ -342,11 +342,17 @@ class TestRender(unittest.TestCase):
         result = render({"context_window": None})
         self.assertIsInstance(result, str)
 
-    def test_exceeds_200k(self):
+    def test_exceeds_200k_no_warning_if_below_85pct(self):
+        """exceeds_200k_tokens alone should NOT trigger !CTX warning.
+
+        The percentage-based check is the only warning trigger now.
+        On 1M context windows, exceeding 200K tokens is only ~20% usage.
+        """
         data = self._full_data()
         data["exceeds_200k_tokens"] = True
+        data["context_window"]["used_percentage"] = 42  # well below 85%
         result = render(data)
-        self.assertIn("!CTX", result)
+        self.assertNotIn("!CTX", result)
 
     def test_ctx_warning_at_85_percent(self):
         """Warning should trigger at 85%+ usage regardless of context size."""
@@ -371,6 +377,23 @@ class TestRender(unittest.TestCase):
         data["exceeds_200k_tokens"] = False
         data["context_window"]["used_percentage"] = 20
         data["context_window"]["context_window_size"] = 1_000_000
+        result = render(data)
+        self.assertNotIn("!CTX", result)
+
+    def test_ctx_warning_1m_exceeds_200k_low_pct(self):
+        """1M context exceeding 200K tokens but at 25% should NOT warn."""
+        data = self._full_data()
+        data["exceeds_200k_tokens"] = True
+        data["context_window"]["used_percentage"] = 25
+        data["context_window"]["context_window_size"] = 1_000_000
+        result = render(data)
+        self.assertNotIn("!CTX", result)
+
+    def test_ctx_warning_no_pct_with_exceeds_200k(self):
+        """Missing used_percentage + exceeds_200k should NOT warn."""
+        data = self._full_data()
+        data["exceeds_200k_tokens"] = True
+        del data["context_window"]["used_percentage"]
         result = render(data)
         self.assertNotIn("!CTX", result)
 

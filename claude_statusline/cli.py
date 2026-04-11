@@ -100,9 +100,6 @@ def _normalize(data):
     out["lines_added"] = _first(cost_obj.get("total_lines_added"), data.get("lines_added"))
     out["lines_removed"] = _first(cost_obj.get("total_lines_removed"), data.get("lines_removed"))
 
-    # Booleans
-    out["exceeds_200k"] = data.get("exceeds_200k_tokens", False)
-
     # Vim (nested or flat)
     vim_obj = data.get("vim") or {}
     out["vim_mode"] = vim_obj.get("mode") or data.get("vim_mode")
@@ -195,7 +192,6 @@ def _render_sections(n, order, theme):
     lines_added = n["lines_added"]
     lines_removed = n["lines_removed"]
     context_size = n["context_size"]
-    exceeds_200k = n["exceeds_200k"]
     vim_mode = n["vim_mode"]
     agent_name = n["agent_name"]
     worktree_branch = n["worktree_branch"]
@@ -274,9 +270,8 @@ def _render_sections(n, order, theme):
             sections.append(colorize("({})".format(label), BRIGHT_BLACK))
 
         elif section == "ctx_warning":
-            # Prefer percentage-based warning (works for any context window size)
-            # Fall back to exceeds_200k_tokens for backward compatibility
-            if (pct is not None and pct >= CTX_WARNING_THRESHOLD_PCT) or exceeds_200k:
+            # Percentage-based warning — works for any context window size
+            if pct is not None and pct >= CTX_WARNING_THRESHOLD_PCT:
                 sections.append(colorize("!CTX", BRIGHT_RED, BOLD))
 
         elif section == "vim" and vim_mode:
@@ -579,9 +574,8 @@ def cmd_demo():
             _print_indented(render(data, name))
             print()
 
-        # Also show warning state
+        # Also show warning state (93% triggers !CTX via percentage check)
         warn_data = json.loads(json.dumps(data))
-        warn_data["exceeds_200k_tokens"] = True
         warn_data["context_window"]["used_percentage"] = 93
         print("  warning state (93% usage):")
         _print_indented(render(warn_data, "default"))

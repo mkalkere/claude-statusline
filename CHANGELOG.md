@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-04-11
+
+### Fixed
+- **!CTX warning showing at low context usage on 1M windows** — the `exceeds_200k_tokens` flag is a fixed 200K threshold that fires at ~20% usage on 1M context windows. Removed this legacy fallback; `!CTX` now only triggers at 85%+ of actual context window usage via the percentage-based check. Closes #55.
+
 ## [0.4.2] - 2026-04-10
 
 ### Fixed
