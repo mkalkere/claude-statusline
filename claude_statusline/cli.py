@@ -577,9 +577,8 @@ def cmd_demo():
             _print_indented(render(data, name))
             print()
 
-        # Also show warning state
+        # Also show warning state (93% triggers !CTX via percentage check)
         warn_data = json.loads(json.dumps(data))
-        warn_data["exceeds_200k_tokens"] = True
         warn_data["context_window"]["used_percentage"] = 93
         print("  warning state (93% usage):")
         _print_indented(render(warn_data, "default"))
