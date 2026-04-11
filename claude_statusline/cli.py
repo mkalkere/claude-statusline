@@ -195,7 +195,6 @@ def _render_sections(n, order, theme):
     lines_added = n["lines_added"]
     lines_removed = n["lines_removed"]
     context_size = n["context_size"]
-    exceeds_200k = n["exceeds_200k"]
     vim_mode = n["vim_mode"]
     agent_name = n["agent_name"]
     worktree_branch = n["worktree_branch"]
