@@ -144,7 +144,7 @@ def get_git_extras():
         Dict with keys 'stash' (int), 'ahead' (int), 'behind' (int).
     """
     cached = _read_extras_cache()
-    if cached is not None:
+    if cached is not None and "stash" in cached:
         return cached
 
     result = {"stash": 0, "ahead": 0, "behind": 0}
@@ -180,14 +180,17 @@ def get_git_extras():
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         pass
 
-    _write_extras_cache(result)
+    cached = _read_extras_cache() or {}
+    cached.update(result)
+    _write_extras_cache(cached)
     return result
 
 
 def get_git_state():
     """Detect if the repo is in a merge, rebase, or has conflicts.
 
-    Uses fast file-existence checks (no subprocess) with 5s TTL cache.
+    Uses file-existence checks after resolving .git dir via subprocess.
+    Cached with 5s TTL.
 
     Returns:
         String: 'merge', 'rebase', 'conflict', or empty string.
@@ -234,6 +237,10 @@ def get_git_state():
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
 
+    # Write to cache
+    cached = _read_extras_cache() or {}
+    cached["git_state"] = state
+    _write_extras_cache(cached)
     return state
 
 
@@ -259,10 +266,13 @@ def get_last_commit_age_ms():
             capture_output=True, text=True, timeout=2,
         )
         if proc.returncode == 0 and proc.stdout.strip():
-            import time as _time
             commit_epoch = int(proc.stdout.strip())
-            age_ms = int((_time.time() - commit_epoch) * 1000)
-            return max(0, age_ms)
+            age_ms = int((time.time() - commit_epoch) * 1000)
+            result = max(0, age_ms)
+            cached = _read_extras_cache() or {}
+            cached["commit_age_ms"] = result
+            _write_extras_cache(cached)
+            return result
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         pass
 
@@ -302,4 +312,7 @@ def get_remote_url():
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
 
+    cached = _read_extras_cache() or {}
+    cached["remote_url"] = url
+    _write_extras_cache(cached)
     return url
