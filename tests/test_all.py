@@ -2640,5 +2640,54 @@ class TestBarStyles(unittest.TestCase):
         self.assertIn("#", bar)
 
 
+# ─── Additional edge case tests ─────────────────────────────────────
+
+class TestOSC8NoColor(unittest.TestCase):
+    def test_osc8_suppressed_with_no_color(self):
+        """OSC 8 links should be plain text when NO_COLOR is set."""
+        from claude_statusline import colors as _cm
+        from claude_statusline.cli import _osc8_link
+        orig = _cm._NO_COLOR
+        _cm._NO_COLOR = True
+        try:
+            result = _osc8_link("https://example.com", "branch")
+            self.assertEqual(result, "branch")
+            self.assertNotIn("\033", result)
+        finally:
+            _cm._NO_COLOR = orig
+
+
+class TestFmtSpeedNegative(unittest.TestCase):
+    def test_negative_duration(self):
+        from claude_statusline.formatters import fmt_speed
+        self.assertEqual(fmt_speed(1000, -500), "")
+
+
+class TestBarStyleUnknown(unittest.TestCase):
+    def test_unknown_style_uses_default(self):
+        """Unknown bar_style should fall back to default chars."""
+        bar = render_bar(50, 20, {"bar_style": "nonexistent"})
+        self.assertIn("[", bar)
+        self.assertTrue(len(bar) > 0)
+
+
+class TestGitStateRebase(unittest.TestCase):
+    def test_rebase_renders(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_git_state
+        cli_mod.get_git_state = lambda: "rebase"
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("rebase", result)
+        finally:
+            cli_mod.get_git_state = orig
+
+
 if __name__ == "__main__":
     unittest.main()
