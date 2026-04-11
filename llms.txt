@@ -1,0 +1,73 @@
+# claude-status
+
+> Zero-dependency status line for Claude Code. Pure Python stdlib. 27+ metrics. 8 themes. All platforms.
+
+## Install
+
+```
+pip install claude-status
+claude-status --setup
+```
+
+## What It Does
+
+Displays real-time session metrics in Claude Code's terminal status bar. Reads JSON from stdin (piped by Claude Code), formats 27+ data points across up to 2 lines, outputs ANSI-colored text to stdout. No daemon, no network calls, no background processes.
+
+## CLI Commands
+
+- `claude-status --setup` — interactive setup wizard (theme + budget)
+- `claude-status --install` — auto-configure settings.json
+- `claude-status --install --theme THEME` — install with specific theme
+- `claude-status --uninstall` — remove from settings, restore previous config
+- `claude-status --demo` — preview all 8 themes
+- `claude-status --doctor` — run diagnostics
+- `claude-status --version` — show version
+- `claude-status --theme THEME` — use theme for this render only
+
+## Themes
+
+default, minimal, powerline, nord, tokyo-night, gruvbox, rose-pine, focus (single-line)
+
+Custom themes: `~/.claude/claude-status-theme.json`
+
+## Metrics Displayed
+
+Line 1: context bar, tokens (in/out), cache %, cost, budget, burn rate, rate limits (5h/7d with countdown), context size, context warning
+Line 2: duration, API latency, lines changed, git branch, git extras (stash/sync), tool calls, sessions today, session name, vim mode, agent, worktree, model, output style, added dirs, git worktree, effort level, version, CC version, clock
+
+## Configuration Files
+
+- `~/.claude/settings.json` — statusLine config (type, command, refreshInterval)
+- `~/.claude/claude-status-budget.json` — daily_budget_usd, compaction_threshold_pct
+- `~/.claude/claude-status-theme.json` — custom theme overrides
+
+## StatusLine JSON Fields (from Claude Code stdin)
+
+model.id, model.display_name, cwd, workspace.current_dir, workspace.project_dir, workspace.added_dirs, workspace.git_worktree, cost.total_cost_usd, cost.total_duration_ms, cost.total_api_duration_ms, cost.total_lines_added, cost.total_lines_removed, context_window.used_percentage, context_window.remaining_percentage, context_window.context_window_size, context_window.current_usage.*, exceeds_200k_tokens, rate_limits.five_hour.used_percentage, rate_limits.five_hour.resets_at, rate_limits.seven_day.used_percentage, rate_limits.seven_day.resets_at, session_id, session_name, transcript_path, version, output_style.name, vim.mode, agent.name, worktree.name, worktree.path, worktree.branch
+
+## Architecture
+
+cli.py (entry point, normalization, rendering) → bar.py (progress bar) + colors.py (ANSI) + formatters.py (tokens, cost, duration) + git.py (branch, stash, sync with 5s cache) + sessions.py (session count, tool count, budget, effort with 10-30s cache) + themes.py (8 built-in + custom)
+
+## Key Design Decisions
+
+- Zero external dependencies (pure Python stdlib)
+- Never crash — degrade gracefully on any malformed input
+- File-based caching with TTLs (5s-60s) to avoid subprocess overhead
+- Responsive layout adapts to terminal width (120+/80-119/<80 cols)
+- All numeric fields use _first() helper (not `or`) to preserve zero values
+
+## Testing
+
+stdlib unittest only. 210+ tests. CI: 3 OS x 7 Python versions (3.8-3.14).
+
+```
+python -m unittest discover tests/
+```
+
+## Links
+
+- PyPI: https://pypi.org/project/claude-status/
+- Repository: https://github.com/mkalkere/claude-statusline
+- Issues: https://github.com/mkalkere/claude-statusline/issues
+- Changelog: https://github.com/mkalkere/claude-statusline/blob/main/CHANGELOG.md

@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import sys
+import tempfile
 import time
 
 from . import __version__
@@ -849,11 +850,24 @@ def cmd_doctor():
     """Run diagnostics and print system info."""
     print("claude-status v{} — diagnostics\n".format(__version__))
 
+    # System info
     print("System:")
     print("  Python:   {} ({})".format(platform.python_version(), sys.executable))
+    if sys.version_info[:2] < (3, 8):
+        print("  WARNING:  Python 3.8+ required")
     print("  OS:       {} {}".format(platform.system(), platform.release()))
     print("  Platform: {}".format(platform.platform()))
     print("  Encoding: {}".format(sys.stdout.encoding))
+    print()
+
+    # PATH check
+    print("PATH:")
+    which = shutil.which("claude-status")
+    if which:
+        print("  claude-status: {}".format(which))
+    else:
+        print("  claude-status: NOT FOUND in PATH")
+        print("  Try: python -m claude_statusline --install")
     print()
 
     # Check settings
@@ -866,10 +880,60 @@ def cmd_doctor():
                 settings = json.load(f)
             sl = settings.get("statusLine", "(not configured)")
             print("  statusLine: {}".format(sl))
+            if isinstance(sl, dict):
+                ri = sl.get("refreshInterval")
+                if ri:
+                    print("  refreshInterval: {}s".format(ri))
         except Exception as e:
             print("  Error reading settings: {}: {}".format(type(e).__name__, e))
     else:
         print("  Settings file not found")
+    print()
+
+    # Config file validation
+    home = os.path.expanduser("~")
+    claude_dir = os.path.join(home, ".claude")
+    print("Config files:")
+    budget_path = os.path.join(claude_dir, "claude-status-budget.json")
+    if os.path.isfile(budget_path):
+        try:
+            with open(budget_path, "r", encoding="utf-8") as f:
+                budget_data = json.load(f)
+            print("  Budget: {} (valid)".format(budget_path))
+            if isinstance(budget_data, dict):
+                if "daily_budget_usd" in budget_data:
+                    print("    daily_budget_usd: {}".format(budget_data["daily_budget_usd"]))
+                if "compaction_threshold_pct" in budget_data:
+                    print("    compaction_threshold_pct: {}".format(budget_data["compaction_threshold_pct"]))
+        except (json.JSONDecodeError, IOError) as e:
+            print("  Budget: {} (INVALID: {})".format(budget_path, e))
+    else:
+        print("  Budget: not configured")
+
+    theme_path = os.path.join(claude_dir, "claude-status-theme.json")
+    if os.path.isfile(theme_path):
+        try:
+            with open(theme_path, "r", encoding="utf-8") as f:
+                json.load(f)
+            print("  Theme:  {} (valid)".format(theme_path))
+        except (json.JSONDecodeError, IOError) as e:
+            print("  Theme:  {} (INVALID: {})".format(theme_path, e))
+    else:
+        print("  Theme:  not configured")
+    print()
+
+    # Permissions
+    print("Permissions:")
+    if os.path.isdir(claude_dir):
+        print("  ~/.claude/: {}".format(
+            "writable" if os.access(claude_dir, os.W_OK) else "NOT WRITABLE"
+        ))
+    else:
+        print("  ~/.claude/: directory not found")
+    tmp = tempfile.gettempdir()
+    print("  Temp dir:   {} ({})".format(
+        tmp, "writable" if os.access(tmp, os.W_OK) else "NOT WRITABLE"
+    ))
     print()
 
     # Check git
@@ -881,8 +945,16 @@ def cmd_doctor():
     # Terminal capabilities
     print("Terminal:")
     term = os.environ.get("TERM", "(not set)")
-    print("  TERM: {}".format(term))
-    print("  Unicode test: █░▓ \u2387 \ue0b0")
+    cols = shutil.get_terminal_size((120, 24)).columns
+    print("  TERM:    {}".format(term))
+    print("  Columns: {}".format(cols))
+    if cols >= 120:
+        print("  Layout:  full")
+    elif cols >= 80:
+        print("  Layout:  compact")
+    else:
+        print("  Layout:  narrow")
+    print("  Unicode: \u2588\u2591\u2593 \u2387 \ue0b0")
     print()
 
 
