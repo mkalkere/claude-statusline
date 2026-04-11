@@ -82,7 +82,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 ### default — full detail, clean separators
 ```
 [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min
-5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ v0.4.2 │ 15:30
+5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ effort:high │ v0.4.2 │ 15:30
 ```
 
 ### minimal — just the essentials
@@ -94,7 +94,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 ### powerline — Nerd Font separators
 ```
 ████████░░░░░░░░░░░░  in:245K out:18K  cache:41%  $0.73  burn:37K/min
-5h:34% 7d:18% ~2h  (200K)  12m05s  +247 -38  ⎇ feat/statusline  ✦ refactor auth  v0.4.2  15:30
+5h:34% 7d:18% ~2h  (200K)  12m05s  +247 -38  ⎇ myapp/feat/statusline  ✦ refactor auth  effort:high  v0.4.2  15:30
 ```
 
 ### focus — single line, minimal footprint
