@@ -389,6 +389,14 @@ class TestRender(unittest.TestCase):
         result = render(data)
         self.assertNotIn("!CTX", result)
 
+    def test_ctx_warning_no_pct_with_exceeds_200k(self):
+        """Missing used_percentage + exceeds_200k should NOT warn."""
+        data = self._full_data()
+        data["exceeds_200k_tokens"] = True
+        del data["context_window"]["used_percentage"]
+        result = render(data)
+        self.assertNotIn("!CTX", result)
+
     def test_vim_mode(self):
         data = self._full_data()
         data["vim"] = {"mode": "NORMAL"}
