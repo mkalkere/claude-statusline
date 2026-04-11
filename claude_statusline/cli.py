@@ -100,9 +100,6 @@ def _normalize(data):
     out["lines_added"] = _first(cost_obj.get("total_lines_added"), data.get("lines_added"))
     out["lines_removed"] = _first(cost_obj.get("total_lines_removed"), data.get("lines_removed"))
 
-    # Booleans
-    out["exceeds_200k"] = data.get("exceeds_200k_tokens", False)
-
     # Vim (nested or flat)
     vim_obj = data.get("vim") or {}
     out["vim_mode"] = vim_obj.get("mode") or data.get("vim_mode")
