@@ -221,16 +221,21 @@ def get_session_tool_count(session_id):
 
 
 def _read_status_config():
-    """Read ~/.claude/claude-status-budget.json once, cache both values.
+    """Read ~/.claude/claude-status-budget.json once, cache all values.
 
     Returns:
-        Dict with 'budget' (float or None) and 'threshold' (float or None).
+        Dict with 'budget', 'threshold', 'disabled', and 'clickable_links'.
     """
     cached = _read_cache("status_config")
     if cached is not None:
         return cached
 
-    result = {"budget": None, "threshold": None, "disabled": []}
+    result = {
+        "budget": None,
+        "threshold": None,
+        "disabled": [],
+        "clickable_links": False,
+    }
     path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -246,7 +251,12 @@ def _read_status_config():
         disabled = data.get("disabled_sections")
         if isinstance(disabled, list):
             result["disabled"] = [s for s in disabled if isinstance(s, str)]
-    except (OSError, IOError, json.JSONDecodeError, ValueError, TypeError):
+        result["clickable_links"] = bool(data.get("clickable_links", False))
+    except (OSError, IOError, json.JSONDecodeError,
+            ValueError, TypeError, AttributeError):
+        # AttributeError covers non-dict JSON (null, list, scalar) —
+        # data.get(...) would otherwise raise. Matches the pattern
+        # used by get_today_session_count and get_effort_level.
         pass
     _write_cache("status_config", result)
     return result
@@ -333,3 +343,21 @@ def get_disabled_sections():
     """
     config = _read_status_config()
     return config.get("disabled", [])
+
+
+def get_clickable_links_enabled():
+    """Read whether OSC 8 clickable links are enabled.
+
+    Expected format: {"clickable_links": true}
+    Defaults to False because OSC 8 escape sequences confuse Claude Code's
+    Ink TUI renderer and can cause Line 2 of the status line to disappear.
+    Opt-in for users who run claude-status in a supporting terminal
+    outside of Claude Code (iTerm2, Kitty, WezTerm).
+
+    Returns:
+        True if opted in, False otherwise (default).
+    """
+    # _read_status_config() already coerces to bool and defaults to False,
+    # so we trust the parser's contract and return the value directly.
+    config = _read_status_config()
+    return config.get("clickable_links", False)

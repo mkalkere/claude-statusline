@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-04-12
+
+### Fixed
+- **Line 2 disappearing — real root cause** — OSC 8 clickable hyperlink escape sequences (added in v0.5.0, #63) add ~180 bytes per link but are invisible to the user. Claude Code's Ink TUI `<Text wrap="truncate">` doesn't recognize OSC 8 sequences — it counts those escape bytes toward line width, miscalculates Line 2 as ~200+ chars wide, and silently drops it. This is independent of Line 1 content. Closes #68.
+- OSC 8 clickable links are now **disabled by default**. Opt in via `"clickable_links": true` in `~/.claude/claude-status-budget.json` for users who run claude-status in a supporting terminal (iTerm2, Kitty, WezTerm) outside of Claude Code.
+
+### Notes
+- Anthropic closed the upstream fix request (anthropics/claude-code#28750) as NOT_PLANNED after 30 days of inactivity. This patch is our workaround.
+
 ## [0.5.1] - 2026-04-12
 
 ### Fixed

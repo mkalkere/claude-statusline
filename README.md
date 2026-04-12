@@ -30,7 +30,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 - **Rate limit awareness** — see your 5-hour and 7-day API usage at a glance with color-coded warnings and reset countdown
 - **Responsive layout** — automatically adapts to your terminal width (full/compact/narrow)
 - **NO_COLOR / FORCE_COLOR support** — respects terminal color standards
-- **Clickable git branch** — OSC 8 links open repo in browser (iTerm2, Kitty, WezTerm)
+- **Clickable git branch** *(opt-in)* — OSC 8 links open repo in browser in iTerm2, Kitty, WezTerm. Off by default because Claude Code's TUI doesn't understand OSC 8 and would drop Line 2. Enable with `"clickable_links": true`.
 - **Per-section toggle** — disable any section via config without a custom theme
 - **8 built-in themes** — default, minimal, powerline, nord, tokyo-night, gruvbox, rose-pine, focus
 - **Budget monitoring** — set a daily spend limit, get color-coded warnings as you approach it
@@ -261,7 +261,12 @@ By default, after each assistant message. Add `"refreshInterval": 10` to your st
 Yes — use the `focus` theme: `claude-status --install --theme focus`. It shows only the essentials on one line.
 
 **Why is only Line 1 showing / Line 2 is missing?**
-This is a known Claude Code rendering limitation where long Line 1 output causes Line 2 to be silently dropped. We've optimized all multi-line theme layouts to keep Line 1 short, but if you still see this, try the `focus` theme (`claude-status --install --theme focus`) for a guaranteed single-line display, or widen your terminal to 130+ columns.
+Claude Code's TUI uses Ink `<Text wrap="truncate">` which silently drops all subsequent lines when any line's byte count (including invisible escape sequences) exceeds the terminal width. Two things can trigger this:
+
+1. **Line 1 visibly overflows** — fixed in v0.4.2 and v0.5.1 by moving sections to Line 2.
+2. **OSC 8 clickable links add invisible escape bytes** — fixed in v0.5.2 by disabling OSC 8 by default.
+
+Upgrade to the latest release (`pip install -U claude-status`). If you still see the issue, widen your terminal to 130+ columns or switch to the `focus` theme (`claude-status --install --theme focus`) for a guaranteed single-line display. Tracked upstream at anthropics/claude-code#28750 (closed NOT_PLANNED).
 
 **Does it add any latency to Claude Code?**
 No. It runs as a pure stdin-to-stdout pipe in single-digit milliseconds. No daemon, no network calls, no background processes.
