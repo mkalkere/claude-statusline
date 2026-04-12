@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-04-12
+
+### Fixed
+- **Line 2 still disappearing** — moved `burn` from Line 1 to Line 2, reducing Line 1 visible width to ~55 chars max. With high cost values ($1179+), Line 1 was reaching 121 visible chars, triggering the Ink truncation at 120 cols. Closes #66.
+
 ## [0.5.0] - 2026-04-11
 
 ### Added
