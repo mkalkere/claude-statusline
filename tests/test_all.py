@@ -2608,6 +2608,123 @@ class TestOSC8Links(unittest.TestCase):
             cli_mod.get_clickable_links_enabled = orig_cl
 
 
+# ─── sessions.py — clickable_links config parsing (#68 regression guard) ──
+
+class TestClickableLinksConfigParsing(unittest.TestCase):
+    """Exercise the real _read_status_config() path for `clickable_links`.
+
+    These tests hit the JSON parser directly rather than mocking
+    `get_clickable_links_enabled`, so a regression in parsing logic
+    (e.g., swapping `bool(...)` for `is True`, or losing the default)
+    would silently re-enable OSC 8 and reintroduce #68. This is the
+    strongest guard against the bug coming back.
+    """
+
+    def _with_config(self, config_value, assertion):
+        """Helper: write config JSON, point _CLAUDE_DIR at it, run assertion."""
+        from claude_statusline.sessions import (
+            _cache_path,
+            get_clickable_links_enabled,
+        )
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = os.path.join(tmpdir, "claude-status-budget.json")
+            if config_value is not None:
+                with open(config_file, "w") as f:
+                    if config_value == "__CORRUPT__":
+                        f.write("{not valid json,,")
+                    else:
+                        json.dump(config_value, f)
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("status_config"))
+            except OSError:
+                pass
+            try:
+                result = get_clickable_links_enabled()
+                assertion(result)
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+                try:
+                    os.unlink(_cache_path("status_config"))
+                except OSError:
+                    pass
+
+    def test_default_is_false_when_config_missing(self):
+        """Missing config file → False (default)."""
+        self._with_config(None, lambda r: self.assertFalse(r))
+
+    def test_default_is_false_when_key_absent(self):
+        """Config present but `clickable_links` key missing → False."""
+        self._with_config(
+            {"daily_budget_usd": 10.0},
+            lambda r: self.assertFalse(r),
+        )
+
+    def test_true_when_explicitly_enabled(self):
+        """`clickable_links: true` → True."""
+        self._with_config(
+            {"clickable_links": True},
+            lambda r: self.assertTrue(r),
+        )
+
+    def test_false_when_explicitly_disabled(self):
+        """`clickable_links: false` → False."""
+        self._with_config(
+            {"clickable_links": False},
+            lambda r: self.assertFalse(r),
+        )
+
+    def test_null_value_is_false(self):
+        """`clickable_links: null` → False."""
+        self._with_config(
+            {"clickable_links": None},
+            lambda r: self.assertFalse(r),
+        )
+
+    def test_corrupt_config_is_false(self):
+        """Corrupted JSON → False (graceful degradation)."""
+        self._with_config(
+            "__CORRUPT__",
+            lambda r: self.assertFalse(r),
+        )
+
+
+# ─── cli.py — Line 2 has no OSC 8 by default (end-to-end #68 guard) ──
+
+class TestLine2NoOSC8ByDefault(unittest.TestCase):
+    """End-to-end guard: the rendered output must contain no OSC 8
+    escape sequences when `clickable_links` is at its default (off).
+    This is the actual regression that #68 fixes — a future change
+    that reintroduces OSC 8 at any call site would be caught here.
+    """
+
+    def test_no_osc8_in_rendered_output_by_default(self):
+        import claude_statusline.cli as cli_mod
+        orig_clickable = cli_mod.get_clickable_links_enabled
+        orig_remote = cli_mod.get_remote_url
+        cli_mod.get_clickable_links_enabled = lambda: False
+        cli_mod.get_remote_url = lambda: "https://github.com/example/repo"
+        try:
+            data = {
+                "context_window": {
+                    "used_percentage": 30,
+                    "current_usage": {"input_tokens": 5000},
+                },
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            # OSC 8 sequences start with ESC ] 8
+            self.assertNotIn("\033]8", result)
+        finally:
+            cli_mod.get_clickable_links_enabled = orig_clickable
+            cli_mod.get_remote_url = orig_remote
+
+
 # ─── sessions.py — disabled sections ────────────────────────────────
 
 class TestDisabledSections(unittest.TestCase):
