@@ -25,8 +25,9 @@ from .git import (
     get_last_commit_age_ms, get_remote_url,
 )
 from .sessions import (
-    get_budget_config, get_compaction_threshold, get_disabled_sections,
-    get_effort_level, get_session_tool_count, get_today_session_count,
+    get_budget_config, get_clickable_links_enabled, get_compaction_threshold,
+    get_disabled_sections, get_effort_level, get_session_tool_count,
+    get_today_session_count,
 )
 from .themes import THEMES, get_theme
 
@@ -70,10 +71,20 @@ def _safe_num(val):
 def _osc8_link(url, text):
     """Wrap text in an OSC 8 hyperlink escape sequence.
 
-    Makes text clickable in supported terminals (iTerm2, Kitty, WezTerm).
-    Falls back to plain text in unsupported terminals (harmless).
+    Disabled by default because Claude Code's Ink TUI renderer does not
+    understand OSC 8 sequences — it counts the escape bytes toward line
+    width and silently drops Line 2 when the branch section has a link.
+
+    Users who run claude-status in a terminal that supports OSC 8
+    (iTerm2, Kitty, WezTerm) outside of Claude Code can opt in by
+    setting {"clickable_links": true} in ~/.claude/claude-status-budget.json.
+
+    Returns plain text unless: url is present, NO_COLOR is not set,
+    and the user has explicitly opted in.
     """
     if not url or _colors_mod._NO_COLOR:
+        return text
+    if not get_clickable_links_enabled():
         return text
     return "\033]8;;{}\033\\{}\033]8;;\033\\".format(url, text)
 

@@ -2555,11 +2555,31 @@ class TestCommitAgeSection(unittest.TestCase):
 # ─── cli.py — OSC 8 links ───────────────────────────────────────────
 
 class TestOSC8Links(unittest.TestCase):
-    def test_osc8_link_with_url(self):
-        from claude_statusline.cli import _osc8_link
-        result = _osc8_link("https://github.com/test", "branch")
-        self.assertIn("branch", result)
-        self.assertIn("\033]8;;", result)
+    def test_osc8_disabled_by_default(self):
+        """OSC 8 must be OFF by default to avoid breaking Claude Code's
+        Ink TUI renderer (#68)."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_clickable_links_enabled
+        cli_mod.get_clickable_links_enabled = lambda: False
+        try:
+            result = cli_mod._osc8_link("https://github.com/test", "branch")
+            self.assertEqual(result, "branch")
+            self.assertNotIn("\033]8", result)
+        finally:
+            cli_mod.get_clickable_links_enabled = orig
+
+    def test_osc8_enabled_via_opt_in(self):
+        """When user opts in, OSC 8 sequences are emitted."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_clickable_links_enabled
+        cli_mod.get_clickable_links_enabled = lambda: True
+        try:
+            result = cli_mod._osc8_link("https://github.com/test", "branch")
+            self.assertIn("branch", result)
+            self.assertIn("\033]8;;", result)
+            self.assertIn("https://github.com/test", result)
+        finally:
+            cli_mod.get_clickable_links_enabled = orig
 
     def test_osc8_link_no_url(self):
         from claude_statusline.cli import _osc8_link
@@ -2570,6 +2590,22 @@ class TestOSC8Links(unittest.TestCase):
         from claude_statusline.cli import _osc8_link
         result = _osc8_link(None, "branch")
         self.assertEqual(result, "branch")
+
+    def test_opt_in_does_not_override_no_color(self):
+        """NO_COLOR must win over clickable_links=true."""
+        from claude_statusline import colors as _cm
+        import claude_statusline.cli as cli_mod
+        orig_nc = _cm._NO_COLOR
+        orig_cl = cli_mod.get_clickable_links_enabled
+        _cm._NO_COLOR = True
+        cli_mod.get_clickable_links_enabled = lambda: True
+        try:
+            result = cli_mod._osc8_link("https://github.com/test", "branch")
+            self.assertEqual(result, "branch")
+            self.assertNotIn("\033", result)
+        finally:
+            _cm._NO_COLOR = orig_nc
+            cli_mod.get_clickable_links_enabled = orig_cl
 
 
 # ─── sessions.py — disabled sections ────────────────────────────────
