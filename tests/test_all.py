@@ -2692,6 +2692,54 @@ class TestClickableLinksConfigParsing(unittest.TestCase):
             lambda r: self.assertFalse(r),
         )
 
+    def test_non_dict_top_level_is_false(self):
+        """Top-level JSON list (not a dict) → False (no AttributeError)."""
+        # data.get(...) would raise AttributeError on a list.
+        # _read_status_config must catch it and fall through to defaults.
+        self._with_config(
+            [1, 2, 3],
+            lambda r: self.assertFalse(r),
+        )
+
+    def test_null_top_level_is_false(self):
+        """Top-level JSON null → False (no AttributeError)."""
+        self._with_config(
+            None,  # this is "write nothing", but we want literal JSON null
+            lambda r: self.assertFalse(r),
+        )
+        # The helper skips file creation on None; this still passes via
+        # the missing-file path. Add an explicit literal-null case below
+        # that writes a file containing the JSON token `null`.
+
+    def test_literal_null_in_file_is_false(self):
+        """File contains literal JSON `null` → False (no AttributeError)."""
+        from claude_statusline.sessions import (
+            _cache_path,
+            get_clickable_links_enabled,
+        )
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = os.path.join(tmpdir, "claude-status-budget.json")
+            with open(config_file, "w") as f:
+                f.write("null")
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("status_config"))
+            except OSError:
+                pass
+            try:
+                result = get_clickable_links_enabled()
+                self.assertFalse(result)
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+                try:
+                    os.unlink(_cache_path("status_config"))
+                except OSError:
+                    pass
+
 
 # ─── cli.py — Line 2 has no OSC 8 by default (end-to-end #68 guard) ──
 

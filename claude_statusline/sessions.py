@@ -252,7 +252,11 @@ def _read_status_config():
         if isinstance(disabled, list):
             result["disabled"] = [s for s in disabled if isinstance(s, str)]
         result["clickable_links"] = bool(data.get("clickable_links", False))
-    except (OSError, IOError, json.JSONDecodeError, ValueError, TypeError):
+    except (OSError, IOError, json.JSONDecodeError,
+            ValueError, TypeError, AttributeError):
+        # AttributeError covers non-dict JSON (null, list, scalar) —
+        # data.get(...) would otherwise raise. Matches the pattern
+        # used by get_today_session_count and get_effort_level.
         pass
     _write_cache("status_config", result)
     return result
@@ -353,5 +357,7 @@ def get_clickable_links_enabled():
     Returns:
         True if opted in, False otherwise (default).
     """
+    # _read_status_config() already coerces to bool and defaults to False,
+    # so we trust the parser's contract and return the value directly.
     config = _read_status_config()
-    return bool(config.get("clickable_links", False))
+    return config.get("clickable_links", False)
