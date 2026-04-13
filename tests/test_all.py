@@ -17,7 +17,7 @@ import unittest
 # upstream can't silently shrink the layout and make tests pass for the
 # wrong reason. Individual tests that want narrow/compact layouts set
 # COLUMNS explicitly themselves and restore it in a finally block.
-os.environ["COLUMNS"] = "200"
+os.environ["COLUMNS"] = "250"
 os.environ["LINES"] = "50"
 
 # Add parent to path for imports
@@ -1437,19 +1437,19 @@ class TestCompactionConfig(unittest.TestCase):
 
 class TestResponsiveLayout(unittest.TestCase):
     def test_full_layout_wide_terminal(self):
-        """Wide terminal (150+) should keep all sections."""
+        """Wide terminal (230+) should keep all sections."""
         from claude_statusline.cli import _apply_responsive
         sections = ["bar", "tokens", "cache", "cost", "burn",
                     "git_extras", "version", "clock"]
-        result = _apply_responsive(sections, 150)
+        result = _apply_responsive(sections, 230)
         self.assertEqual(result, sections)
 
     def test_full_layout_above_threshold(self):
-        """Well above threshold (200 cols) should keep all sections."""
+        """Well above threshold (300 cols) should keep all sections."""
         from claude_statusline.cli import _apply_responsive
         sections = ["bar", "tokens", "cache", "cost", "burn",
                     "git_extras", "version", "clock"]
-        result = _apply_responsive(sections, 200)
+        result = _apply_responsive(sections, 300)
         self.assertEqual(result, sections)
 
     def test_compact_layout_at_old_full_threshold(self):
@@ -1478,7 +1478,7 @@ class TestResponsiveLayout(unittest.TestCase):
         self.assertNotIn("session_name", result)
 
     def test_compact_layout_medium_terminal(self):
-        """Medium terminal (100-149) should drop non-essential sections."""
+        """Medium terminal (100-229) should drop non-essential sections."""
         from claude_statusline.cli import _apply_responsive
         sections = ["bar", "tokens", "cache", "cost", "burn",
                     "git_extras", "version", "clock", "context_size"]
@@ -1515,10 +1515,10 @@ class TestResponsiveLayout(unittest.TestCase):
         self.assertNotIn("cache", result)  # cache is in _NARROW_DROP
 
     def test_boundary_at_full_threshold(self):
-        """149 cols (just below full threshold) should use compact layout."""
+        """229 cols (just below full threshold) should use compact layout."""
         from claude_statusline.cli import _apply_responsive
         sections = ["bar", "tokens", "cost", "git_extras"]
-        result = _apply_responsive(sections, 149)
+        result = _apply_responsive(sections, 229)
         self.assertIn("bar", result)
         self.assertNotIn("git_extras", result)  # compact drops git_extras
 
@@ -2939,8 +2939,17 @@ class TestLine2FitsAt120Cols(unittest.TestCase):
                 "five_hour": {"used_percentage": 46, "resets_at": 1_776_000_000},
                 "seven_day": {"used_percentage": 68, "resets_at": 1_776_500_000},
             },
-            "git_branch": "main",
-            "session_name": "test session",
+            # Realistic project path + branch so the project_name/branch
+            # section reflects real-world width (Gemini flagged missing
+            # workspace on #71). "myapp/feat/responsive-statusline" is
+            # representative of a typical feature branch string.
+            "workspace": {
+                "project_dir": "/home/user/projects/myapp",
+                "current_dir": "/home/user/projects/myapp",
+            },
+            "cwd": "/home/user/projects/myapp",
+            "git_branch": "feat/responsive-statusline",
+            "session_name": "refactor auth middleware",
             "version": "2.1.101",
         }
 
@@ -2964,6 +2973,25 @@ class TestLine2FitsAt120Cols(unittest.TestCase):
                 del os.environ["COLUMNS"]
             else:
                 os.environ["COLUMNS"] = old_cols
+
+    def test_line2_fits_at_full_threshold(self):
+        """At the full-layout threshold (160 cols), the full layout is
+        enabled — Line 2 must fit within the terminal width. This guards
+        the buffer above the measured heavy-payload width (~152 chars).
+        """
+        from claude_statusline.cli import _FULL_LAYOUT_MIN_COLS
+        result = self._render_at_width(_FULL_LAYOUT_MIN_COLS)
+        lines = result.split("\n")
+        self.assertEqual(len(lines), 2, "expected 2 lines at full layout")
+        line2_visible = self._visible_width(lines[1])
+        self.assertLessEqual(
+            line2_visible, _FULL_LAYOUT_MIN_COLS,
+            "Line 2 is {} visible chars at {}-col full-layout threshold — "
+            "heavy payload overflows the buffer above the measured ~152. "
+            "Raise _FULL_LAYOUT_MIN_COLS or trim full-layout sections.".format(
+                line2_visible, _FULL_LAYOUT_MIN_COLS
+            )
+        )
 
     def test_line2_fits_at_120_cols(self):
         """Heavy payload at 120 cols — Line 2 must not exceed 120 visible chars."""
