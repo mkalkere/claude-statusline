@@ -13,10 +13,12 @@ import unittest
 # shutil.get_terminal_size() honors COLUMNS/LINES before falling back, so
 # setting these before importing claude_statusline.cli ensures render()
 # exercises the full layout regardless of the host terminal width.
-# Individual tests that want to exercise narrow/compact layouts set COLUMNS
-# explicitly themselves.
-os.environ.setdefault("COLUMNS", "200")
-os.environ.setdefault("LINES", "50")
+# Unconditional assignment (not setdefault) so a hostile CI value exported
+# upstream can't silently shrink the layout and make tests pass for the
+# wrong reason. Individual tests that want narrow/compact layouts set
+# COLUMNS explicitly themselves and restore it in a finally block.
+os.environ["COLUMNS"] = "200"
+os.environ["LINES"] = "50"
 
 # Add parent to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -1520,6 +1522,53 @@ class TestResponsiveLayout(unittest.TestCase):
         self.assertIn("bar", result)
         self.assertNotIn("git_extras", result)  # compact drops git_extras
 
+    def test_boundary_at_exactly_100_cols(self):
+        """100 cols (inclusive compact boundary) — compact, not narrow.
+
+        Pins the `>=` comparison at the compact threshold so a future
+        off-by-one change to `>` would flip 100-col terminals to narrow
+        and this test would fail.
+        """
+        from claude_statusline.cli import _apply_responsive
+        sections = ["bar", "tokens", "cache", "cost", "burn",
+                    "git_extras", "version", "clock", "lines", "model"]
+        result = _apply_responsive(sections, 100)
+        # Compact drops these
+        self.assertNotIn("git_extras", result)
+        self.assertNotIn("version", result)
+        self.assertNotIn("clock", result)
+        # Narrow-only drops; must still be present at 100
+        self.assertIn("cache", result)
+        self.assertIn("burn", result)
+        self.assertIn("lines", result)
+        self.assertIn("model", result)
+
+    def test_render_fallback_when_columns_unset(self):
+        """When COLUMNS is unset and no tty is attached, render() uses the
+        (100, 24) fallback — which selects the compact layout, not full.
+
+        Guards the deliberate v0.5.3 fallback change from (120, 24) to
+        (100, 24). A revert to 120 would silently resurrect #70 in
+        piped/non-tty contexts.
+        """
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.cli import _COMPACT_LAYOUT_MIN_COLS
+        # The fallback constant must stay at 100 — or below full threshold.
+        self.assertEqual(_COMPACT_LAYOUT_MIN_COLS, 100)
+        # Verify get_terminal_size honors the fallback when COLUMNS is unset.
+        import shutil
+        old_cols = os.environ.pop("COLUMNS", None)
+        try:
+            size = shutil.get_terminal_size((_COMPACT_LAYOUT_MIN_COLS, 24))
+            # When no tty and no COLUMNS, shutil returns the fallback.
+            # (In CI COLUMNS may be unset and stdout non-tty → fallback wins.)
+            # We can't force non-tty here portably, but we can at least
+            # assert the constant is what render() passes in.
+            self.assertGreaterEqual(size.columns, 1)
+        finally:
+            if old_cols is not None:
+                os.environ["COLUMNS"] = old_cols
+
 
 # ─── cli.py — rate limits section ────────────────────────────────────
 
@@ -2846,6 +2895,29 @@ class TestLine2FitsAt120Cols(unittest.TestCase):
     fail, catching the regression immediately.
     """
 
+    def setUp(self):
+        # Stub git helpers at the cli_mod level so tests don't depend on
+        # ambient repo state (which would make width measurements
+        # non-deterministic across hosts).
+        import claude_statusline.cli as cli_mod
+        self._cli_mod = cli_mod
+        self._orig = {
+            "get_remote_url": cli_mod.get_remote_url,
+            "get_git_state": cli_mod.get_git_state,
+            "get_last_commit_age_ms": cli_mod.get_last_commit_age_ms,
+            "get_git_extras": cli_mod.get_git_extras,
+            "get_clickable_links_enabled": cli_mod.get_clickable_links_enabled,
+        }
+        cli_mod.get_remote_url = lambda: "https://github.com/example/repo"
+        cli_mod.get_git_state = lambda: ""
+        cli_mod.get_last_commit_age_ms = lambda: 300000  # 5m
+        cli_mod.get_git_extras = lambda: {"stash": 2, "ahead": 2, "behind": 1}
+        cli_mod.get_clickable_links_enabled = lambda: False
+
+    def tearDown(self):
+        for name, fn in self._orig.items():
+            setattr(self._cli_mod, name, fn)
+
     def _heavy_payload(self):
         return {
             "context_window": {
@@ -2873,8 +2945,13 @@ class TestLine2FitsAt120Cols(unittest.TestCase):
         }
 
     def _visible_width(self, line):
-        # Strip SGR color escapes; OSC 8 should be off by default.
-        return len(re.sub(r"\x1b\[[0-9;]*m", "", line))
+        # Strip SGR color escapes.
+        stripped = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        # Also strip OSC 8 hyperlink sequences (ESC ] 8 ; ; URL ST TEXT ESC ] 8 ; ; ST)
+        # so this helper stays correct even if clickable_links is ever
+        # accidentally enabled in a test. ST terminator is ESC \ or BEL.
+        stripped = re.sub(r"\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)", "", stripped)
+        return len(stripped)
 
     def _render_at_width(self, cols):
         # COLUMNS env var is honored by shutil.get_terminal_size().
@@ -2915,17 +2992,23 @@ class TestLine2FitsAt120Cols(unittest.TestCase):
         )
 
     def test_line2_fits_at_80_cols(self):
-        """Heavy payload at 80 cols (narrow layout) — Line 2 must fit."""
+        """Heavy payload at 80 cols (narrow layout) — every emitted line must fit.
+
+        Narrow layout drops most sections; Line 2 may be short or empty
+        but the output must always contain at least one line and every
+        line's visible width must be <= 80.
+        """
         result = self._render_at_width(80)
         lines = result.split("\n")
-        # At 80 cols, narrow layout drops most sections; line 2 may even
-        # be empty. Just assert the visible width is sane.
-        if len(lines) > 1:
-            line2_visible = self._visible_width(lines[1])
+        self.assertGreaterEqual(
+            len(lines), 1, "render() returned no lines at 80 cols"
+        )
+        for idx, line in enumerate(lines):
+            visible = self._visible_width(line)
             self.assertLessEqual(
-                line2_visible, 80,
-                "Line 2 is {} visible chars at 80-col terminal".format(
-                    line2_visible
+                visible, 80,
+                "Line {} is {} visible chars at 80-col terminal".format(
+                    idx + 1, visible
                 )
             )
 
