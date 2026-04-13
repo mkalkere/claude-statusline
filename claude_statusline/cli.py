@@ -497,8 +497,24 @@ def _render_sections(n, order, theme):
     return sections
 
 
+# Responsive layout breakpoints (in terminal columns).
+#
+# History: these thresholds were originally 120/80 when Line 2 had ~8
+# sections. As features were added through v0.3–v0.5 (rate limits,
+# speed, git_state, commit_age, session_name, output_style, added_dirs,
+# git_worktree, effort, cc_version), Line 2's full-layout content can
+# reach ~225 visible chars with a worst-case realistic payload (long
+# session, long branch/session name, all rate limits, heavy git state)
+# — overflowing the old 120-col threshold and triggering Claude Code's
+# Ink truncation on Line 2. Raised to 230/100 in v0.5.3 (#70): 230
+# includes a small buffer above the measured worst-case 225 so a
+# terminal exactly at the threshold still fits. Most terminals will
+# land in the compact layout, which is the safe default.
+_FULL_LAYOUT_MIN_COLS = 230
+_COMPACT_LAYOUT_MIN_COLS = 100
+
 # Sections to drop at each width breakpoint (widest first).
-# Below 120 cols: drop least-essential sections progressively.
+# Below _FULL_LAYOUT_MIN_COLS: drop least-essential sections progressively.
 _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
     "sessions", "tools", "latency", "context_size", "session_name",
@@ -513,14 +529,14 @@ _NARROW_DROP = _COMPACT_DROP + [
 def _apply_responsive(sections_list, term_width):
     """Filter section list based on terminal width.
 
-    >= 120 cols: full layout (no changes)
-    80-119 cols: compact (drop non-essential extras)
-    < 80 cols:   narrow (essentials only)
+    >= 230 cols: full layout (no changes)
+    100-229 cols: compact (drop non-essential extras)
+    < 100 cols:   narrow (essentials only)
     """
-    if term_width >= 120:
+    if term_width >= _FULL_LAYOUT_MIN_COLS:
         return sections_list
 
-    if term_width >= 80:
+    if term_width >= _COMPACT_LAYOUT_MIN_COLS:
         drop = set(_COMPACT_DROP)
     else:
         drop = set(_NARROW_DROP)
@@ -532,9 +548,18 @@ def render(data, theme_name="default"):
     """Render the statusline as one or two lines.
 
     Automatically adapts layout based on terminal width:
-    - >= 120 cols: full detail
-    - 80-119 cols: compact (drops extras like git_extras, version, clock)
-    - < 80 cols: narrow (essentials only — bar, tokens, cost, duration, branch)
+    - >= 230 cols: full detail (all sections)
+    - 100-229 cols: compact (drops git_extras, version, clock, rate_limits,
+      context_size, speed, commit_age, session_name, cc_version, etc.)
+    - < 100 cols: narrow (essentials only — bar, tokens, cost, duration, branch)
+
+    The full-layout threshold is 230 rather than 120 because Line 2 can
+    reach ~225 visible chars with a worst-case realistic payload (long
+    session, long branch/session name, all rate limits populated) as
+    features were added in v0.3-v0.5. A 120-col terminal with all data
+    populated would cause Claude Code's Ink TUI to truncate Line 2 with
+    an ellipsis. 230 buffers above the measured 225. Most terminals will
+    land in compact layout — the safe default.
 
     Args:
         data: Parsed JSON dict from Claude Code.
@@ -547,7 +572,9 @@ def render(data, theme_name="default"):
     n = _normalize(data)
     sep = colorize(theme["separator"], theme["colors"]["separator"])
 
-    term_width = shutil.get_terminal_size((120, 24)).columns
+    # Default to compact layout when terminal size cannot be detected
+    # (non-interactive contexts, piped stdout, some SSH setups).
+    term_width = shutil.get_terminal_size((_COMPACT_LAYOUT_MIN_COLS, 24)).columns
     line1 = _apply_responsive(theme["line1"], term_width)
     line2 = _apply_responsive(theme["line2"], term_width)
 
