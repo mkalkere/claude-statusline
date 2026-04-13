@@ -203,9 +203,11 @@ This runs the status line every 10 seconds in addition to the standard update tr
 ## Responsive Layout
 
 The status line automatically adapts to your terminal width:
-- **120+ columns**: full detail (all sections)
-- **80–119 columns**: compact (drops extras like git stash, version, clock, rate limits)
-- **Under 80 columns**: narrow (essentials only — bar, tokens, cost, duration, branch)
+- **150+ columns**: full detail (all sections)
+- **100–149 columns**: compact (drops git_extras, version, clock, rate_limits, speed, commit_age, session_name, cc_version, etc.)
+- **Under 100 columns**: narrow (essentials only — bar, tokens, cost, duration, branch)
+
+The full-layout threshold is 150 rather than 120 because Line 2 grew past 120 visible characters as features were added in v0.3-v0.5. A 120-col terminal with all sections populated would cause Claude Code's Ink TUI to truncate Line 2 with an ellipsis.
 
 ## Manual Configuration
 
@@ -260,13 +262,14 @@ By default, after each assistant message. Add `"refreshInterval": 10` to your st
 **Can I use a single-line layout?**
 Yes — use the `focus` theme: `claude-status --install --theme focus`. It shows only the essentials on one line.
 
-**Why is only Line 1 showing / Line 2 is missing?**
-Claude Code's TUI uses Ink `<Text wrap="truncate">` which silently drops all subsequent lines when any line's byte count (including invisible escape sequences) exceeds the terminal width. Two things can trigger this:
+**Why is only Line 1 showing / Line 2 is missing or truncated?**
+Claude Code's TUI uses Ink `<Text wrap="truncate">` which silently drops or truncates lines that exceed the terminal width. Three things can trigger this, all fixed:
 
 1. **Line 1 visibly overflows** — fixed in v0.4.2 and v0.5.1 by moving sections to Line 2.
 2. **OSC 8 clickable links add invisible escape bytes** — fixed in v0.5.2 by disabling OSC 8 by default.
+3. **Line 2 grew past 120 chars at heavy data** — fixed in v0.5.3 by raising the full-layout threshold from 120 to 150 cols.
 
-Upgrade to the latest release (`pip install -U claude-status`). If you still see the issue, widen your terminal to 130+ columns or switch to the `focus` theme (`claude-status --install --theme focus`) for a guaranteed single-line display. Tracked upstream at anthropics/claude-code#28750 (closed NOT_PLANNED).
+Upgrade to the latest release (`pip install -U claude-status`). If you still see truncation, widen your terminal to 150+ columns to get the full layout, or switch to the `focus` theme (`claude-status --install --theme focus`) for a guaranteed single-line display. Tracked upstream at anthropics/claude-code#28750 (closed NOT_PLANNED).
 
 **Does it add any latency to Claude Code?**
 No. It runs as a pure stdin-to-stdout pipe in single-digit milliseconds. No daemon, no network calls, no background processes.

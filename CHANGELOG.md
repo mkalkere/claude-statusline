@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-04-13
+
+### Fixed
+- **Line 2 truncation at 120-col terminals** — after #68 fixed OSC 8, Line 2 rendered correctly but was truncated with an ellipsis on 120-col terminals because Line 2's full-layout content had grown to ~150 visible chars over v0.3-v0.5 (rate limits, speed, commit_age, session_name, output_style, added_dirs, git_worktree, effort, cc_version, etc.). Raised the full-layout threshold from 120 to 150 cols (and the compact threshold from 80 to 100). Terminals 120-149 cols now use the compact layout, which drops the heaviest Line 2 sections. Closes #70.
+- Added 3 end-to-end regression tests that render with a heavy real-world payload at 80/100/120 cols and assert Line 2 visible width fits within the terminal — catches future feature additions that grow Line 2 past the threshold.
+- Default fallback for `shutil.get_terminal_size()` updated from 120 to 100 (compact layout) for non-interactive contexts. Safer default than the old "assume full layout."
+
+### Notes
+- Users on terminals between 120 and 149 cols will see fewer Line 2 sections than before. To get the full layout back, widen your terminal to 150+ cols.
+- Users who want specific sections to always show regardless of width can use the existing `disabled_sections` config in `~/.claude/claude-status-budget.json` to hide other sections instead.
+
 ## [0.5.2] - 2026-04-12
 
 ### Fixed

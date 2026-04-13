@@ -9,6 +9,15 @@ import tempfile
 import time
 import unittest
 
+# Force the responsive layout to pick the FULL layout by default in tests.
+# shutil.get_terminal_size() honors COLUMNS/LINES before falling back, so
+# setting these before importing claude_statusline.cli ensures render()
+# exercises the full layout regardless of the host terminal width.
+# Individual tests that want to exercise narrow/compact layouts set COLUMNS
+# explicitly themselves.
+os.environ.setdefault("COLUMNS", "200")
+os.environ.setdefault("LINES", "50")
+
 # Add parent to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -1426,15 +1435,48 @@ class TestCompactionConfig(unittest.TestCase):
 
 class TestResponsiveLayout(unittest.TestCase):
     def test_full_layout_wide_terminal(self):
-        """Wide terminal (120+) should keep all sections."""
+        """Wide terminal (150+) should keep all sections."""
         from claude_statusline.cli import _apply_responsive
         sections = ["bar", "tokens", "cache", "cost", "burn",
                     "git_extras", "version", "clock"]
-        result = _apply_responsive(sections, 120)
+        result = _apply_responsive(sections, 150)
         self.assertEqual(result, sections)
 
+    def test_full_layout_above_threshold(self):
+        """Well above threshold (200 cols) should keep all sections."""
+        from claude_statusline.cli import _apply_responsive
+        sections = ["bar", "tokens", "cache", "cost", "burn",
+                    "git_extras", "version", "clock"]
+        result = _apply_responsive(sections, 200)
+        self.assertEqual(result, sections)
+
+    def test_compact_layout_at_old_full_threshold(self):
+        """A 120-col terminal (old full threshold) now gets compact.
+
+        This is the core of #70: before v0.5.3, 120 cols returned the
+        full layout, which had grown too wide for Line 2 to fit. 120
+        now falls into the compact range and drops heavy extras.
+        """
+        from claude_statusline.cli import _apply_responsive
+        sections = ["bar", "tokens", "cache", "cost", "burn",
+                    "git_extras", "version", "clock", "context_size",
+                    "rate_limits", "speed", "commit_age", "session_name"]
+        result = _apply_responsive(sections, 120)
+        self.assertIn("bar", result)
+        self.assertIn("tokens", result)
+        self.assertIn("cost", result)
+        # These grew Line 2 past 120 cols — must be dropped at 120 now
+        self.assertNotIn("git_extras", result)
+        self.assertNotIn("version", result)
+        self.assertNotIn("clock", result)
+        self.assertNotIn("context_size", result)
+        self.assertNotIn("rate_limits", result)
+        self.assertNotIn("speed", result)
+        self.assertNotIn("commit_age", result)
+        self.assertNotIn("session_name", result)
+
     def test_compact_layout_medium_terminal(self):
-        """Medium terminal (80-119) should drop non-essential sections."""
+        """Medium terminal (100-149) should drop non-essential sections."""
         from claude_statusline.cli import _apply_responsive
         sections = ["bar", "tokens", "cache", "cost", "burn",
                     "git_extras", "version", "clock", "context_size"]
@@ -1448,7 +1490,7 @@ class TestResponsiveLayout(unittest.TestCase):
         self.assertNotIn("context_size", result)
 
     def test_narrow_layout_small_terminal(self):
-        """Narrow terminal (<80) should show only essentials."""
+        """Narrow terminal (<100) should show only essentials."""
         from claude_statusline.cli import _apply_responsive
         sections = ["bar", "tokens", "cache", "cost", "burn",
                     "git_extras", "version", "clock", "lines", "budget", "model"]
@@ -1461,6 +1503,22 @@ class TestResponsiveLayout(unittest.TestCase):
         self.assertNotIn("lines", result)
         self.assertNotIn("budget", result)
         self.assertNotIn("model", result)
+
+    def test_boundary_at_compact_threshold(self):
+        """99 cols (just below compact threshold) should use narrow layout."""
+        from claude_statusline.cli import _apply_responsive
+        sections = ["bar", "tokens", "cache", "cost"]
+        result = _apply_responsive(sections, 99)
+        self.assertIn("bar", result)
+        self.assertNotIn("cache", result)  # cache is in _NARROW_DROP
+
+    def test_boundary_at_full_threshold(self):
+        """149 cols (just below full threshold) should use compact layout."""
+        from claude_statusline.cli import _apply_responsive
+        sections = ["bar", "tokens", "cost", "git_extras"]
+        result = _apply_responsive(sections, 149)
+        self.assertIn("bar", result)
+        self.assertNotIn("git_extras", result)  # compact drops git_extras
 
 
 # ─── cli.py — rate limits section ────────────────────────────────────
@@ -2771,6 +2829,105 @@ class TestLine2NoOSC8ByDefault(unittest.TestCase):
         finally:
             cli_mod.get_clickable_links_enabled = orig_clickable
             cli_mod.get_remote_url = orig_remote
+
+
+# ─── cli.py — Line 2 width fits at 120-col terminals (#70 guard) ──
+
+class TestLine2FitsAt120Cols(unittest.TestCase):
+    """End-to-end regression guard for #70.
+
+    With heavy session data (rate limits, multi-hour duration, +5K lines,
+    session name, CC version, etc.), Line 2 must fit within a 120-column
+    terminal. The fix raises the full-layout threshold so that 120 cols
+    falls into the compact range, where the heaviest sections are dropped.
+
+    A future change that adds new line2 sections to the full layout
+    without also adding them to _COMPACT_DROP would cause this test to
+    fail, catching the regression immediately.
+    """
+
+    def _heavy_payload(self):
+        return {
+            "context_window": {
+                "used_percentage": 5,
+                "context_window_size": 1_000_000,
+                "current_usage": {
+                    "input_tokens": 6,
+                    "output_tokens": 301,
+                },
+            },
+            "cost": {
+                "total_cost_usd": 250,
+                "total_duration_ms": 60_223_000,       # 16h43m
+                "total_api_duration_ms": 11_100_000,   # 3h05m
+                "total_lines_added": 5245,
+                "total_lines_removed": 510,
+            },
+            "rate_limits": {
+                "five_hour": {"used_percentage": 46, "resets_at": 1_776_000_000},
+                "seven_day": {"used_percentage": 68, "resets_at": 1_776_500_000},
+            },
+            "git_branch": "main",
+            "session_name": "test session",
+            "version": "2.1.101",
+        }
+
+    def _visible_width(self, line):
+        # Strip SGR color escapes; OSC 8 should be off by default.
+        return len(re.sub(r"\x1b\[[0-9;]*m", "", line))
+
+    def _render_at_width(self, cols):
+        # COLUMNS env var is honored by shutil.get_terminal_size().
+        old_cols = os.environ.get("COLUMNS")
+        os.environ["COLUMNS"] = str(cols)
+        try:
+            return render(self._heavy_payload())
+        finally:
+            if old_cols is None:
+                del os.environ["COLUMNS"]
+            else:
+                os.environ["COLUMNS"] = old_cols
+
+    def test_line2_fits_at_120_cols(self):
+        """Heavy payload at 120 cols — Line 2 must not exceed 120 visible chars."""
+        result = self._render_at_width(120)
+        lines = result.split("\n")
+        self.assertEqual(len(lines), 2, "expected 2 lines")
+        line2_visible = self._visible_width(lines[1])
+        self.assertLessEqual(
+            line2_visible, 120,
+            "Line 2 is {} visible chars at 120-col terminal — Ink will "
+            "truncate it. Either move sections off Line 2's full layout "
+            "or add them to _COMPACT_DROP.".format(line2_visible)
+        )
+
+    def test_line2_fits_at_100_cols(self):
+        """Heavy payload at 100 cols — Line 2 must not exceed 100 visible chars."""
+        result = self._render_at_width(100)
+        lines = result.split("\n")
+        self.assertEqual(len(lines), 2, "expected 2 lines")
+        line2_visible = self._visible_width(lines[1])
+        self.assertLessEqual(
+            line2_visible, 100,
+            "Line 2 is {} visible chars at 100-col terminal".format(
+                line2_visible
+            )
+        )
+
+    def test_line2_fits_at_80_cols(self):
+        """Heavy payload at 80 cols (narrow layout) — Line 2 must fit."""
+        result = self._render_at_width(80)
+        lines = result.split("\n")
+        # At 80 cols, narrow layout drops most sections; line 2 may even
+        # be empty. Just assert the visible width is sane.
+        if len(lines) > 1:
+            line2_visible = self._visible_width(lines[1])
+            self.assertLessEqual(
+                line2_visible, 80,
+                "Line 2 is {} visible chars at 80-col terminal".format(
+                    line2_visible
+                )
+            )
 
 
 # ─── sessions.py — disabled sections ────────────────────────────────
