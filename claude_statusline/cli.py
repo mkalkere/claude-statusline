@@ -650,23 +650,44 @@ def _fit_to_width(named_items, sep_visible_width, target_width, drop_priority):
     Returns:
         New list of (name, rendered) tuples that fit within target_width.
         Order of surviving sections is preserved.
+
+    Width math: each visible char counts as 1. Each rendered section is
+    measured once up front, then maintained incrementally as sections
+    are dropped — avoids re-stripping ANSI on every survivor on every
+    drop iteration (suggested by Gemini code review on PR #72).
     """
-    items = list(named_items)
+    if not named_items:
+        return []
 
-    def total_width(items):
-        if not items:
-            return 0
-        return sum(_visible_width(r) for _, r in items) + sep_visible_width * (len(items) - 1)
+    # Pre-compute each section's visible width once so we never re-strip
+    # ANSI on a survivor we've already measured.
+    items = [(name, rendered, _visible_width(rendered))
+             for (name, rendered) in named_items]
+    total = sum(w for _, _, w in items) + sep_visible_width * (len(items) - 1)
 
-    if total_width(items) <= target_width:
-        return items
+    if total <= target_width:
+        return [(n, r) for (n, r, _) in items]
 
-    for name in drop_priority:
-        if total_width(items) <= target_width:
+    for drop_name in drop_priority:
+        if total <= target_width:
             break
-        items = [(n, r) for (n, r) in items if n != name]
+        # Partition by name. Recompute total via:
+        #   total' = (total before) - sum(dropped widths) - (count_dropped) * sep
+        #   then cap so we never count a separator that wasn't there
+        #   (when the survivors list ends up empty or had nothing to
+        #   begin with).
+        kept = [(n, r, w) for (n, r, w) in items if n != drop_name]
+        if len(kept) == len(items):
+            continue  # nothing matched this drop_name
+        dropped_width = sum(w for (n, _, w) in items if n == drop_name)
+        # Separator count change: items had len(items)-1 separators,
+        # kept has max(0, len(kept)-1). Subtract the difference.
+        old_seps = max(0, len(items) - 1)
+        new_seps = max(0, len(kept) - 1)
+        total -= dropped_width + (old_seps - new_seps) * sep_visible_width
+        items = kept
 
-    return items
+    return [(n, r) for (n, r, _) in items]
 
 
 def render(data, theme_name="default"):

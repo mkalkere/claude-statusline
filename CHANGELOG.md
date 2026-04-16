@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Notes
 - Anthropic's underlying `wrap:"truncate"` bug (anthropics/claude-code#28750) remains unaddressed upstream — the issue was closed by stalebot after 30 days of inactivity following the reporter's root-cause trace. Our two-stage layout makes the workaround tighter: instead of dropping the entire compact-bucket of sections at a single width threshold, we measure and drop only what actually doesn't fit.
 - Users who previously saw a sparse Line 2 between the compact and full thresholds will see additional sections automatically. No config change required.
+- Closes #73.
 
 ## [0.5.3] - 2026-04-13
 
