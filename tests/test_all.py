@@ -2659,8 +2659,12 @@ class TestPrintConfig(unittest.TestCase):
                     kv[k] = v
             return kv, exit_code
 
-    def test_emits_all_seven_keys_in_stable_order(self):
-        """Output contract: 7 keys, always in this order."""
+    def test_emits_all_eight_keys_in_stable_order(self):
+        """Output contract: 8 keys, always in this exact order.
+
+        Agents and shell scripts parse this — silent reordering or
+        adding/removing keys would break every downstream consumer.
+        """
         import claude_statusline.cli as cli_mod
         with tempfile.TemporaryDirectory() as tmpdir:
             settings_file = os.path.join(tmpdir, "settings.json")
@@ -2686,7 +2690,7 @@ class TestPrintConfig(unittest.TestCase):
         self.assertEqual(
             keys_in_order,
             ["installed", "command", "type", "refreshInterval",
-             "theme", "version", "settings_path"],
+             "theme", "version", "settings_path", "settings_state"],
             "key order or set changed — agents parsing this output will break"
         )
 
@@ -2748,10 +2752,16 @@ class TestPrintConfig(unittest.TestCase):
         self.assertEqual(kv["refreshInterval"], "10")
 
     def test_corrupt_settings_does_not_crash(self):
-        """Corrupt settings.json → installed=false, exit 1, no traceback."""
+        """Corrupt settings.json → installed=false, exit 2, no traceback.
+
+        Exit code 2 (not 1) is intentional: it signals 'do not auto-act'
+        to coding agents so they don't overwrite recoverable user
+        config. See TestPrintConfigEdgeCases.test_settings_state_unreadable_when_corrupt
+        for the full contract.
+        """
         kv, code = self._run_with_settings(None, corrupt=True)
         self.assertEqual(kv["installed"], "false")
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
 
     def test_version_field_matches_module(self):
         """version field is always the running module __version__."""
@@ -2786,6 +2796,10 @@ class TestPrintConfig(unittest.TestCase):
             env = os.environ.copy()
             env["HOME"] = home
             env["USERPROFILE"] = home  # Windows uses USERPROFILE for home
+            # On Windows, expanduser also consults HOMEDRIVE+HOMEPATH; clear
+            # them or the host's real home wins and the test goes flaky.
+            env.pop("HOMEDRIVE", None)
+            env.pop("HOMEPATH", None)
             r = subprocess.run(
                 [sys.executable, "-m", "claude_statusline", "--print-config"],
                 env=env, capture_output=True, text=True, timeout=5,
@@ -2794,6 +2808,246 @@ class TestPrintConfig(unittest.TestCase):
                 "expected exit 0 for installed state; got {}\nSTDOUT: {}\nSTDERR: {}".format(
                     r.returncode, r.stdout, r.stderr))
             self.assertIn("installed=true", r.stdout)
+
+
+class TestPrintConfigEdgeCases(unittest.TestCase):
+    """Defensive tests for --print-config — every case here corresponds
+    to a silent-failure mode flagged in the v0.5.5 PR review.
+
+    Reuses the same helpers as TestPrintConfig but with adversarial
+    inputs (non-dict statusLine, Windows .exe paths, --theme= form,
+    newline injection, corrupt settings, etc.). Each test pins the
+    behavior so a future refactor cannot regress silently.
+    """
+
+    def _run_with_settings(self, settings_dict_or_none, corrupt=False):
+        import claude_statusline.cli as cli_mod
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            if corrupt:
+                with open(settings_file, "w") as f:
+                    f.write("{not valid json")
+            elif settings_dict_or_none is not None:
+                with open(settings_file, "w") as f:
+                    json.dump(settings_dict_or_none, f)
+            orig = cli_mod._settings_path
+            cli_mod._settings_path = lambda: settings_file
+            from io import StringIO
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            sys.stdout = StringIO()
+            sys.stderr = StringIO()
+            exit_code = None
+            try:
+                try:
+                    cli_mod.cmd_print_config()
+                except SystemExit as e:
+                    exit_code = e.code
+                stdout_text = sys.stdout.getvalue()
+                stderr_text = sys.stderr.getvalue()
+            finally:
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
+                cli_mod._settings_path = orig
+            kv = {}
+            for line in stdout_text.strip().split("\n"):
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    kv[k] = v
+            return kv, exit_code, stdout_text, stderr_text
+
+    # ── settings.json shape edge cases ──────────────────────────────
+
+    def test_statusline_is_string_not_dict(self):
+        """Some users naively write `"statusLine": "claude-status"`.
+        Must not crash; reports installed=false; isinstance(sl, dict)
+        guard is the only thing protecting us."""
+        kv, code, _, _ = self._run_with_settings({"statusLine": "claude-status"})
+        self.assertEqual(kv["installed"], "false")
+        self.assertEqual(code, 1)
+
+    def test_statusline_is_list_not_dict(self):
+        kv, code, _, _ = self._run_with_settings({"statusLine": ["claude-status"]})
+        self.assertEqual(kv["installed"], "false")
+        self.assertEqual(code, 1)
+
+    def test_statusline_is_none(self):
+        """`"statusLine": null` (explicit clear) reports installed=false."""
+        kv, code, _, _ = self._run_with_settings({"statusLine": None})
+        self.assertEqual(kv["installed"], "false")
+        self.assertEqual(code, 1)
+
+    def test_settings_file_is_json_array_not_object(self):
+        """Whole settings.json is a list — isinstance(settings, dict)
+        guard prevents AttributeError."""
+        kv, code, _, _ = self._run_with_settings(["not", "an", "object"])
+        self.assertEqual(kv["installed"], "false")
+        self.assertEqual(code, 1)
+
+    # ── install detection — Windows + module forms ──────────────────
+
+    def test_windows_exe_suffix(self):
+        """Pip on Windows typically writes claude-status.exe."""
+        kv, code, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command", "command": "claude-status.exe"}
+        })
+        self.assertEqual(kv["installed"], "true")
+        self.assertEqual(code, 0)
+
+    def test_windows_full_path_with_spaces(self):
+        """Quoted Windows path with a space in `Program Files`. shlex
+        is required — plain str.split() would mangle this into multiple
+        tokens and fail detection."""
+        # JSON serializes backslashes as \\, settings.json stores them
+        # as single backslashes after parse. Use forward slashes here
+        # for cross-platform consistency since either works.
+        kv, code, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command",
+                           "command": '"C:/Program Files/Scripts/claude-status.exe" --theme focus'}
+        })
+        self.assertEqual(kv["installed"], "true")
+        self.assertEqual(kv["theme"], "focus")
+        self.assertEqual(code, 0)
+
+    def test_python_dash_m_form(self):
+        """`python -m claude_statusline` is the documented fallback in
+        the README when the binary isn't on PATH."""
+        for python_name in ("python", "python3", "py"):
+            kv, code, _, _ = self._run_with_settings({
+                "statusLine": {"type": "command",
+                               "command": "{} -m claude_statusline".format(python_name)}
+            })
+            self.assertEqual(kv["installed"], "true",
+                "python form '{} -m claude_statusline' should detect as installed".format(python_name))
+            self.assertEqual(code, 0)
+
+    def test_uvx_form(self):
+        """`uvx claude-status` is a common modern install pattern."""
+        kv, code, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command", "command": "uvx claude-status --theme nord"}
+        })
+        self.assertEqual(kv["installed"], "true")
+        self.assertEqual(kv["theme"], "nord")
+        self.assertEqual(code, 0)
+
+    def test_pipx_run_form(self):
+        kv, code, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command", "command": "pipx run claude-status"}
+        })
+        self.assertEqual(kv["installed"], "true")
+
+    def test_lookalike_binary_does_not_match(self):
+        """`not-claude-status` is a different program — must NOT match."""
+        for fake in ("not-claude-status", "my-claude-status",
+                     "fork-of-claude-status", "evil-claude-status"):
+            kv, code, _, _ = self._run_with_settings({
+                "statusLine": {"type": "command", "command": fake}
+            })
+            self.assertEqual(kv["installed"], "false",
+                "lookalike '{}' must not match claude-status detection".format(fake))
+            self.assertEqual(code, 1)
+
+    # ── theme parsing — both arg forms ──────────────────────────────
+
+    def test_theme_equals_form(self):
+        """argparse accepts `--theme=nord`; our parser must too."""
+        kv, code, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command", "command": "claude-status --theme=nord"}
+        })
+        self.assertEqual(kv["installed"], "true")
+        self.assertEqual(kv["theme"], "nord")
+
+    # ── refreshInterval: numeric string + bool guard ────────────────
+
+    def test_refresh_interval_numeric_string(self):
+        """Hand-edited settings.json often has refreshInterval as a
+        string ('1000'). Coerce via _safe_num."""
+        kv, _, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command", "command": "claude-status",
+                           "refreshInterval": "1000"}
+        })
+        self.assertEqual(kv["refreshInterval"], "1000")
+
+    def test_refresh_interval_bool_rejected(self):
+        """`bool` is an int subclass in Python — the explicit isinstance
+        check rejects True/False to avoid emitting refreshInterval=1.
+        Pinning this prevents a refactor that drops the guard."""
+        kv, _, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command", "command": "claude-status",
+                           "refreshInterval": True}
+        })
+        self.assertEqual(kv["refreshInterval"], "")
+
+    def test_refresh_interval_negative_rejected(self):
+        kv, _, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command", "command": "claude-status",
+                           "refreshInterval": -100}
+        })
+        self.assertEqual(kv["refreshInterval"], "")
+
+    def test_refresh_interval_garbage_string_rejected(self):
+        kv, _, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command", "command": "claude-status",
+                           "refreshInterval": "fast"}
+        })
+        self.assertEqual(kv["refreshInterval"], "")
+
+    # ── line-count contract: newline injection ──────────────────────
+
+    def test_newline_in_command_does_not_break_line_count(self):
+        """A command containing \\n would inject a fake key=value line
+        into the output, breaking every parser that relies on the
+        documented 8-line contract. Sanitization must convert it to a
+        single space."""
+        kv, code, stdout_text, _ = self._run_with_settings({
+            "statusLine": {"type": "command",
+                           "command": "claude-status\nPWNED=evil"}
+        })
+        # Exactly 8 lines, regardless of injected content.
+        self.assertEqual(len(stdout_text.strip().split("\n")), 8,
+            "newline in command field broke the 8-line contract")
+        # PWNED should NOT appear as a key — it should be folded into
+        # the command value (with the newline replaced by space).
+        self.assertNotIn("PWNED", kv,
+            "newline injection added a fake key to the parsed output")
+        self.assertIn("PWNED=evil", kv["command"],
+            "the injected text should still be visible as part of command for diagnosis")
+
+    # ── settings_state + exit code 2 ────────────────────────────────
+
+    def test_settings_state_ok_when_normal(self):
+        kv, _, _, _ = self._run_with_settings({"statusLine": {"type": "command",
+                                                              "command": "claude-status"}})
+        self.assertEqual(kv["settings_state"], "ok")
+
+    def test_settings_state_missing_when_no_file(self):
+        kv, code, _, _ = self._run_with_settings(None)
+        self.assertEqual(kv["settings_state"], "missing")
+        self.assertEqual(code, 1)
+
+    def test_settings_state_unreadable_when_corrupt(self):
+        """Corrupt settings.json must NOT collapse to installed=false
+        with exit 1 — that would let an agent auto-install over
+        recoverable user config. settings_state=unreadable + exit 2
+        signals 'do not auto-act, surface to user'."""
+        kv, code, _, stderr_text = self._run_with_settings(None, corrupt=True)
+        self.assertEqual(kv["settings_state"], "unreadable")
+        self.assertEqual(code, 2,
+            "corrupt settings must exit 2 so agents do not overwrite recoverable config")
+        # Diagnostic on stderr — agent's logs need to know why.
+        self.assertIn("settings.json", stderr_text)
+        # 8 lines on stdout still — contract preserved even on error.
+        self.assertEqual(kv["installed"], "false")
+
+    # ── version field tracks the running module ─────────────────────
+
+    def test_version_field_is_module_version(self):
+        """`version=` always reflects the running module __version__,
+        not a hardcoded literal that would rot on every release."""
+        from claude_statusline import __version__
+        kv, _, _, _ = self._run_with_settings({"statusLine": {"type": "command",
+                                                              "command": "claude-status"}})
+        self.assertEqual(kv["version"], __version__)
 
 
 # ─── cli.py — setup wizard ──────────────────────────────────────────

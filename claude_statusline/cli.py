@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -864,18 +865,96 @@ def cmd_demo():
             pass
 
 
+def _sanitize_field(value):
+    """Strip newlines and carriage returns so emitted fields stay on one line.
+
+    The --print-config output contract promises a stable 8-line shape;
+    a stray newline in (e.g.) command would inject a fake key=value
+    line and break parsers downstream.
+    """
+    return str(value).replace("\r", " ").replace("\n", " ")
+
+
+def _is_claude_status_invocation(parts):
+    """Detect whether a tokenized command actually launches claude-status.
+
+    Handles all the install patterns that produce a working status line:
+    - Direct binary: `claude-status`, `claude-status.exe`,
+      `/usr/local/bin/claude-status`, `C:\\path\\claude-status.exe`
+    - Module form: `python -m claude_statusline`, `py -m claude_statusline`
+    - Runner forms: `uvx claude-status`, `pipx run claude-status`
+
+    Strict basename-equality is used (not endswith) so lookalike
+    binaries like `not-claude-status` or `my-claude-status-fork` do
+    not falsely match.
+    """
+    if not parts:
+        return False
+    head = os.path.basename(parts[0]).lower()
+    # strip .exe suffix on Windows-style invocations
+    if head.endswith(".exe"):
+        head = head[:-4]
+    if head == "claude-status":
+        return True
+    # python -m claude_statusline (or py -m / python3 -m)
+    if head in ("python", "python3", "py") and "-m" in parts:
+        try:
+            mod = parts[parts.index("-m") + 1]
+        except (IndexError, ValueError):
+            return False
+        return mod in ("claude_statusline", "claude_statusline.cli")
+    # uvx claude-status / pipx run claude-status
+    if head in ("uvx", "pipx") and "claude-status" in parts:
+        return True
+    return False
+
+
+def _extract_theme(parts):
+    """Pull the --theme value out of a tokenized command.
+
+    Accepts both space form (`--theme nord`) and equals form
+    (`--theme=nord`) — argparse upstream accepts both, so we must too.
+    Returns "default" if no --theme was specified, "" if parts is empty.
+    """
+    if not parts:
+        return ""
+    for i, tok in enumerate(parts):
+        if tok == "--theme" and i + 1 < len(parts):
+            return parts[i + 1]
+        if tok.startswith("--theme="):
+            return tok.split("=", 1)[1]
+    return "default"
+
+
 def cmd_print_config():
     """Print current install state in a deterministic key=value form.
 
-    Designed for coding agents and shell scripts. Output is stable
-    across versions — fields are always emitted in the same order,
-    and absent values are emitted as empty strings rather than being
-    omitted, so a parser can rely on each line being present.
+    Designed for coding agents and shell scripts. Output is a stable
+    8-line block — fields are always emitted in the same order, every
+    field always appears, and values containing newlines are
+    sanitized so the line count stays fixed.
 
-    Exit code: 0 if installed (statusLine.command starts with
-    "claude-status"), 1 otherwise. Lets scripts test installation
-    state with `claude-status --print-config >/dev/null` without
-    parsing output.
+    Output keys (in order):
+      installed         true | false
+      command           verbatim statusLine.command (newlines stripped)
+      type              verbatim statusLine.type
+      refreshInterval   integer or empty
+      theme             theme name, "default", or empty
+      version           running module version
+      settings_path     absolute path to the settings.json we inspected
+      settings_state    ok | missing | unreadable
+
+    Exit codes:
+      0  installed (statusLine.command launches claude-status)
+      1  not installed (settings missing OR statusLine missing OR
+         statusLine points at a different tool)
+      2  settings.json exists but is corrupt or unreadable —
+         caller MUST NOT auto-install (would overwrite recoverable
+         user config)
+
+    Agents: use `if claude-status --print-config >/dev/null; then …`
+    for a clean installed-check. Always treat exit code 2 as a hard
+    stop and surface to the user — never auto-install over it.
     """
     settings_file = _settings_path()
     installed = False
@@ -883,41 +962,66 @@ def cmd_print_config():
     sl_type = ""
     refresh = ""
     theme = ""
+    settings_state = "missing"
 
     if os.path.exists(settings_file):
         try:
             with open(settings_file, "r", encoding="utf-8") as f:
                 settings = json.load(f)
-        except (json.JSONDecodeError, IOError, OSError):
+            settings_state = "ok"
+        except json.JSONDecodeError as exc:
+            print("claude-status: settings.json corrupt: line {} col {}: {}".format(
+                exc.lineno, exc.colno, exc.msg), file=sys.stderr)
             settings = None
+            settings_state = "unreadable"
+        except (IOError, OSError, UnicodeDecodeError) as exc:
+            print("claude-status: settings.json unreadable: {}: {}".format(
+                type(exc).__name__, exc), file=sys.stderr)
+            settings = None
+            settings_state = "unreadable"
         if isinstance(settings, dict):
             sl = settings.get("statusLine")
             if isinstance(sl, dict):
-                sl_type = str(sl.get("type", ""))
-                cmd_str = str(sl.get("command", ""))
+                sl_type = sl.get("type", "")
+                if not isinstance(sl_type, str):
+                    sl_type = str(sl_type)
+                cmd_value = sl.get("command", "")
+                cmd_str = cmd_value if isinstance(cmd_value, str) else str(cmd_value)
+                # refreshInterval: accept int/float (reject bool subclass)
+                # AND numeric strings, since hand-edited settings.json
+                # often stringify numbers. _safe_num handles both.
                 ri = sl.get("refreshInterval")
-                if isinstance(ri, (int, float)) and not isinstance(ri, bool):
-                    refresh = str(int(ri))
-                # Only consider it "installed" when the command actually
-                # invokes claude-status (not some unrelated statusLine).
-                if cmd_str.split() and cmd_str.split()[0].endswith("claude-status"):
-                    installed = True
-                    # Parse --theme NAME from the stored command if present.
+                if isinstance(ri, bool):
+                    pass  # bool is an int subclass — drop explicitly
+                else:
+                    n = _safe_num(ri)
+                    if n is not None and n >= 0:
+                        refresh = str(int(n))
+                # Tokenize the command. shlex handles quoted paths
+                # like "C:\Program Files\Scripts\claude-status.exe"
+                # that plain str.split would mangle. posix=True is
+                # used unconditionally — settings.json values use
+                # shell-style quoting regardless of host OS, and
+                # posix=False on Windows leaves the quotes attached
+                # to the token, breaking basename comparison.
+                try:
+                    parts = shlex.split(cmd_str, posix=True)
+                except ValueError:
                     parts = cmd_str.split()
-                    for i, tok in enumerate(parts):
-                        if tok == "--theme" and i + 1 < len(parts):
-                            theme = parts[i + 1]
-                            break
-                    if not theme:
-                        theme = "default"
+                if _is_claude_status_invocation(parts):
+                    installed = True
+                    theme = _extract_theme(parts)
 
     print("installed={}".format("true" if installed else "false"))
-    print("command={}".format(cmd_str))
-    print("type={}".format(sl_type))
+    print("command={}".format(_sanitize_field(cmd_str)))
+    print("type={}".format(_sanitize_field(sl_type)))
     print("refreshInterval={}".format(refresh))
-    print("theme={}".format(theme))
+    print("theme={}".format(_sanitize_field(theme)))
     print("version={}".format(__version__))
-    print("settings_path={}".format(settings_file))
+    print("settings_path={}".format(_sanitize_field(settings_file)))
+    print("settings_state={}".format(settings_state))
+    if settings_state == "unreadable":
+        sys.exit(2)
     sys.exit(0 if installed else 1)
 
 

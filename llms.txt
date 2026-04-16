@@ -83,7 +83,7 @@ Claude Code's TUI uses Ink `<Text wrap="truncate">` on the statusline (anthropic
 
 ## Testing
 
-stdlib unittest only. 284 tests. CI: 21-job matrix (3 OS x 7 Python versions: 3.8-3.14).
+stdlib unittest only. 300+ tests. CI: 21-job matrix (3 OS x 7 Python versions: 3.8-3.14).
 
 ```
 python -m unittest discover tests/

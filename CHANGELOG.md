@@ -8,10 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.5] - 2026-04-16
 
 ### Added
-- **`--print-config` flag** — emits current install state in a deterministic key=value form for coding agents and shell scripts. Output contract: 7 keys (`installed`, `command`, `type`, `refreshInterval`, `theme`, `version`, `settings_path`) in stable order. Exit code 0 when claude-status is the configured statusLine command, 1 otherwise. Lets agents/scripts test installation state with `claude-status --print-config >/dev/null` without parsing settings.json themselves.
+- **`--print-config` flag** — emits current install state in a deterministic key=value form for coding agents and shell scripts. Output contract: 8 keys (`installed`, `command`, `type`, `refreshInterval`, `theme`, `version`, `settings_path`, `settings_state`) in stable order, every line always present. Three exit codes: `0` installed, `1` not installed, `2` settings.json corrupt or unreadable (agents must NOT auto-install on `2` — would overwrite recoverable user config). Newlines in command/path values are sanitized so the line count stays fixed.
+- Install detection covers the full set of working install patterns: direct binary (`claude-status`, `claude-status.exe`, full Windows paths with spaces), module form (`python -m claude_statusline`, `py -m claude_statusline`), runner forms (`uvx claude-status`, `pipx run claude-status`). Strict basename equality rejects substring lookalikes (`not-claude-status`, `my-claude-status-fork`).
+- Theme parsing handles both argparse forms (`--theme nord` and `--theme=nord`).
+- `refreshInterval` accepts numeric strings (common in hand-edited settings.json) via `_safe_num`. Booleans and negative values are explicitly rejected.
 - **`AGENTS.md`** — one-page install guide for coding agents (Claude Code, Cursor, Aider, Continue, Cline, etc.) with the non-interactive one-liner, verification, update, uninstall, theme installs, budget configuration, and common recipes.
 - **README "For Coding Agents" section** — copy-paste-ready install block visible above the fold for both human readers and crawlers.
-- 11 new tests for `--print-config` covering: stable key order, no settings file, settings without statusLine, statusLine pointing at another tool, default install, install with theme, install with refreshInterval, corrupt settings, version field accuracy, absolute path handling, and end-to-end subprocess exit code.
+- 31 new tests for `--print-config` covering: stable key order, missing/corrupt/unreadable settings, non-dict statusLine (string/list/None/array), Windows `.exe`, full paths with spaces, `python -m`/`uvx`/`pipx` forms, lookalike rejection, both `--theme` arg forms, refreshInterval coercion (numeric string, bool, negative, garbage), newline injection sanitization, settings_state contract, and end-to-end subprocess exit code propagation.
 
 ### Changed
 - **`llms.txt` refreshed** — corrected v0.5.4 details (test count, two-stage layout description, threshold constants 150/100), added new flags, added link to AGENTS.md.

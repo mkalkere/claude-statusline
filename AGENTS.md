@@ -12,7 +12,7 @@ pip install -U claude-status && claude-status --install && claude-status --print
 
 After this command:
 - The package is installed (or upgraded) from PyPI.
-- `~/.claude/settings.json` has `statusLine.command = "claude-status"` (any prior config is backed up to `~/.claude/settings.json.claude-status-backup`).
+- `~/.claude/settings.json` has `statusLine.command = "claude-status"` (any prior config is backed up to `~/.claude/settings.json.bak`).
 - `--print-config` prints the current install state in a machine-readable form so you can confirm success.
 
 The user must restart Claude Code for the status line to appear. Tell them this explicitly.
@@ -23,19 +23,25 @@ The user must restart Claude Code for the status line to appear. Tell them this 
 claude-status --print-config
 ```
 
-A successful install prints (machine-readable, stable across versions):
+A successful install prints 8 `key=value` lines in stable order — values are always present (empty string when absent) so a parser can rely on a fixed line count:
 
 ```
 installed=true
 command=claude-status
 type=command
-refreshInterval=<absent or integer>
-theme=<theme name or "default">
-version=0.5.4
-settings_path=/home/user/.claude/settings.json
+refreshInterval=<integer or empty>
+theme=<theme name; "default" when --theme not specified>
+version=<package version, e.g. 0.5.5>
+settings_path=<absolute path to settings.json>
+settings_state=ok
 ```
 
-If `installed=false`, the install did not complete — re-run `claude-status --install` and check `claude-status --doctor` for environment issues (PATH, write permissions on `~/.claude/`).
+**Exit codes** (relied on by scripts):
+- `0` — installed and ready
+- `1` — not installed (settings missing, statusLine missing, or statusLine points at a different tool)
+- `2` — settings.json exists but is corrupt or unreadable. **Agents must NOT auto-install on exit code 2** — running `--install` would overwrite recoverable user config. Surface the stderr diagnostic to the user and stop.
+
+If `installed=false` with exit code 1, re-run `claude-status --install` and check `claude-status --doctor` for environment issues (PATH, write permissions on `~/.claude/`).
 
 ## Install with a specific theme
 
@@ -107,9 +113,18 @@ The cost indicator turns yellow at 70% and red at 90% of the daily limit. No res
 
 ### "Is claude-status already set up?"
 ```bash
-claude-status --print-config 2>/dev/null | grep -q '^installed=true'
+if claude-status --print-config >/dev/null 2>&1; then
+    echo "claude-status is installed"
+else
+    rc=$?
+    if [ "$rc" = "2" ]; then
+        echo "settings.json is corrupt — do not auto-install (would overwrite recoverable user config)"
+    else
+        echo "claude-status is not installed"
+    fi
+fi
 ```
-Returns exit code 0 if installed, 1 otherwise. Safe in scripts.
+Exit code 0 = installed, 1 = not installed, 2 = settings.json corrupt/unreadable (do not auto-install on this).
 
 ## Where to find more
 
