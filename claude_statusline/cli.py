@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shutil
 import sys
 import tempfile
@@ -204,9 +205,42 @@ def _render_sections(n, order, theme):
         theme: Theme dict.
 
     Returns:
-        List of rendered section strings.
+        List of rendered section strings (rendered text only). Skips
+        sections whose data is absent. Use _render_sections_named()
+        when the caller needs to know which name produced each string
+        (e.g. for width-aware fitting).
     """
-    sections = []
+    return [r for _, r in _render_sections_named(n, order, theme)]
+
+
+def _render_sections_named(n, order, theme):
+    """Render sections, returning (name, rendered) pairs.
+
+    Same logic as _render_sections() but preserves the section name
+    alongside each rendered string. Used by render() to drive
+    _fit_to_width(), which needs to know which sections it can drop.
+    """
+    # `_NamedAppender` lets the existing `sections.append(...)` calls below
+    # remain unchanged while transparently pairing each appended string with
+    # the current section name. Avoids a wide-touch refactor of every append
+    # site in this function. The guard in `append` prevents items being
+    # silently tagged with `None` if a future change moves an append outside
+    # the loop — `None`-tagged items are undroppable by _fit_to_width and
+    # would silently overflow the line.
+    class _NamedAppender:
+        __slots__ = ("items", "current")
+        def __init__(self):
+            self.items = []
+            self.current = None
+        def append(self, value):
+            if self.current is None:
+                raise RuntimeError(
+                    "_NamedAppender.append called without a current section "
+                    "name — every append must follow `sections.current = section`"
+                )
+            self.items.append((self.current, value))
+
+    sections = _NamedAppender()
     tc = theme["colors"]
 
     input_tokens = n["input_tokens"]
@@ -229,6 +263,7 @@ def _render_sections(n, order, theme):
     total_tokens = (input_tokens or 0) + (output_tokens or 0) + (cache_read or 0) + (cache_create or 0)
 
     for section in order:
+        sections.current = section
         if section == "bar" and pct is not None:
             compaction = get_compaction_threshold()
             bar_width = theme.get("bar_width", 20)
@@ -494,23 +529,27 @@ def _render_sections(n, order, theme):
                 if parts:
                     sections.append(" ".join(parts))
 
-    return sections
+    return sections.items
 
 
 # Responsive layout breakpoints (in terminal columns).
 #
-# History: these thresholds were originally 120/80 when Line 2 had ~8
-# sections. As features were added through v0.3–v0.5 (rate limits,
-# speed, git_state, commit_age, session_name, output_style, added_dirs,
-# git_worktree, effort, cc_version), Line 2's full-layout content can
-# reach ~225 visible chars with a worst-case realistic payload (long
-# session, long branch/session name, all rate limits, heavy git state)
-# — overflowing the old 120-col threshold and triggering Claude Code's
-# Ink truncation on Line 2. Raised to 230/100 in v0.5.3 (#70): 230
-# includes a small buffer above the measured worst-case 225 so a
-# terminal exactly at the threshold still fits. Most terminals will
-# land in the compact layout, which is the safe default.
-_FULL_LAYOUT_MIN_COLS = 230
+# These are the COARSE pre-filter thresholds — render() applies a
+# precise width-aware fit (_fit_to_width) on top of this, dropping
+# low-priority sections one at a time until each line fits the actual
+# terminal width.
+#
+# History: thresholds were originally 120/80, then raised to 230/100
+# in v0.5.3 (#70) because Line 2 could reach ~225 visible chars in the
+# worst case and Claude Code's Ink TUI truncates Line 2 when Line 1
+# overflows. The 230 threshold was overly conservative — it meant
+# almost every real terminal (120-200 cols) lost ~19 sections at once.
+# Lowered to 150/100 once the precise stage was added: above 150 cols,
+# all sections are eligible and the precise stage trims as needed.
+# Below 150 we still pre-filter the heaviest sections so we don't pay
+# the cost of rendering them (git subprocess calls, file scans for
+# tools/sessions, etc.) on terminals where they'll never fit anyway.
+_FULL_LAYOUT_MIN_COLS = 150
 _COMPACT_LAYOUT_MIN_COLS = 100
 
 # Sections to drop at each width breakpoint (widest first).
@@ -525,13 +564,39 @@ _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",
 ]
 
+# Drop priority for the precise post-render fit (_fit_to_width).
+# Earlier entries are dropped first. Extends _COMPACT_DROP with last-resort
+# drops so the precise stage can always reach a fitting result even when
+# the coarse pre-filter has already kept the compact subset. Sections NOT
+# listed here (bar, tokens, cost, branch, ctx_warning) are truly essential
+# and never dropped — every line keeps the bar+tokens+cost identity even
+# at extreme widths.
+#
+# Ordering rationale: extras first (same as _COMPACT_DROP), then visual
+# decorations (vim, agent), then sections that carry derived/recomputable
+# info (lines, burn, duration are derivable from cost+tokens), then model
+# (still useful but visible elsewhere in Claude Code's UI), then cache
+# (a percentage that changes slowly), and finally budget (the one section
+# users explicitly opted into via config — drop only if truly nothing else
+# fits). bar/tokens/cost/branch/ctx_warning are deliberately omitted —
+# losing those would defeat the statusline's purpose.
+_FIT_DROP_PRIORITY = _COMPACT_DROP + [
+    "vim", "agent", "worktree", "lines", "duration", "burn",
+    "model", "cache", "budget",
+]
+
 
 def _apply_responsive(sections_list, term_width):
     """Filter section list based on terminal width.
 
-    >= 230 cols: full layout (no changes)
-    100-229 cols: compact (drop non-essential extras)
-    < 100 cols:   narrow (essentials only)
+    >= 150 cols: full layout (no changes)
+    100-149 cols: compact (drop non-essential extras)
+    < 100 cols:  narrow (essentials only)
+
+    Coarse pre-filter only — the precise fit is performed by
+    _fit_to_width() after sections are rendered, so a user at any
+    width above the narrow band can see additional sections when
+    their actual rendered width allows.
     """
     if term_width >= _FULL_LAYOUT_MIN_COLS:
         return sections_list
@@ -544,22 +609,114 @@ def _apply_responsive(sections_list, term_width):
     return [s for s in sections_list if s not in drop]
 
 
+# Match SGR escapes (\x1b[…m) and OSC 8 hyperlink wrappers. OSC 8 has
+# two valid string terminators per the ECMA-48 spec: ST (\x1b\\) and
+# BEL (\x07). Several emitters (Kitty, GNU Screen wrappers, some Vim
+# plugins) use BEL, so we must match both — otherwise BEL-form links
+# count as visible bytes and _fit_to_width over-drops sections.
+# Both SGR and OSC 8 contribute zero visible width but inflate raw
+# byte length.
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+_OSC8_RE = re.compile(r"\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def _visible_width(s):
+    """Visible character width of a string after stripping ANSI + OSC 8.
+
+    Approximation: counts each remaining code point as width 1. Wide
+    East-Asian characters and emoji are over-counted as 1 instead of 2,
+    but our statusline glyphs (\u2387 for branch, \u2726 for session,
+    bar blocks, etc.) are all single-width — so this matches reality
+    for our content. The unicodedata.east_asian_width path is omitted
+    intentionally to keep zero dependencies and stay deterministic.
+    """
+    s = _OSC8_RE.sub("", s)
+    s = _ANSI_SGR_RE.sub("", s)
+    return len(s)
+
+
+def _fit_to_width(named_items, sep_visible_width, target_width, drop_priority):
+    """Drop low-priority sections until the joined output fits target_width.
+
+    Args:
+        named_items: List of (name, rendered) tuples from
+            _render_sections_named().
+        sep_visible_width: Visible width of the separator between sections.
+        target_width: Maximum allowed visible width (terminal columns).
+        drop_priority: Ordered list of section names — earliest entries are
+            dropped first when the line overflows. Sections not listed here
+            are considered essential and are never dropped.
+
+    Returns:
+        New list of (name, rendered) tuples that fit within target_width.
+        Order of surviving sections is preserved.
+
+    Width math: each visible char counts as 1. Each rendered section is
+    measured once up front, then maintained incrementally as sections
+    are dropped — avoids re-stripping ANSI on every survivor on every
+    drop iteration (suggested by Gemini code review on PR #72).
+    """
+    if not named_items:
+        return []
+
+    # Pre-compute each section's visible width once so we never re-strip
+    # ANSI on a survivor we've already measured.
+    items = [(name, rendered, _visible_width(rendered))
+             for (name, rendered) in named_items]
+    total = sum(w for _, _, w in items) + sep_visible_width * (len(items) - 1)
+
+    if total <= target_width:
+        return [(n, r) for (n, r, _) in items]
+
+    for drop_name in drop_priority:
+        if total <= target_width:
+            break
+        # Partition by name. Recompute total via:
+        #   total' = (total before) - sum(dropped widths) - (count_dropped) * sep
+        #   then cap so we never count a separator that wasn't there
+        #   (when the survivors list ends up empty or had nothing to
+        #   begin with).
+        kept = [(n, r, w) for (n, r, w) in items if n != drop_name]
+        if len(kept) == len(items):
+            continue  # nothing matched this drop_name
+        dropped_width = sum(w for (n, _, w) in items if n == drop_name)
+        # Separator count change: items had len(items)-1 separators,
+        # kept has max(0, len(kept)-1). Subtract the difference.
+        old_seps = max(0, len(items) - 1)
+        new_seps = max(0, len(kept) - 1)
+        total -= dropped_width + (old_seps - new_seps) * sep_visible_width
+        items = kept
+
+    return [(n, r) for (n, r, _) in items]
+
+
 def render(data, theme_name="default"):
     """Render the statusline as one or two lines.
 
-    Automatically adapts layout based on terminal width:
-    - >= 230 cols: full detail (all sections)
-    - 100-229 cols: compact (drops git_extras, version, clock, rate_limits,
-      context_size, speed, commit_age, session_name, cc_version, etc.)
-    - < 100 cols: narrow (essentials only — bar, tokens, cost, duration, branch)
+    Two-stage layout adaptation:
 
-    The full-layout threshold is 230 rather than 120 because Line 2 can
-    reach ~225 visible chars with a worst-case realistic payload (long
-    session, long branch/session name, all rate limits populated) as
-    features were added in v0.3-v0.5. A 120-col terminal with all data
-    populated would cause Claude Code's Ink TUI to truncate Line 2 with
-    an ellipsis. 230 buffers above the measured 225. Most terminals will
-    land in compact layout — the safe default.
+    1. Coarse pre-filter (_apply_responsive) — picks a section list
+       based on terminal width buckets:
+       - >= 150 cols: full layout (all sections eligible)
+       - 100-149 cols: compact (drops the heaviest extras up front
+         so we don't pay rendering cost on terminals where they
+         won't fit)
+       - < 100 cols: narrow (essentials only)
+
+    2. Precise width-aware fit (_fit_to_width) — renders the surviving
+       sections, measures actual visible width (stripping ANSI/OSC 8),
+       and drops sections in _FIT_DROP_PRIORITY order one at a time
+       until each line fits the terminal. This recovers sections like
+       rate_limits, speed, version, etc. on 150-220 col terminals
+       where the static compact bucket would have hidden them
+       unnecessarily — and also handles the compact band (100-149)
+       where the kept sections might still overflow with heavy data
+       (long agent name, vim mode active, long branch+session).
+
+    Stage 2 exists because Claude Code's Ink TUI uses wrap:"truncate"
+    on the statusline (anthropics/claude-code#28750, still unfixed) —
+    if Line 1 overflows, Line 2 is silently dropped. Measuring our
+    actual rendered width and shrinking until we fit prevents this.
 
     Args:
         data: Parsed JSON dict from Claude Code.
@@ -571,6 +728,7 @@ def render(data, theme_name="default"):
     theme = get_theme(theme_name)
     n = _normalize(data)
     sep = colorize(theme["separator"], theme["colors"]["separator"])
+    sep_width = _visible_width(sep)
 
     # Default to compact layout when terminal size cannot be detected
     # (non-interactive contexts, piped stdout, some SSH setups).
@@ -584,14 +742,25 @@ def render(data, theme_name="default"):
         line1 = [s for s in line1 if s not in disabled]
         line2 = [s for s in line2 if s not in disabled]
 
-    line1_sections = _render_sections(n, line1, theme)
-    line2_sections = _render_sections(n, line2, theme)
+    line1_named = _render_sections_named(n, line1, theme)
+    line2_named = _render_sections_named(n, line2, theme)
+
+    # Precise width-aware fit. Drop priority is _FIT_DROP_PRIORITY —
+    # extends _COMPACT_DROP with last-resort drops (vim, agent, lines,
+    # duration, burn, model, cache, budget) so the precise stage can
+    # always reach a fitting result. Without these last-resort entries,
+    # the compact band (100-149 cols) silently overflows because most
+    # surviving line2 sections wouldn't be droppable. Sections not in
+    # this list (bar, tokens, cost, branch, ctx_warning) are truly
+    # essential and never dropped here.
+    line1_named = _fit_to_width(line1_named, sep_width, term_width, _FIT_DROP_PRIORITY)
+    line2_named = _fit_to_width(line2_named, sep_width, term_width, _FIT_DROP_PRIORITY)
 
     lines = []
-    if line1_sections:
-        lines.append(sep.join(line1_sections))
-    if line2_sections:
-        lines.append(sep.join(line2_sections))
+    if line1_named:
+        lines.append(sep.join(r for _, r in line1_named))
+    if line2_named:
+        lines.append(sep.join(r for _, r in line2_named))
 
     return "\n".join(lines)
 
@@ -1034,15 +1203,17 @@ def cmd_doctor():
     # Terminal capabilities
     print("Terminal:")
     term = os.environ.get("TERM", "(not set)")
-    cols = shutil.get_terminal_size((120, 24)).columns
+    cols = shutil.get_terminal_size((_COMPACT_LAYOUT_MIN_COLS, 24)).columns
     print("  TERM:    {}".format(term))
     print("  Columns: {}".format(cols))
-    if cols >= 120:
-        print("  Layout:  full")
-    elif cols >= 80:
-        print("  Layout:  compact")
+    if cols >= _FULL_LAYOUT_MIN_COLS:
+        print("  Layout:  full (>= {} cols)".format(_FULL_LAYOUT_MIN_COLS))
+    elif cols >= _COMPACT_LAYOUT_MIN_COLS:
+        print("  Layout:  compact ({}-{} cols)".format(
+            _COMPACT_LAYOUT_MIN_COLS, _FULL_LAYOUT_MIN_COLS - 1))
     else:
-        print("  Layout:  narrow")
+        print("  Layout:  narrow (< {} cols)".format(_COMPACT_LAYOUT_MIN_COLS))
+    print("  Note:    precise width-aware fit further trims sections to fit")
     print("  Unicode: \u2588\u2591\u2593 \u2387 \ue0b0")
     print()
 

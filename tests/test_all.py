@@ -1515,10 +1515,18 @@ class TestResponsiveLayout(unittest.TestCase):
         self.assertNotIn("cache", result)  # cache is in _NARROW_DROP
 
     def test_boundary_at_full_threshold(self):
-        """229 cols (just below full threshold) should use compact layout."""
+        """149 cols (just below full threshold) should use compact layout.
+
+        The full-layout threshold was lowered from 230 → 150 in the
+        width-aware-layout change because a precise post-render fit
+        (_fit_to_width) handles the actual sizing — the coarse
+        pre-filter only needs to skip expensive sections (git
+        subprocess calls, file scans) on terminals where they will
+        never fit.
+        """
         from claude_statusline.cli import _apply_responsive
         sections = ["bar", "tokens", "cost", "git_extras"]
-        result = _apply_responsive(sections, 229)
+        result = _apply_responsive(sections, 149)
         self.assertIn("bar", result)
         self.assertNotIn("git_extras", result)  # compact drops git_extras
 
@@ -1568,6 +1576,189 @@ class TestResponsiveLayout(unittest.TestCase):
         finally:
             if old_cols is not None:
                 os.environ["COLUMNS"] = old_cols
+
+
+# ─── cli.py — width-aware fit ────────────────────────────────────────
+
+class TestVisibleWidth(unittest.TestCase):
+    """_visible_width strips ANSI/OSC 8 — Claude Code's Ink TUI counts
+    visible glyphs only, so our fit math must match that."""
+
+    def test_plain_text_width(self):
+        from claude_statusline.cli import _visible_width
+        self.assertEqual(_visible_width("hello"), 5)
+
+    def test_empty_string(self):
+        from claude_statusline.cli import _visible_width
+        self.assertEqual(_visible_width(""), 0)
+
+    def test_strips_sgr_color(self):
+        from claude_statusline.cli import _visible_width
+        # Red "abc" reset → visible width is 3
+        self.assertEqual(_visible_width("\x1b[31mabc\x1b[0m"), 3)
+
+    def test_strips_multiple_sgr(self):
+        from claude_statusline.cli import _visible_width
+        s = "\x1b[1m\x1b[31mbold red\x1b[0m \x1b[32mgreen\x1b[0m"
+        self.assertEqual(_visible_width(s), len("bold red green"))
+
+    def test_strips_osc8_hyperlink(self):
+        """OSC 8 wrapper bytes are zero-width — only the link text counts."""
+        from claude_statusline.cli import _visible_width
+        s = "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\"
+        self.assertEqual(_visible_width(s), len("link"))
+
+    def test_strips_combined_osc8_and_sgr(self):
+        from claude_statusline.cli import _visible_width
+        s = "\x1b]8;;https://x.test\x1b\\\x1b[36mlinked\x1b[0m\x1b]8;;\x1b\\"
+        self.assertEqual(_visible_width(s), len("linked"))
+
+    def test_strips_osc8_with_bel_terminator(self):
+        """OSC 8 also permits BEL (\\x07) as the string terminator (Kitty,
+        GNU Screen wrappers, some Vim plugins). The regex must match
+        both ST and BEL — otherwise BEL-form links inflate the measured
+        width and _fit_to_width over-drops sections."""
+        from claude_statusline.cli import _visible_width
+        s = "\x1b]8;;https://example.com\x07link\x1b]8;;\x07"
+        self.assertEqual(_visible_width(s), len("link"))
+
+    def test_strips_osc8_mixed_terminators(self):
+        """Defensive: opener with ST, closer with BEL (or vice versa) —
+        each wrapper element matches the alternation independently."""
+        from claude_statusline.cli import _visible_width
+        s = "\x1b]8;;https://x\x1b\\link\x1b]8;;\x07"
+        self.assertEqual(_visible_width(s), len("link"))
+
+
+class TestFitToWidth(unittest.TestCase):
+    """_fit_to_width drops sections in priority order until the line fits.
+
+    Sections not in drop_priority are essential and must never be dropped
+    (e.g. bar, tokens, cost, branch). Sections in drop_priority are
+    dropped earliest-first when the line overflows."""
+
+    def test_no_drop_when_fits(self):
+        from claude_statusline.cli import _fit_to_width
+        items = [("bar", "[####]"), ("cost", "$1.20")]
+        result = _fit_to_width(items, sep_visible_width=3, target_width=80,
+                               drop_priority=["clock", "version"])
+        self.assertEqual(result, items)
+
+    def test_drops_lowest_priority_first(self):
+        """When over budget, the earliest entry in drop_priority is dropped."""
+        from claude_statusline.cli import _fit_to_width
+        items = [("bar", "[####]"),       # 6
+                 ("clock", "12:34"),       # 5
+                 ("version", "v0.5.3"),    # 6
+                 ("cost", "$1.20")]        # 5
+        # Total visible chars = 22 + 3 separators of width 3 = 31.
+        # Set target=26 so we must drop one section. drop_priority drops
+        # clock first.
+        result = _fit_to_width(items, sep_visible_width=3, target_width=26,
+                               drop_priority=["clock", "version"])
+        names = [n for n, _ in result]
+        self.assertNotIn("clock", names)
+        self.assertIn("version", names)
+        self.assertIn("bar", names)
+        self.assertIn("cost", names)
+
+    def test_drops_multiple_when_needed(self):
+        from claude_statusline.cli import _fit_to_width
+        items = [("bar", "[####]"),      # 6
+                 ("clock", "12:34"),     # 5
+                 ("version", "v0.5.3"),  # 6
+                 ("cost", "$1.20")]      # 5
+        # Force a tiny target so both droppable sections must go.
+        result = _fit_to_width(items, sep_visible_width=3, target_width=15,
+                               drop_priority=["clock", "version"])
+        names = [n for n, _ in result]
+        self.assertEqual(names, ["bar", "cost"])
+
+    def test_never_drops_essential_sections(self):
+        """Sections not in drop_priority are kept even if line still overflows."""
+        from claude_statusline.cli import _fit_to_width
+        items = [("bar", "[####]"), ("cost", "$1.20")]
+        # Target so small nothing fits, but neither section is droppable.
+        result = _fit_to_width(items, sep_visible_width=3, target_width=2,
+                               drop_priority=["clock", "version"])
+        # Both essentials remain — _fit_to_width never drops sections
+        # that aren't in the priority list.
+        self.assertEqual(result, items)
+
+    def test_strips_ansi_when_measuring(self):
+        """Width math must use visible width, not raw byte length."""
+        from claude_statusline.cli import _fit_to_width
+        # Each item is 6 visible chars but ~16 bytes with ANSI.
+        items = [("bar", "\x1b[31m[####]\x1b[0m"),
+                 ("clock", "\x1b[90m12:34\x1b[0m"),
+                 ("cost", "\x1b[33m$1.20\x1b[0m")]
+        # Visible total = 6+5+5 = 16 + 2 seps of width 1 = 18. Fits in 20.
+        result = _fit_to_width(items, sep_visible_width=1, target_width=20,
+                               drop_priority=["clock"])
+        self.assertEqual(len(result), 3)  # nothing dropped
+
+    def test_preserves_order(self):
+        from claude_statusline.cli import _fit_to_width
+        items = [("a", "AA"), ("b", "BB"), ("c", "CC"), ("d", "DD")]
+        # Drop b but keep a, c, d in original order.
+        result = _fit_to_width(items, sep_visible_width=1, target_width=8,
+                               drop_priority=["b"])
+        names = [n for n, _ in result]
+        self.assertEqual(names, ["a", "c", "d"])
+
+
+class TestRenderFitsTerminalWidth(unittest.TestCase):
+    """End-to-end: render() must produce output where each line fits the
+    reported terminal width. This is the user-visible contract — Claude
+    Code's Ink TUI drops Line 2 if Line 1 exceeds the terminal width."""
+
+    def _measure_lines(self, output):
+        from claude_statusline.cli import _visible_width
+        return [_visible_width(line) for line in output.split("\n")]
+
+    def test_render_fits_at_120_cols(self):
+        """At 120 cols, every output line must be ≤ 120 visible chars."""
+        from claude_statusline.cli import render, _demo_data
+        old = os.environ.get("COLUMNS")
+        os.environ["COLUMNS"] = "120"
+        try:
+            out = render(_demo_data())
+            for w in self._measure_lines(out):
+                self.assertLessEqual(w, 120,
+                    "Line of width {} exceeds terminal width 120".format(w))
+        finally:
+            if old is None:
+                os.environ.pop("COLUMNS", None)
+            else:
+                os.environ["COLUMNS"] = old
+
+    def test_render_fits_at_150_cols(self):
+        from claude_statusline.cli import render, _demo_data
+        old = os.environ.get("COLUMNS")
+        os.environ["COLUMNS"] = "150"
+        try:
+            out = render(_demo_data())
+            for w in self._measure_lines(out):
+                self.assertLessEqual(w, 150)
+        finally:
+            if old is None:
+                os.environ.pop("COLUMNS", None)
+            else:
+                os.environ["COLUMNS"] = old
+
+    def test_render_fits_at_180_cols(self):
+        from claude_statusline.cli import render, _demo_data
+        old = os.environ.get("COLUMNS")
+        os.environ["COLUMNS"] = "180"
+        try:
+            out = render(_demo_data())
+            for w in self._measure_lines(out):
+                self.assertLessEqual(w, 180)
+        finally:
+            if old is None:
+                os.environ.pop("COLUMNS", None)
+            else:
+                os.environ["COLUMNS"] = old
 
 
 # ─── cli.py — rate limits section ────────────────────────────────────
@@ -3039,6 +3230,77 @@ class TestLine2FitsAt120Cols(unittest.TestCase):
                     idx + 1, visible
                 )
             )
+
+    def test_line2_fits_in_compact_band_with_vim_and_long_agent(self):
+        """The compact band (100-149 cols) must fit even with the heaviest
+        line2 sections — vim NORMAL active, long agent name, long branch.
+
+        This is the silent-failure mode that broke v0.5.4 before
+        _FIT_DROP_PRIORITY was introduced: the coarse pre-filter kept
+        burn/duration/lines/branch/vim/agent/model on Line 2, none of
+        which were in _COMPACT_DROP, so the precise stage was a no-op
+        and Line 2 silently overflowed at 110 cols. Pinning all three
+        widths (100/110/130) guarantees the precise stage covers them.
+        """
+        payload = self._heavy_payload()
+        payload["vim"] = {"mode": "NORMAL"}
+        payload["agent"] = {"name": "long-agent-name-stress-test"}
+        for cols in (100, 110, 130):
+            old = os.environ.get("COLUMNS")
+            os.environ["COLUMNS"] = str(cols)
+            try:
+                result = render(payload)
+            finally:
+                if old is None:
+                    del os.environ["COLUMNS"]
+                else:
+                    os.environ["COLUMNS"] = old
+            for idx, line in enumerate(result.split("\n")):
+                w = self._visible_width(line)
+                self.assertLessEqual(
+                    w, cols,
+                    "Line {} is {} visible chars at {}-col terminal "
+                    "(heavy + vim + long agent). _FIT_DROP_PRIORITY may "
+                    "be missing a section name from line2.".format(
+                        idx + 1, w, cols
+                    )
+                )
+
+    def test_rate_limits_recovered_at_180_cols(self):
+        """At 180 cols the precise stage should KEEP rate_limits visible
+        even though it lives in _COMPACT_DROP — because at 180 cols there
+        is room for it.
+
+        This pins the recovery property: someone who reverts the precise
+        stage or re-raises _FULL_LAYOUT_MIN_COLS to 230 would silently
+        lose this section, and the upper-bound width tests above would
+        not notice (overflow tests pass either way).
+        """
+        result = self._render_at_width(180)
+        # Rate-limit indicators look like "5h:46%" / "7d:68%" in the
+        # output (with ANSI color around them). Strip ANSI for the
+        # substring check.
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result)
+        self.assertIn(
+            "5h:", plain,
+            "rate_limits section was dropped at 180 cols even though "
+            "it should fit — precise stage may have over-dropped or "
+            "been disabled."
+        )
+
+    def test_rate_limits_dropped_at_120_cols(self):
+        """At 120 cols there is no room for rate_limits — the precise
+        stage must drop it. Inverse pin to test_rate_limits_recovered:
+        if the drop priority is broken or _COMPACT_DROP is bypassed,
+        rate_limits would leak through and overflow Line 2.
+        """
+        result = self._render_at_width(120)
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result)
+        self.assertNotIn(
+            "5h:", plain,
+            "rate_limits section was kept at 120 cols — would push "
+            "Line 2 past terminal width and trigger Ink truncation."
+        )
 
 
 # ─── sessions.py — disabled sections ────────────────────────────────

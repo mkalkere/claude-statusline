@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-04-16
+
+### Added
+- **Width-aware adaptive layout** — render() now performs a precise post-render fit on each line: it measures actual visible width (stripping ANSI/OSC 8 escapes) and drops sections in priority order one at a time until the line fits the terminal. This recovers sections like `rate_limits`, `speed`, `version`, `clock`, `commit_age`, etc. on terminals between the compact band and full layout where the v0.5.3 compact bucket would have hidden them all unconditionally.
+- New tests cover ANSI/OSC 8 stripping (including BEL-terminated OSC 8 used by Kitty/Screen), the priority-based drop algorithm, end-to-end width fit, and recovery (rate_limits visible at 180 cols, dropped at 120 cols).
+
+### Changed
+- Lowered the full-layout pre-filter threshold from 230 → 150 cols. Above 150, all sections are eligible and the precise stage trims as needed. Below 150, the coarse pre-filter still skips the heaviest sections (git subprocess calls, file scans for tools/sessions) so we don't pay rendering cost on terminals where they won't fit.
+- Two-stage layout: coarse pre-filter (`_apply_responsive`) picks an eligible section list by terminal-width bucket, then precise fit (`_fit_to_width`) trims after rendering. The precise stage uses `_FIT_DROP_PRIORITY`, which extends `_COMPACT_DROP` with last-resort drops (vim, agent, lines, duration, burn, model, cache, budget) so the compact band (100-149 cols) can also reach a fitting result with heavy data.
+- `--doctor` now reports the actual layout thresholds (driven by the constants) instead of hardcoded values that drifted in v0.5.3 → v0.5.4.
+
+### Fixed
+- OSC 8 hyperlink regex now matches both string-terminator forms (ST `\x1b\\` and BEL `\x07`) so width measurement stays accurate when text passes through emitters that use BEL.
+
+### Notes
+- Anthropic's underlying `wrap:"truncate"` bug (anthropics/claude-code#28750) remains unaddressed upstream — the issue was closed by stalebot after 30 days of inactivity following the reporter's root-cause trace. Our two-stage layout makes the workaround tighter: instead of dropping the entire compact-bucket of sections at a single width threshold, we measure and drop only what actually doesn't fit.
+- Users who previously saw a sparse Line 2 between the compact and full thresholds will see additional sections automatically. No config change required.
+- Closes #73.
+
 ## [0.5.3] - 2026-04-13
 
 ### Fixed

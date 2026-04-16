@@ -30,10 +30,11 @@ claude_statusline/
 
 1. **`main()`** reads JSON from stdin
 2. **`_normalize(data)`** flattens the nested Claude Code JSON into a flat dict, handling both old and new schema formats
-3. **`_apply_responsive(sections, term_width)`** filters sections based on terminal width (120+/80-119/<80 cols)
-4. **`_render_sections(normalized, order, theme)`** renders each section name into a colored string
-5. **`render(data, theme_name)`** joins sections with themed separators into 1-2 lines
-6. Output is printed to stdout
+3. **`_apply_responsive(sections, term_width)`** coarse pre-filter — filters sections based on terminal width buckets (150+/100-149/<100 cols), skipping the heaviest sections on terminals where they won't fit
+4. **`_render_sections_named(normalized, order, theme)`** renders each section name into a `(name, rendered_string)` pair (skipping sections whose data is absent)
+5. **`_fit_to_width(items, sep_width, term_width, drop_priority)`** precise post-render fit — measures actual visible width (stripping ANSI/OSC 8) and drops sections in priority order until the line fits the terminal
+6. **`render(data, theme_name)`** orchestrates steps 2–5 and joins surviving sections with themed separators into 1-2 lines
+7. Output is printed to stdout
 
 ### Section Rendering
 
@@ -73,11 +74,17 @@ Cache files are:
 
 ### Responsive Layout
 
-Sections are dropped progressively based on terminal width:
+Two-stage adaptation prevents Line 2 truncation under Claude Code's `wrap:"truncate"` Ink behavior (anthropics/claude-code#28750) while still showing as much detail as the terminal can hold.
 
-- **120+ cols**: Full layout (all sections)
-- **80-119 cols**: Compact (drops git_extras, version, cc_version, clock, worktree, sessions, tools, latency, context_size, session_name, rate_limits, output_style, added_dirs, effort, git_worktree)
-- **<80 cols**: Narrow (additionally drops cache, burn, lines, budget, agent, model)
+**Stage 1 — coarse pre-filter** (`_apply_responsive`) picks an eligible section list by terminal-width bucket. Sections in `_COMPACT_DROP` are skipped before rendering on terminals where they won't fit, avoiding the cost of git subprocess calls and file scans on narrow terminals:
+
+- **150+ cols**: Full layout (all sections eligible)
+- **100-149 cols**: Compact (drops git_extras, version, cc_version, clock, worktree, sessions, tools, latency, context_size, session_name, rate_limits, output_style, added_dirs, effort, git_worktree, speed, git_state, commit_age)
+- **<100 cols**: Narrow (additionally drops cache, burn, lines, budget, agent, model)
+
+**Stage 2 — precise width-aware fit** (`_fit_to_width`) measures the actual rendered width of each line (stripping invisible ANSI SGR + OSC 8 escapes) and drops sections in `_FIT_DROP_PRIORITY` order — one at a time — until the line fits the terminal. `_FIT_DROP_PRIORITY` extends `_COMPACT_DROP` with last-resort drops (vim, agent, lines, duration, burn, model, cache, budget) so the precise stage can always reach a fitting result, even in the compact band with heavy data.
+
+Truly essential sections (bar, tokens, cost, branch, ctx_warning) are deliberately omitted from `_FIT_DROP_PRIORITY` and never dropped — losing those would defeat the statusline's purpose.
 
 ## Themes
 
