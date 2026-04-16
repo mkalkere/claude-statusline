@@ -2609,6 +2609,193 @@ class TestFocusTheme(unittest.TestCase):
                           "focus theme missing color: {}".format(key))
 
 
+# ─── cli.py — print-config (machine-readable install state) ─────────
+
+class TestPrintConfig(unittest.TestCase):
+    """`--print-config` is the agent-facing introspection flag.
+
+    Output contract: 7 key=value lines in a stable order. Exit code 0
+    when claude-status is the configured statusLine command, 1
+    otherwise. Lets coding agents detect installation state without
+    parsing settings.json themselves.
+    """
+
+    def _run_with_settings(self, settings_dict_or_none, corrupt=False):
+        """Helper: run cmd_print_config against a temp settings.json.
+
+        Returns (stdout_lines_dict, exit_code). settings_dict_or_none=None
+        means no file. corrupt=True writes garbage instead of JSON.
+        """
+        import claude_statusline.cli as cli_mod
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            if corrupt:
+                with open(settings_file, "w") as f:
+                    f.write("{not valid json")
+            elif settings_dict_or_none is not None:
+                with open(settings_file, "w") as f:
+                    json.dump(settings_dict_or_none, f)
+            orig = cli_mod._settings_path
+            cli_mod._settings_path = lambda: settings_file
+            # Capture stdout + intercept SystemExit
+            from io import StringIO
+            old_stdout = sys.stdout
+            sys.stdout = StringIO()
+            exit_code = None
+            try:
+                try:
+                    cli_mod.cmd_print_config()
+                except SystemExit as e:
+                    exit_code = e.code
+                output = sys.stdout.getvalue()
+            finally:
+                sys.stdout = old_stdout
+                cli_mod._settings_path = orig
+            # Parse key=value lines
+            kv = {}
+            for line in output.strip().split("\n"):
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    kv[k] = v
+            return kv, exit_code
+
+    def test_emits_all_seven_keys_in_stable_order(self):
+        """Output contract: 7 keys, always in this order."""
+        import claude_statusline.cli as cli_mod
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                json.dump({"statusLine": {"type": "command",
+                                          "command": "claude-status"}}, f)
+            orig = cli_mod._settings_path
+            cli_mod._settings_path = lambda: settings_file
+            from io import StringIO
+            old_stdout = sys.stdout
+            sys.stdout = StringIO()
+            try:
+                try:
+                    cli_mod.cmd_print_config()
+                except SystemExit:
+                    pass
+                output = sys.stdout.getvalue()
+            finally:
+                sys.stdout = old_stdout
+                cli_mod._settings_path = orig
+        keys_in_order = [line.split("=", 1)[0]
+                         for line in output.strip().split("\n")]
+        self.assertEqual(
+            keys_in_order,
+            ["installed", "command", "type", "refreshInterval",
+             "theme", "version", "settings_path"],
+            "key order or set changed — agents parsing this output will break"
+        )
+
+    def test_no_settings_file(self):
+        """No settings file → installed=false, exit 1, all values empty."""
+        kv, code = self._run_with_settings(None)
+        self.assertEqual(kv["installed"], "false")
+        self.assertEqual(kv["command"], "")
+        self.assertEqual(kv["type"], "")
+        self.assertEqual(kv["refreshInterval"], "")
+        self.assertEqual(kv["theme"], "")
+        self.assertEqual(code, 1)
+
+    def test_settings_without_statusline(self):
+        """Settings exists but no statusLine → installed=false, exit 1."""
+        kv, code = self._run_with_settings({"otherKey": "value"})
+        self.assertEqual(kv["installed"], "false")
+        self.assertEqual(code, 1)
+
+    def test_statusline_pointing_at_other_tool(self):
+        """statusLine pointing at non-claude-status tool → installed=false."""
+        kv, code = self._run_with_settings({
+            "statusLine": {"type": "command", "command": "starship prompt"}
+        })
+        self.assertEqual(kv["installed"], "false")
+        # Command field still reports what's there for diagnosis.
+        self.assertEqual(kv["command"], "starship prompt")
+        self.assertEqual(code, 1)
+
+    def test_default_install(self):
+        """statusLine command 'claude-status' → installed=true, theme=default, exit 0."""
+        kv, code = self._run_with_settings({
+            "statusLine": {"type": "command", "command": "claude-status"}
+        })
+        self.assertEqual(kv["installed"], "true")
+        self.assertEqual(kv["command"], "claude-status")
+        self.assertEqual(kv["type"], "command")
+        self.assertEqual(kv["theme"], "default")
+        self.assertEqual(code, 0)
+
+    def test_install_with_theme(self):
+        """--theme NAME in command is parsed back out into the theme key."""
+        kv, code = self._run_with_settings({
+            "statusLine": {"type": "command",
+                           "command": "claude-status --theme nord"}
+        })
+        self.assertEqual(kv["installed"], "true")
+        self.assertEqual(kv["theme"], "nord")
+        self.assertEqual(code, 0)
+
+    def test_install_with_refresh_interval(self):
+        """refreshInterval is preserved (numeric → string of int)."""
+        kv, code = self._run_with_settings({
+            "statusLine": {"type": "command",
+                           "command": "claude-status",
+                           "refreshInterval": 10}
+        })
+        self.assertEqual(kv["installed"], "true")
+        self.assertEqual(kv["refreshInterval"], "10")
+
+    def test_corrupt_settings_does_not_crash(self):
+        """Corrupt settings.json → installed=false, exit 1, no traceback."""
+        kv, code = self._run_with_settings(None, corrupt=True)
+        self.assertEqual(kv["installed"], "false")
+        self.assertEqual(code, 1)
+
+    def test_version_field_matches_module(self):
+        """version field is always the running module __version__."""
+        from claude_statusline import __version__
+        kv, _ = self._run_with_settings(None)
+        self.assertEqual(kv["version"], __version__)
+
+    def test_path_to_full_claude_status_binary(self):
+        """When settings.json points to an absolute path ending in
+        claude-status (e.g. /usr/local/bin/claude-status), still
+        installed=true.
+        """
+        kv, code = self._run_with_settings({
+            "statusLine": {"type": "command",
+                           "command": "/usr/local/bin/claude-status --theme focus"}
+        })
+        self.assertEqual(kv["installed"], "true")
+        self.assertEqual(kv["theme"], "focus")
+        self.assertEqual(code, 0)
+
+    def test_subprocess_invocation_returns_correct_exit_code(self):
+        """End-to-end: invoke `python -m claude_statusline --print-config`
+        as a subprocess. Exit code must propagate so shell scripts can
+        rely on it (`if claude-status --print-config >/dev/null; then …`).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = tmpdir
+            os.makedirs(os.path.join(home, ".claude"))
+            with open(os.path.join(home, ".claude", "settings.json"), "w") as f:
+                json.dump({"statusLine": {"type": "command",
+                                          "command": "claude-status"}}, f)
+            env = os.environ.copy()
+            env["HOME"] = home
+            env["USERPROFILE"] = home  # Windows uses USERPROFILE for home
+            r = subprocess.run(
+                [sys.executable, "-m", "claude_statusline", "--print-config"],
+                env=env, capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(r.returncode, 0,
+                "expected exit 0 for installed state; got {}\nSTDOUT: {}\nSTDERR: {}".format(
+                    r.returncode, r.stdout, r.stderr))
+            self.assertIn("installed=true", r.stdout)
+
+
 # ─── cli.py — setup wizard ──────────────────────────────────────────
 
 class TestSetupWizardUpdated(unittest.TestCase):

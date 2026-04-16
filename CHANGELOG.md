@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-04-16
+
+### Added
+- **`--print-config` flag** — emits current install state in a deterministic key=value form for coding agents and shell scripts. Output contract: 7 keys (`installed`, `command`, `type`, `refreshInterval`, `theme`, `version`, `settings_path`) in stable order. Exit code 0 when claude-status is the configured statusLine command, 1 otherwise. Lets agents/scripts test installation state with `claude-status --print-config >/dev/null` without parsing settings.json themselves.
+- **`AGENTS.md`** — one-page install guide for coding agents (Claude Code, Cursor, Aider, Continue, Cline, etc.) with the non-interactive one-liner, verification, update, uninstall, theme installs, budget configuration, and common recipes.
+- **README "For Coding Agents" section** — copy-paste-ready install block visible above the fold for both human readers and crawlers.
+- 11 new tests for `--print-config` covering: stable key order, no settings file, settings without statusLine, statusLine pointing at another tool, default install, install with theme, install with refreshInterval, corrupt settings, version field accuracy, absolute path handling, and end-to-end subprocess exit code.
+
+### Changed
+- **`llms.txt` refreshed** — corrected v0.5.4 details (test count, two-stage layout description, threshold constants 150/100), added new flags, added link to AGENTS.md.
+- **PyPI keywords broadened** — added `claude-code-plugin`, `coding-agent`, `agent-tooling`, `ai-coding`, `llm-tooling`, `ai-developer-tools` so PyPI search surfaces the project for terms agents and users actually search for.
+- **GitHub repo topics** — added `coding-agent` and `agent-tooling` to the repo (now at the 20-topic GitHub limit).
+
+### Notes
+- The discoverability changes target two audiences: (1) LLM crawlers / answer engines (Perplexity, Phind, ChatGPT/Claude search, Gemini) via `llms.txt` and prominent README placement; (2) coding agents acting on a user's behalf via `AGENTS.md` and `--print-config` for machine-readable state.
+- No behavior changes to the rendered status line itself — this release is purely additive (new flag, new docs, new metadata).
+- Closes #74.
+
 ## [0.5.4] - 2026-04-16
 
 ### Added

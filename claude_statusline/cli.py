@@ -864,6 +864,63 @@ def cmd_demo():
             pass
 
 
+def cmd_print_config():
+    """Print current install state in a deterministic key=value form.
+
+    Designed for coding agents and shell scripts. Output is stable
+    across versions — fields are always emitted in the same order,
+    and absent values are emitted as empty strings rather than being
+    omitted, so a parser can rely on each line being present.
+
+    Exit code: 0 if installed (statusLine.command starts with
+    "claude-status"), 1 otherwise. Lets scripts test installation
+    state with `claude-status --print-config >/dev/null` without
+    parsing output.
+    """
+    settings_file = _settings_path()
+    installed = False
+    cmd_str = ""
+    sl_type = ""
+    refresh = ""
+    theme = ""
+
+    if os.path.exists(settings_file):
+        try:
+            with open(settings_file, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+        except (json.JSONDecodeError, IOError, OSError):
+            settings = None
+        if isinstance(settings, dict):
+            sl = settings.get("statusLine")
+            if isinstance(sl, dict):
+                sl_type = str(sl.get("type", ""))
+                cmd_str = str(sl.get("command", ""))
+                ri = sl.get("refreshInterval")
+                if isinstance(ri, (int, float)) and not isinstance(ri, bool):
+                    refresh = str(int(ri))
+                # Only consider it "installed" when the command actually
+                # invokes claude-status (not some unrelated statusLine).
+                if cmd_str.split() and cmd_str.split()[0].endswith("claude-status"):
+                    installed = True
+                    # Parse --theme NAME from the stored command if present.
+                    parts = cmd_str.split()
+                    for i, tok in enumerate(parts):
+                        if tok == "--theme" and i + 1 < len(parts):
+                            theme = parts[i + 1]
+                            break
+                    if not theme:
+                        theme = "default"
+
+    print("installed={}".format("true" if installed else "false"))
+    print("command={}".format(cmd_str))
+    print("type={}".format(sl_type))
+    print("refreshInterval={}".format(refresh))
+    print("theme={}".format(theme))
+    print("version={}".format(__version__))
+    print("settings_path={}".format(settings_file))
+    sys.exit(0 if installed else 1)
+
+
 def cmd_install(theme_name="default"):
     """Install claude-status into Claude Code settings."""
     settings_file = _settings_path()
@@ -1232,6 +1289,9 @@ def main():
     parser.add_argument("--uninstall", action="store_true", help="Remove from Claude Code settings")
     parser.add_argument("--setup", action="store_true", help="Interactive setup wizard")
     parser.add_argument("--doctor", action="store_true", help="Run diagnostics")
+    parser.add_argument("--print-config", action="store_true",
+                        dest="print_config",
+                        help="Print install state in machine-readable form (for scripts/agents)")
     parser.add_argument("--theme", default="default",
                         choices=["default", "minimal", "powerline",
                                  "nord", "tokyo-night", "gruvbox", "rose-pine",
@@ -1260,6 +1320,10 @@ def main():
 
     if args.doctor:
         cmd_doctor()
+        return
+
+    if args.print_config:
+        cmd_print_config()
         return
 
     # Normal mode: read JSON from stdin, output statusline

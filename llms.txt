@@ -6,23 +6,41 @@
 
 ```
 pip install claude-status
-claude-status --setup
+claude-status --install
+```
+
+`--install` auto-configures `~/.claude/settings.json`. Restart Claude Code to see the status line.
+
+## Update
+
+```
+pip install -U claude-status
+```
+
+No re-install needed — Claude Code re-runs the installed binary on every render.
+
+## Uninstall
+
+```
+claude-status --uninstall   # restore previous settings.json
+pip uninstall claude-status
 ```
 
 ## What It Does
 
-Displays real-time session metrics in Claude Code's terminal status bar. Reads JSON from stdin (piped by Claude Code), formats 27+ data points across up to 2 lines, outputs ANSI-colored text to stdout. No daemon, no network calls, no background processes.
+Displays real-time session metrics in Claude Code's terminal status bar. Reads JSON from stdin (piped by Claude Code), formats 27+ data points across up to 2 lines, outputs ANSI-colored text to stdout. No daemon, no network calls, no background processes. Each render runs in single-digit milliseconds.
 
 ## CLI Commands
 
+- `claude-status --install` — non-interactive install (use in scripts/agents)
+- `claude-status --install --theme NAME` — install with specific theme
 - `claude-status --setup` — interactive setup wizard (theme + budget)
-- `claude-status --install` — auto-configure settings.json
-- `claude-status --install --theme THEME` — install with specific theme
 - `claude-status --uninstall` — remove from settings, restore previous config
-- `claude-status --demo` — preview all 8 themes
+- `claude-status --print-config` — show current installation state (machine-readable)
 - `claude-status --doctor` — run diagnostics
+- `claude-status --demo` — preview all 8 themes
 - `claude-status --version` — show version
-- `claude-status --theme THEME` — use theme for this render only
+- `claude-status --theme NAME` — use theme for this render only
 
 ## Themes
 
@@ -33,12 +51,13 @@ Custom themes: `~/.claude/claude-status-theme.json`
 ## Metrics Displayed
 
 Line 1: context bar, tokens (in/out), cache %, cost, budget, burn rate, rate limits (5h/7d with countdown), context size, context warning
-Line 2: duration, API latency, lines changed, git branch, git extras (stash/sync), tool calls, sessions today, session name, vim mode, agent, worktree, model, output style, added dirs, git worktree, effort level, version, CC version, clock
+
+Line 2: duration, API latency, tokens/sec, lines changed, git branch, git extras (stash/sync), git state (merge/rebase/conflict), commit age, tool calls, sessions today, session name, vim mode, agent, worktree, model, output style, added dirs, git worktree, effort level, version, CC version, clock
 
 ## Configuration Files
 
 - `~/.claude/settings.json` — statusLine config (type, command, refreshInterval)
-- `~/.claude/claude-status-budget.json` — daily_budget_usd, compaction_threshold_pct
+- `~/.claude/claude-status-budget.json` — daily_budget_usd, compaction_threshold_pct, clickable_links, disabled_sections
 - `~/.claude/claude-status-theme.json` — custom theme overrides
 
 ## StatusLine JSON Fields (from Claude Code stdin)
@@ -47,19 +66,24 @@ model.id, model.display_name, cwd, workspace.current_dir, workspace.project_dir,
 
 ## Architecture
 
-cli.py (entry point, normalization, rendering) → bar.py (progress bar) + colors.py (ANSI) + formatters.py (tokens, cost, duration) + git.py (branch, stash, sync with 5s cache) + sessions.py (session count, tool count, budget, effort with 10-30s cache) + themes.py (8 built-in + custom)
+cli.py (entry point, normalization, two-stage layout, rendering) → bar.py (progress bar) + colors.py (ANSI + NO_COLOR) + formatters.py (tokens, cost, duration, speed) + git.py (branch, stash, sync, state, commit age with 5s cache) + sessions.py (session count, tool count, budget, effort with 10-30s cache) + themes.py (8 built-in + custom)
 
 ## Key Design Decisions
 
-- Zero external dependencies (pure Python stdlib)
-- Never crash — degrade gracefully on any malformed input
-- File-based caching with TTLs (5s-60s) to avoid subprocess overhead
-- Responsive layout adapts to terminal width (120+/80-119/<80 cols)
-- All numeric fields use _first() helper (not `or`) to preserve zero values
+- Zero external dependencies (pure Python stdlib only — no pip packages)
+- Never crash — degrade gracefully on any malformed input (try/except defense-in-depth around `render()`)
+- File-based caching with TTLs (5s-60s) to avoid subprocess overhead on every render
+- **Two-stage responsive layout** (v0.5.4+): coarse pre-filter by terminal-width bucket (150+/100-149/<100 cols) skips expensive sections on narrow terminals; precise post-render fit then measures actual visible width (stripping ANSI/OSC 8) and drops sections in priority order until each line fits the terminal
+- All numeric fields use `_first()` helper (not `or`) to preserve zero values
+- OSC 8 clickable links disabled by default (Claude Code's Ink TUI miscounts them)
+
+## Workaround for Upstream Ink Truncation
+
+Claude Code's TUI uses Ink `<Text wrap="truncate">` on the statusline (anthropics/claude-code#28750, closed without fix). When Line 1 overflows the terminal width, Line 2 is silently dropped. The two-stage layout (above) measures our actual rendered width and shrinks until we fit — no config required.
 
 ## Testing
 
-stdlib unittest only. 210+ tests. CI: 3 OS x 7 Python versions (3.8-3.14).
+stdlib unittest only. 284 tests. CI: 21-job matrix (3 OS x 7 Python versions: 3.8-3.14).
 
 ```
 python -m unittest discover tests/
@@ -71,3 +95,5 @@ python -m unittest discover tests/
 - Repository: https://github.com/mkalkere/claude-statusline
 - Issues: https://github.com/mkalkere/claude-statusline/issues
 - Changelog: https://github.com/mkalkere/claude-statusline/blob/main/CHANGELOG.md
+- Architecture: https://github.com/mkalkere/claude-statusline/blob/main/ARCHITECTURE.md
+- Agent install guide: https://github.com/mkalkere/claude-statusline/blob/main/AGENTS.md
