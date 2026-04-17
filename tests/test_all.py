@@ -3039,6 +3039,80 @@ class TestPrintConfigEdgeCases(unittest.TestCase):
         # 8 lines on stdout still — contract preserved even on error.
         self.assertEqual(kv["installed"], "false")
 
+    # ── Gemini review fixes: versioned python, last-theme-wins, nulls
+
+    def test_versioned_python_binaries_detected(self):
+        """python3.11, python3.12.5, python3, py — all valid python
+        binary names in multi-version environments (pyenv, deadsnakes,
+        Homebrew). All must detect as installed when followed by
+        `-m claude_statusline`."""
+        for binary in ("python", "python3", "python3.11", "python3.12.5", "py"):
+            kv, code, _, _ = self._run_with_settings({
+                "statusLine": {"type": "command",
+                               "command": "{} -m claude_statusline".format(binary)}
+            })
+            self.assertEqual(kv["installed"], "true",
+                "binary '{}' should detect as a valid python launcher".format(binary))
+
+    def test_python_lookalike_binaries_rejected(self):
+        """The regex must reject names that share the python prefix
+        but are different programs entirely. Tightens against the
+        broader `startswith('python')` heuristic."""
+        for fake in ("pythonista", "python-fork", "python_legacy",
+                     "pythonw", "ipython"):
+            kv, code, _, _ = self._run_with_settings({
+                "statusLine": {"type": "command",
+                               "command": "{} -m claude_statusline".format(fake)}
+            })
+            self.assertEqual(kv["installed"], "false",
+                "lookalike '{}' must not match python detection".format(fake))
+
+    def test_theme_last_occurrence_wins(self):
+        """When --theme appears multiple times, the LAST one wins —
+        matches argparse semantics, which is what the running command
+        actually does. Reporting the first would lie to the agent
+        about the user's real configured theme."""
+        kv, _, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command",
+                           "command": "claude-status --theme nord --theme focus"}
+        })
+        self.assertEqual(kv["theme"], "focus",
+            "last --theme should win to match argparse precedence")
+
+    def test_theme_last_wins_across_arg_forms(self):
+        """Last-wins must work across both `--theme NAME` and
+        `--theme=NAME` forms mixed in the same command."""
+        kv, _, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command",
+                           "command": "claude-status --theme=nord --theme focus"}
+        })
+        self.assertEqual(kv["theme"], "focus")
+
+        kv, _, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command",
+                           "command": "claude-status --theme nord --theme=focus"}
+        })
+        self.assertEqual(kv["theme"], "focus")
+
+    def test_null_command_emits_empty_string_not_None(self):
+        """A literal `null` in settings.json must NOT be stringified
+        to 'None' — that would break parsers expecting empty string
+        for absent values per the documented contract."""
+        kv, code, _, _ = self._run_with_settings({
+            "statusLine": {"type": "command", "command": None}
+        })
+        self.assertEqual(kv["command"], "",
+            "null command should emit empty string, not 'None'")
+        # And of course not detected as installed.
+        self.assertEqual(kv["installed"], "false")
+
+    def test_null_type_emits_empty_string_not_None(self):
+        kv, _, _, _ = self._run_with_settings({
+            "statusLine": {"type": None, "command": "claude-status"}
+        })
+        self.assertEqual(kv["type"], "",
+            "null type should emit empty string, not 'None'")
+
     # ── version field tracks the running module ─────────────────────
 
     def test_version_field_is_module_version(self):

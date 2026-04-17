@@ -620,6 +620,12 @@ def _apply_responsive(sections_list, term_width):
 _ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 _OSC8_RE = re.compile(r"\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)")
 
+# Match Python binary names: python, python3, python3.11, python3.12.5,
+# but NOT pythonista, python-fork, python_legacy. Used by --print-config
+# install detection to recognize `python -m claude_statusline` invocations
+# across multi-version environments (pyenv, deadsnakes, Homebrew).
+_PYTHON_BIN_RE = re.compile(r"^python(\d+(\.\d+)*)?$")
+
 
 def _visible_width(s):
     """Visible character width of a string after stripping ANSI + OSC 8.
@@ -896,8 +902,12 @@ def _is_claude_status_invocation(parts):
         head = head[:-4]
     if head == "claude-status":
         return True
-    # python -m claude_statusline (or py -m / python3 -m)
-    if head in ("python", "python3", "py") and "-m" in parts:
+    # python -m claude_statusline. Accept any versioned binary
+    # (python, python3, python3.11, python3.12.5, py) — common in
+    # multi-version setups (pyenv, deadsnakes, Homebrew). The regex
+    # is tighter than startswith("python"), which would also accept
+    # unrelated names like "pythonista" or "python-fork".
+    if (head == "py" or _PYTHON_BIN_RE.match(head)) and "-m" in parts:
         try:
             mod = parts[parts.index("-m") + 1]
         except (IndexError, ValueError):
@@ -914,16 +924,28 @@ def _extract_theme(parts):
 
     Accepts both space form (`--theme nord`) and equals form
     (`--theme=nord`) — argparse upstream accepts both, so we must too.
+
+    When --theme appears multiple times (e.g. `claude-status --theme
+    nord --theme focus`), the LAST occurrence wins to match argparse's
+    semantics — that's what the user's running command actually does,
+    so reporting it accurately is what an introspecting agent needs.
+
     Returns "default" if no --theme was specified, "" if parts is empty.
     """
     if not parts:
         return ""
-    for i, tok in enumerate(parts):
+    theme = "default"
+    i = 0
+    while i < len(parts):
+        tok = parts[i]
         if tok == "--theme" and i + 1 < len(parts):
-            return parts[i + 1]
+            theme = parts[i + 1]
+            i += 2
+            continue
         if tok.startswith("--theme="):
-            return tok.split("=", 1)[1]
-    return "default"
+            theme = tok.split("=", 1)[1]
+        i += 1
+    return theme
 
 
 def cmd_print_config():
@@ -982,11 +1004,16 @@ def cmd_print_config():
         if isinstance(settings, dict):
             sl = settings.get("statusLine")
             if isinstance(sl, dict):
-                sl_type = sl.get("type", "")
-                if not isinstance(sl_type, str):
-                    sl_type = str(sl_type)
-                cmd_value = sl.get("command", "")
-                cmd_str = cmd_value if isinstance(cmd_value, str) else str(cmd_value)
+                # Explicit null check before str() — settings.json may
+                # contain `"type": null` from a tool that cleared the
+                # field. str(None) would emit the literal "None",
+                # breaking the documented "empty string when absent"
+                # contract.
+                sl_type_raw = sl.get("type")
+                sl_type = str(sl_type_raw) if sl_type_raw is not None else ""
+                cmd_raw = sl.get("command")
+                cmd_str = (cmd_raw if isinstance(cmd_raw, str)
+                           else (str(cmd_raw) if cmd_raw is not None else ""))
                 # refreshInterval: accept int/float (reject bool subclass)
                 # AND numeric strings, since hand-edited settings.json
                 # often stringify numbers. _safe_num handles both.
