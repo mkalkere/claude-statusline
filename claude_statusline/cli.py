@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -619,6 +620,12 @@ def _apply_responsive(sections_list, term_width):
 _ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 _OSC8_RE = re.compile(r"\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)")
 
+# Match Python binary names: python, python3, python3.11, python3.12.5,
+# but NOT pythonista, python-fork, python_legacy. Used by --print-config
+# install detection to recognize `python -m claude_statusline` invocations
+# across multi-version environments (pyenv, deadsnakes, Homebrew).
+_PYTHON_BIN_RE = re.compile(r"^python(\d+(\.\d+)*)?$")
+
 
 def _visible_width(s):
     """Visible character width of a string after stripping ANSI + OSC 8.
@@ -862,6 +869,187 @@ def cmd_demo():
             _self.get_today_session_count = _orig_session_count
         except Exception:
             pass
+
+
+def _sanitize_field(value):
+    """Strip newlines and carriage returns so emitted fields stay on one line.
+
+    The --print-config output contract promises a stable 8-line shape;
+    a stray newline in (e.g.) command would inject a fake key=value
+    line and break parsers downstream.
+    """
+    return str(value).replace("\r", " ").replace("\n", " ")
+
+
+def _is_claude_status_invocation(parts):
+    """Detect whether a tokenized command actually launches claude-status.
+
+    Handles all the install patterns that produce a working status line:
+    - Direct binary: `claude-status`, `claude-status.exe`,
+      `/usr/local/bin/claude-status`, `C:\\path\\claude-status.exe`
+    - Module form: `python -m claude_statusline`, `py -m claude_statusline`
+    - Runner forms: `uvx claude-status`, `pipx run claude-status`
+
+    Strict basename-equality is used (not endswith) so lookalike
+    binaries like `not-claude-status` or `my-claude-status-fork` do
+    not falsely match.
+    """
+    if not parts:
+        return False
+    head = os.path.basename(parts[0]).lower()
+    # strip .exe suffix on Windows-style invocations
+    if head.endswith(".exe"):
+        head = head[:-4]
+    if head == "claude-status":
+        return True
+    # python -m claude_statusline. Accept any versioned binary
+    # (python, python3, python3.11, python3.12.5, py) — common in
+    # multi-version setups (pyenv, deadsnakes, Homebrew). The regex
+    # is tighter than startswith("python"), which would also accept
+    # unrelated names like "pythonista" or "python-fork".
+    if (head == "py" or _PYTHON_BIN_RE.match(head)) and "-m" in parts:
+        try:
+            mod = parts[parts.index("-m") + 1]
+        except (IndexError, ValueError):
+            return False
+        return mod in ("claude_statusline", "claude_statusline.cli")
+    # uvx claude-status / pipx run claude-status
+    if head in ("uvx", "pipx") and "claude-status" in parts:
+        return True
+    return False
+
+
+def _extract_theme(parts):
+    """Pull the --theme value out of a tokenized command.
+
+    Accepts both space form (`--theme nord`) and equals form
+    (`--theme=nord`) — argparse upstream accepts both, so we must too.
+
+    When --theme appears multiple times (e.g. `claude-status --theme
+    nord --theme focus`), the LAST occurrence wins to match argparse's
+    semantics — that's what the user's running command actually does,
+    so reporting it accurately is what an introspecting agent needs.
+
+    Returns "default" if no --theme was specified, "" if parts is empty.
+    """
+    if not parts:
+        return ""
+    theme = "default"
+    i = 0
+    while i < len(parts):
+        tok = parts[i]
+        if tok == "--theme" and i + 1 < len(parts):
+            theme = parts[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--theme="):
+            theme = tok.split("=", 1)[1]
+        i += 1
+    return theme
+
+
+def cmd_print_config():
+    """Print current install state in a deterministic key=value form.
+
+    Designed for coding agents and shell scripts. Output is a stable
+    8-line block — fields are always emitted in the same order, every
+    field always appears, and values containing newlines are
+    sanitized so the line count stays fixed.
+
+    Output keys (in order):
+      installed         true | false
+      command           verbatim statusLine.command (newlines stripped)
+      type              verbatim statusLine.type
+      refreshInterval   integer or empty
+      theme             theme name, "default", or empty
+      version           running module version
+      settings_path     absolute path to the settings.json we inspected
+      settings_state    ok | missing | unreadable
+
+    Exit codes:
+      0  installed (statusLine.command launches claude-status)
+      1  not installed (settings missing OR statusLine missing OR
+         statusLine points at a different tool)
+      2  settings.json exists but is corrupt or unreadable —
+         caller MUST NOT auto-install (would overwrite recoverable
+         user config)
+
+    Agents: use `if claude-status --print-config >/dev/null; then …`
+    for a clean installed-check. Always treat exit code 2 as a hard
+    stop and surface to the user — never auto-install over it.
+    """
+    settings_file = _settings_path()
+    installed = False
+    cmd_str = ""
+    sl_type = ""
+    refresh = ""
+    theme = ""
+    settings_state = "missing"
+
+    if os.path.exists(settings_file):
+        try:
+            with open(settings_file, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            settings_state = "ok"
+        except json.JSONDecodeError as exc:
+            print("claude-status: settings.json corrupt: line {} col {}: {}".format(
+                exc.lineno, exc.colno, exc.msg), file=sys.stderr)
+            settings = None
+            settings_state = "unreadable"
+        except (IOError, OSError, UnicodeDecodeError) as exc:
+            print("claude-status: settings.json unreadable: {}: {}".format(
+                type(exc).__name__, exc), file=sys.stderr)
+            settings = None
+            settings_state = "unreadable"
+        if isinstance(settings, dict):
+            sl = settings.get("statusLine")
+            if isinstance(sl, dict):
+                # Explicit null check before str() — settings.json may
+                # contain `"type": null` from a tool that cleared the
+                # field. str(None) would emit the literal "None",
+                # breaking the documented "empty string when absent"
+                # contract.
+                sl_type_raw = sl.get("type")
+                sl_type = str(sl_type_raw) if sl_type_raw is not None else ""
+                cmd_raw = sl.get("command")
+                cmd_str = (cmd_raw if isinstance(cmd_raw, str)
+                           else (str(cmd_raw) if cmd_raw is not None else ""))
+                # refreshInterval: accept int/float (reject bool subclass)
+                # AND numeric strings, since hand-edited settings.json
+                # often stringify numbers. _safe_num handles both.
+                ri = sl.get("refreshInterval")
+                if isinstance(ri, bool):
+                    pass  # bool is an int subclass — drop explicitly
+                else:
+                    n = _safe_num(ri)
+                    if n is not None and n >= 0:
+                        refresh = str(int(n))
+                # Tokenize the command. shlex handles quoted paths
+                # like "C:\Program Files\Scripts\claude-status.exe"
+                # that plain str.split would mangle. posix=True is
+                # used unconditionally — settings.json values use
+                # shell-style quoting regardless of host OS, and
+                # posix=False on Windows leaves the quotes attached
+                # to the token, breaking basename comparison.
+                try:
+                    parts = shlex.split(cmd_str, posix=True)
+                except ValueError:
+                    parts = cmd_str.split()
+                if _is_claude_status_invocation(parts):
+                    installed = True
+                    theme = _extract_theme(parts)
+
+    print("installed={}".format("true" if installed else "false"))
+    print("command={}".format(_sanitize_field(cmd_str)))
+    print("type={}".format(_sanitize_field(sl_type)))
+    print("refreshInterval={}".format(refresh))
+    print("theme={}".format(_sanitize_field(theme)))
+    print("version={}".format(__version__))
+    print("settings_path={}".format(_sanitize_field(settings_file)))
+    print("settings_state={}".format(settings_state))
+    if settings_state == "unreadable":
+        sys.exit(2)
+    sys.exit(0 if installed else 1)
 
 
 def cmd_install(theme_name="default"):
@@ -1232,6 +1420,9 @@ def main():
     parser.add_argument("--uninstall", action="store_true", help="Remove from Claude Code settings")
     parser.add_argument("--setup", action="store_true", help="Interactive setup wizard")
     parser.add_argument("--doctor", action="store_true", help="Run diagnostics")
+    parser.add_argument("--print-config", action="store_true",
+                        dest="print_config",
+                        help="Print install state in machine-readable form (for scripts/agents)")
     parser.add_argument("--theme", default="default",
                         choices=["default", "minimal", "powerline",
                                  "nord", "tokyo-night", "gruvbox", "rose-pine",
@@ -1260,6 +1451,10 @@ def main():
 
     if args.doctor:
         cmd_doctor()
+        return
+
+    if args.print_config:
+        cmd_print_config()
         return
 
     # Normal mode: read JSON from stdin, output statusline

@@ -147,14 +147,27 @@ Walks you through theme selection with a compact preview, optional budget config
 > **Command not found?** Ensure your Python scripts directory is in `PATH`.
 > Fallback: `python -m claude_statusline --setup`
 
+## For Coding Agents (Claude Code, Cursor, Aider, Continue, …)
+
+If you're a coding agent installing this on a user's behalf, use the non-interactive one-liner:
+
+```bash
+pip install -U claude-status && claude-status --install && claude-status --print-config
+```
+
+That installs the package, writes the `statusLine` entry to `~/.claude/settings.json` (backing up any prior config), and prints the current install state in a deterministic key=value format you can parse to confirm success. The user must restart Claude Code for the new status line to appear.
+
+For full agent recipes (themes, budget, verification, uninstall, troubleshooting), see [AGENTS.md](AGENTS.md).
+
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
 | `claude-status --setup` | Interactive setup wizard (recommended for first use) |
-| `claude-status --install` | Auto-configure Claude Code settings |
+| `claude-status --install` | Auto-configure Claude Code settings (non-interactive) |
 | `claude-status --install --theme nord` | Install with a specific theme |
 | `claude-status --uninstall` | Remove from Claude Code settings (restores previous config) |
+| `claude-status --print-config` | Show current install state in machine-readable form (for scripts/agents) |
 | `claude-status --demo` | Preview all 8 themes with sample data |
 | `claude-status --doctor` | Diagnostics: Python version, OS, terminal, current settings |
 | `claude-status --version` | Show version |

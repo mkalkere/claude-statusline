@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-status"
-version = "0.5.4"
+version = "0.5.5"
 description = "Beautiful, informative status line for Claude Code — zero dependencies, cross-platform"
 readme = "README.md"
 license = {text = "MIT"}
@@ -18,6 +18,8 @@ keywords = [
     "prompt", "productivity", "ai-tools", "llm", "coding-assistant",
     "token-usage", "context-window", "budget-monitor", "burn-rate",
     "rate-limit", "session-monitor",
+    "claude-code-plugin", "coding-agent", "agent-tooling",
+    "ai-coding", "llm-tooling", "ai-developer-tools",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

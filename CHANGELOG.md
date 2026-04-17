@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-04-16
+
+### Added
+- **`--print-config` flag** — emits current install state in a deterministic key=value form for coding agents and shell scripts. Output contract: 8 keys (`installed`, `command`, `type`, `refreshInterval`, `theme`, `version`, `settings_path`, `settings_state`) in stable order, every line always present. Three exit codes: `0` installed, `1` not installed, `2` settings.json corrupt or unreadable (agents must NOT auto-install on `2` — would overwrite recoverable user config). Newlines in command/path values are sanitized so the line count stays fixed.
+- Install detection covers the full set of working install patterns: direct binary (`claude-status`, `claude-status.exe`, full Windows paths with spaces), module form (`python -m claude_statusline`, `py -m claude_statusline`), runner forms (`uvx claude-status`, `pipx run claude-status`). Strict basename equality rejects substring lookalikes (`not-claude-status`, `my-claude-status-fork`).
+- Theme parsing handles both argparse forms (`--theme nord` and `--theme=nord`).
+- `refreshInterval` accepts numeric strings (common in hand-edited settings.json) via `_safe_num`. Booleans and negative values are explicitly rejected.
+- **`AGENTS.md`** — one-page install guide for coding agents (Claude Code, Cursor, Aider, Continue, Cline, etc.) with the non-interactive one-liner, verification, update, uninstall, theme installs, budget configuration, and common recipes.
+- **README "For Coding Agents" section** — copy-paste-ready install block visible above the fold for both human readers and crawlers.
+- 37 new tests for `--print-config` covering: stable key order, missing/corrupt/unreadable settings, non-dict statusLine (string/list/None/array), Windows `.exe`, full paths with spaces, `python -m`/`uvx`/`pipx` forms (including versioned binaries `python3.11`, `python3.12.5`), lookalike rejection (both `not-claude-status` style and `pythonista`/`ipython` style), both `--theme` arg forms, last-`--theme`-wins precedence (matches argparse), refreshInterval coercion (numeric string, bool, negative, garbage), null command/type fields → empty string, newline injection sanitization, settings_state contract, and end-to-end subprocess exit code propagation.
+
+### Changed
+- **`llms.txt` refreshed** — corrected v0.5.4 details (test count, two-stage layout description, threshold constants 150/100), added new flags, added link to AGENTS.md.
+- **PyPI keywords broadened** — added `claude-code-plugin`, `coding-agent`, `agent-tooling`, `ai-coding`, `llm-tooling`, `ai-developer-tools` so PyPI search surfaces the project for terms agents and users actually search for.
+- **GitHub repo topics** — added `coding-agent` and `agent-tooling` to the repo (now at the 20-topic GitHub limit).
+
+### Notes
+- The discoverability changes target two audiences: (1) LLM crawlers / answer engines (Perplexity, Phind, ChatGPT/Claude search, Gemini) via `llms.txt` and prominent README placement; (2) coding agents acting on a user's behalf via `AGENTS.md` and `--print-config` for machine-readable state.
+- No behavior changes to the rendered status line itself — this release is purely additive (new flag, new docs, new metadata).
+- Closes #74.
+
 ## [0.5.4] - 2026-04-16
 
 ### Added
