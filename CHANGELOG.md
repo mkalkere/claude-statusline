@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-04-24
+
+### Added
+- **`xhigh` and `max` effort level support** — Claude Code v2.1.111 (released 2026-04-16) introduced the `xhigh` effort level for Opus 4.7, sitting between `high` and `max`. `max` is the top-tier value visible in Anthropic's Auto Mode references and `/effort max` UI. Previously claude-status rejected both as unknown levels and silently hid the `effort:` indicator for users running Opus 4.7 with xhigh or max thinking. Now `get_effort_level()` accepts both, the renderer wires dedicated `effort_xhigh` and `effort_max` color branches, and all 8 built-in themes ship the new color keys (default to `BRIGHT_MAGENTA` to match `effort_high`). Closes #77.
+- Custom themes pinned at older versions still work — the renderer uses `_first()` to walk a fallback chain (`effort_max` → `effort_xhigh` → `effort_high` → hardcoded magenta), and explicit `None` values in custom themes (common when YAML/JSON tools serialize "no value" as `null`) no longer crash `colorize()`.
+- 11 new tests covering: xhigh + max accepted by `get_effort_level()` (both disk-read and cache-hit paths), case-insensitivity, both rendered with the literal `effort:xhigh`/`effort:max` text, dedicated color keys actually used, fallback chain when keys are missing, explicit `None` in a theme key falls through safely, and all 8 built-in themes ship both new keys.
+
+### Changed
+- Demo data (`--demo`) now uses `Opus 4.7 (1M context)` instead of `Opus 4.6` to reflect Anthropic's current top model.
+
+### Notes
+- Other models (Sonnet, Haiku, older Opus releases) fall back to `high` per Anthropic's docs — no behavior change for users on those models. Users on Opus 4.7 with xhigh or max configured will simply start seeing the indicator after upgrading.
+- Claude Code v2.1.119 (released 2026-04-23) shipped `effort.level` and `thinking.enabled` in the statusline JSON stdin payload. claude-status currently reads effort from `~/.claude/settings.json`; consuming the new JSON fields is tracked as a follow-up so we don't double-source.
+
 ## [0.5.5] - 2026-04-16
 
 ### Added

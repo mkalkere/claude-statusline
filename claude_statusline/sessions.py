@@ -290,18 +290,25 @@ def get_compaction_threshold():
     return float(val) if val is not None else None
 
 
-_VALID_EFFORT_LEVELS = {"low", "medium", "high"}
+_VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
 
 
 def get_effort_level():
     """Read thinking effort level from ~/.claude/settings.json.
 
-    Valid values: "low", "medium", "high". Returns None if not
-    configured, invalid, or set to the default "medium".
+    Valid values: "low", "medium", "high", "xhigh", "max". Returns
+    None if not configured, invalid, or set to the default "medium".
     Uses 30s cache to avoid hitting disk on every render.
 
+    `xhigh` was introduced in Claude Code v2.1.111 (2026-04) for
+    Opus 4.7, sitting between `high` and `max`. `max` is the top
+    tier (visible in `/effort max` and Auto Mode references). Other
+    models fall back to `high` per Anthropic's docs, so this set is
+    the union of valid levels across all models.
+
     Returns:
-        Effort level string ("low" or "high"), or None if medium/absent.
+        Effort level string ("low", "high", "xhigh", or "max"), or
+        None if medium/absent.
     """
     cached = _read_cache("effort_level")
     if cached is not None:

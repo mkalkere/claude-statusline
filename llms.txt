@@ -52,7 +52,11 @@ Custom themes: `~/.claude/claude-status-theme.json`
 
 Line 1: context bar, tokens (in/out), cache %, cost, budget, burn rate, rate limits (5h/7d with countdown), context size, context warning
 
-Line 2: duration, API latency, tokens/sec, lines changed, git branch, git extras (stash/sync), git state (merge/rebase/conflict), commit age, tool calls, sessions today, session name, vim mode, agent, worktree, model, output style, added dirs, git worktree, effort level, version, CC version, clock
+Line 2: duration, API latency, tokens/sec, lines changed, git branch, git extras (stash/sync), git state (merge/rebase/conflict), commit age, tool calls, sessions today, session name, vim mode, agent, worktree, model, output style, added dirs, git worktree, effort level (low/high/xhigh/max), version, CC version, clock
+
+## Effort Levels
+
+Recognized values from `~/.claude/settings.json`'s `effortLevel` key: `low`, `medium`, `high`, `xhigh`, `max`. The `medium` default is hidden (no `effort:` indicator). `xhigh` and `max` are Opus 4.7 / top-tier — `xhigh` was introduced in Claude Code v2.1.111 (2026-04); `max` is the top of the scale. Other models silently fall back to `high` per Anthropic's docs. Renders as `effort:xhigh` / `effort:max` (bright magenta by default; per-theme `effort_xhigh` and `effort_max` color keys).
 
 ## Configuration Files
 

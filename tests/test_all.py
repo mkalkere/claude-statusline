@@ -302,6 +302,23 @@ class TestThemes(unittest.TestCase):
                 self.assertIn(key, theme["colors"],
                               "{} theme missing color: {}".format(name, key))
 
+    def test_all_themes_have_effort_xhigh(self):
+        """All built-in themes must include the effort_xhigh color key
+        added in v0.5.6 for Opus 4.7 support. Custom user themes can
+        omit it (the renderer falls back to effort_high), but built-ins
+        should all opt in so themes look consistent out of the box."""
+        for name, theme in THEMES.items():
+            self.assertIn("effort_xhigh", theme["colors"],
+                "{} theme missing effort_xhigh color key".format(name))
+
+    def test_all_themes_have_effort_max(self):
+        """Same contract as effort_xhigh: built-in themes ship the key
+        for the top-tier effort level so users on Opus 4.7 max see a
+        themed indicator out of the box."""
+        for name, theme in THEMES.items():
+            self.assertIn("effort_max", theme["colors"],
+                "{} theme missing effort_max color key".format(name))
+
 
 # ─── cli.py ───────────────────────────────────────────────────────────
 
@@ -2206,6 +2223,106 @@ class TestEffortLevel(unittest.TestCase):
             finally:
                 sessions_mod._CLAUDE_DIR = orig
 
+    def test_effort_xhigh(self):
+        """Opus 4.7 (Claude Code v2.1.111+) introduced `xhigh` between
+        `high` and `max`. Must be accepted by get_effort_level()."""
+        from claude_statusline.sessions import get_effort_level, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                json.dump({"effortLevel": "xhigh"}, f)
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("effort_level"))
+            except OSError:
+                pass
+            try:
+                result = get_effort_level()
+                self.assertEqual(result, "xhigh")
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+    def test_effort_max(self):
+        """`max` is the top-tier effort level (above xhigh) — visible
+        in Anthropic's Auto Mode references and `/effort max` toast.
+        Without this, Pro/Max users on max would silently lose the
+        effort indicator."""
+        from claude_statusline.sessions import get_effort_level, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                json.dump({"effortLevel": "max"}, f)
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("effort_level"))
+            except OSError:
+                pass
+            try:
+                result = get_effort_level()
+                self.assertEqual(result, "max")
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+    def test_effort_xhigh_case_insensitive(self):
+        """Production code does `raw.lower()` — settings.json values
+        like "XHIGH" or "Xhigh" must still resolve to "xhigh". Pins
+        the contract so a future refactor can't silently drop the
+        case-folding."""
+        from claude_statusline.sessions import get_effort_level, _cache_path
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_file = os.path.join(tmpdir, "settings.json")
+            with open(settings_file, "w") as f:
+                json.dump({"effortLevel": "XHIGH"}, f)
+
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            try:
+                os.unlink(_cache_path("effort_level"))
+            except OSError:
+                pass
+            try:
+                result = get_effort_level()
+                self.assertEqual(result, "xhigh")
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
+    def test_effort_xhigh_cache_hit_path(self):
+        """The cache-hit path in get_effort_level() also goes through
+        the `_VALID_EFFORT_LEVELS` membership check. A future change
+        that updates the disk-read validator but forgets the cache-read
+        validator would silently break xhigh on warm caches. This test
+        pins the cache-hit path independently."""
+        from claude_statusline.sessions import (
+            get_effort_level, _cache_path, _write_cache,
+        )
+        import claude_statusline.sessions as sessions_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig = sessions_mod._CLAUDE_DIR
+            sessions_mod._CLAUDE_DIR = tmpdir
+            # Seed the cache directly so we exercise the cache-read
+            # path, not the disk-read path. Removing settings.json
+            # ensures get_effort_level can't fall through to disk and
+            # accidentally pass via the wrong code path.
+            try:
+                _write_cache("effort_level", {"effort": "xhigh"})
+                result = get_effort_level()
+                self.assertEqual(result, "xhigh",
+                    "cache-hit path must also recognize xhigh — "
+                    "_VALID_EFFORT_LEVELS check applies on both paths")
+            finally:
+                sessions_mod._CLAUDE_DIR = orig
+
     def test_effort_absent_returns_none(self):
         from claude_statusline.sessions import get_effort_level, _cache_path
         import claude_statusline.sessions as sessions_mod
@@ -2293,6 +2410,137 @@ class TestEffortSection(unittest.TestCase):
             self.assertIn("effort:low", result)
         finally:
             cli_mod.get_effort_level = orig
+
+    def test_effort_xhigh_rendered(self):
+        """xhigh (Opus 4.7) renders the same way as high but uses the
+        dedicated effort_xhigh color key. The literal `effort:xhigh`
+        text must appear in the rendered output."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: "xhigh"
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("effort:xhigh", result)
+        finally:
+            cli_mod.get_effort_level = orig
+
+    def test_effort_xhigh_uses_dedicated_color_key(self):
+        """A theme that overrides effort_xhigh to a distinct color must
+        have that color used for xhigh — proves the cli.py branch picks
+        the xhigh-specific key, not the high fallback.
+        """
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.colors import CYAN
+        from claude_statusline.themes import THEMES
+        # Save & override the default theme's effort_xhigh to a known
+        # distinct color (CYAN, not BRIGHT_MAGENTA which both high and
+        # default xhigh use).
+        orig_theme_color = THEMES["default"]["colors"]["effort_xhigh"]
+        THEMES["default"]["colors"]["effort_xhigh"] = CYAN
+        orig_get_effort = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: "xhigh"
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            # CYAN escape (\x1b[36m) must appear before "effort:xhigh"
+            self.assertIn("\x1b[36m", result,
+                "effort_xhigh color key was not used — xhigh branch may be "
+                "falling back to effort_high or effort_low instead")
+            self.assertIn("effort:xhigh", result)
+        finally:
+            cli_mod.get_effort_level = orig_get_effort
+            THEMES["default"]["colors"]["effort_xhigh"] = orig_theme_color
+
+    def test_effort_max_rendered(self):
+        """`max` must render with the literal `effort:max` text. Same
+        renderer path as xhigh, dedicated `effort_max` color key."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: "max"
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            self.assertIn("effort:max", result)
+        finally:
+            cli_mod.get_effort_level = orig
+
+    def test_effort_xhigh_color_key_explicit_None_does_not_crash(self):
+        """A custom theme that explicitly sets `effort_xhigh: None`
+        (common when YAML/JSON tools serialize "no value" as null)
+        must not crash colorize(). The renderer uses _first() so an
+        explicit None falls through to the next key in the chain
+        instead of being passed to colorize() and triggering a
+        TypeError on `"".join((None, ...))`."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_xhigh = THEMES["default"]["colors"]["effort_xhigh"]
+        orig_get_effort = cli_mod.get_effort_level
+        THEMES["default"]["colors"]["effort_xhigh"] = None
+        cli_mod.get_effort_level = lambda: "xhigh"
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            # Must not raise.
+            result = render(data)
+            self.assertIn("effort:xhigh", result,
+                "render() crashed or hid effort when effort_xhigh was None")
+        finally:
+            cli_mod.get_effort_level = orig_get_effort
+            THEMES["default"]["colors"]["effort_xhigh"] = orig_xhigh
+
+    def test_effort_xhigh_falls_back_to_high_color_when_key_missing(self):
+        """Custom themes pinned at older versions won't have
+        effort_xhigh defined. The renderer must fall back to
+        effort_high (not effort_low or hard-coded), since xhigh is
+        semantically "above high"."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.colors import CYAN, RED
+        from claude_statusline.themes import THEMES
+        # Remove effort_xhigh, set effort_high to a distinct color.
+        orig_xhigh = THEMES["default"]["colors"].pop("effort_xhigh")
+        orig_high = THEMES["default"]["colors"]["effort_high"]
+        THEMES["default"]["colors"]["effort_high"] = CYAN
+        orig_get_effort = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: "xhigh"
+        try:
+            data = {
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {"input_tokens": 5000}},
+                "cost": {"total_cost_usd": 0.50, "total_duration_ms": 60000},
+                "git_branch": "main",
+            }
+            result = render(data)
+            # Should fall back to effort_high (CYAN), NOT to BRIGHT_BLACK
+            # (which is effort_low) and NOT to RED (which is unrelated).
+            self.assertIn("\x1b[36m", result,
+                "xhigh should fall back to effort_high color when "
+                "effort_xhigh key is missing from the theme")
+            self.assertNotIn(RED, result,
+                "xhigh fallback picked an unrelated color")
+        finally:
+            cli_mod.get_effort_level = orig_get_effort
+            THEMES["default"]["colors"]["effort_xhigh"] = orig_xhigh
+            THEMES["default"]["colors"]["effort_high"] = orig_high
 
 
 class TestEffortLevelCorrupted(unittest.TestCase):

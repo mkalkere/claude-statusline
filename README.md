@@ -76,7 +76,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Model | `Opus` | Active model name |
 | Output Style | `style:explanatory` | Active output style when set |
 | Added Dirs | `dirs:+2` | Extra directories added via `/add-dir` |
-| Effort Level | `effort:high` | Thinking effort (shown when non-default) |
+| Effort Level | `effort:high` | Thinking effort: `low`, `high`, `xhigh`, or `max` (Opus 4.7). Shown when non-default. |
 | Version | `v0.5.0` | claude-status version |
 | CC Version | `CC:2.1.92` | Claude Code application version |
 | Clock | `15:30` | Current time |

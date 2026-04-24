@@ -497,10 +497,24 @@ def _render_sections_named(n, order, theme):
         elif section == "effort":
             effort = get_effort_level()
             if effort:
-                if effort == "high":
-                    ec = tc.get("effort_high", BRIGHT_MAGENTA)
+                # xhigh and max are Opus 4.7 / top-tier (Claude Code
+                # v2.1.111+). Fall back to effort_high when a custom
+                # theme hasn't defined the dedicated key — using
+                # _first() (not nested .get) so themes that explicitly
+                # set the key to None don't crash colorize().
+                if effort == "max":
+                    ec = _first(tc.get("effort_max"),
+                                tc.get("effort_xhigh"),
+                                tc.get("effort_high"),
+                                BRIGHT_MAGENTA)
+                elif effort == "xhigh":
+                    ec = _first(tc.get("effort_xhigh"),
+                                tc.get("effort_high"),
+                                BRIGHT_MAGENTA)
+                elif effort == "high":
+                    ec = _first(tc.get("effort_high"), BRIGHT_MAGENTA)
                 else:
-                    ec = tc.get("effort_low", BRIGHT_BLACK)
+                    ec = _first(tc.get("effort_low"), BRIGHT_BLACK)
                 sections.append(colorize(
                     "effort:" + effort, ec, BOLD
                 ))
@@ -802,7 +816,7 @@ def _demo_data():
             "git_worktree": False,
         },
         "model": {
-            "display_name": "Opus 4.6 (1M context)",
+            "display_name": "Opus 4.7 (1M context)",
         },
         "session_id": "demo-session",
         "session_name": "refactor auth",
