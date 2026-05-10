@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.8] - 2026-05-10
+
+### Changed
+- **Effort level now read from JSON stdin first** (Claude Code v2.1.119+ exposes `effort.level` in the statusline payload). When stdin contains a valid `effort.level`, that's the authoritative source — the effort indicator updates within one render cycle of `/effort xhigh` instead of waiting up to 30s for the `~/.claude/settings.json` cache to expire. The settings.json read remains as a fallback for older Claude Code versions, demo mode, and custom statuslines that don't supply the field.
+- When `_normalize` extracts a valid effort.level from stdin, it also mirrors the value to the on-disk effort_level cache. This keeps the two sources consistent across mid-session client switches: a render that later falls back to the settings.json-cache path (because stdin omits the field) reads the most recent authoritative value instead of a stale entry from before the user's last `/effort` change.
+
+### Added
+- 16 new tests in `TestEffortLevelFromStdin` covering: valid level extraction (low / high / xhigh / max all pass through; medium hidden by contract), case-insensitivity (`XHIGH` → `xhigh`), unknown-level rejection (`ultrathink` → fall through to settings.json), non-string `effort.level` (int / list / None / bool / nested dict — all rejected cleanly), non-dict `effort` field rejection, absent-effort fallback, end-to-end render preferring stdin over settings.json (verified via stub that records calls — settings.json read MUST NOT happen when stdin has a valid value), end-to-end render falling back to settings.json when stdin lacks the field, invalid-stdin fall-through to settings.json, both-medium case (stdin + settings both medium hide the section), stdin-medium-with-settings-non-medium fall-through (medium from stdin doesn't force-hide), no-stdin-with-settings-medium hide, each valid level rendering through the stdin path independently, cache mirror-write on valid stdin, and cache NOT-written on invalid stdin.
+
+### Notes
+- **Backward compatible** — users on older Claude Code (no `effort` field in stdin) see no behavior change. Users on v2.1.119+ get faster effort updates with no config required.
+- All 368 tests pass (was 352, +16 new). Pure stdlib, no dependency changes.
+- Internal review: 4 PR-review agents consulted before push. Silent-failure agent flagged a HIGH-severity cache-staleness risk on mid-session client switches (stdin path never refreshed the on-disk cache, so falling back to settings.json could read a stale value); fixed via the cache-mirror behavior described above. Comment-analyzer flagged that the renderer's `or` truthiness could be misread; switched to explicit `is not None` for intent clarity.
+- Closes #81.
+
 ## [0.5.7] - 2026-05-09
 
 ### Added

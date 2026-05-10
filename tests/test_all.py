@@ -4491,5 +4491,288 @@ class TestRateLimitsEpochTimestampGuard(unittest.TestCase):
         self.assertIn("7d:68", result)
 
 
+# ─── cli.py — effort.level from JSON stdin (#81, Claude Code v2.1.119+) ──
+
+class TestEffortLevelFromStdin(unittest.TestCase):
+    """Pin the new stdin-as-source behavior for effort level.
+
+    Claude Code v2.1.119 added `effort.level` to the statusline JSON
+    stdin payload. v0.5.8 prefers this over the settings.json file
+    read so users see effort changes within one render cycle of
+    `/effort xhigh` instead of waiting up to 30s for the cache to
+    expire. The settings.json read remains as a fallback for older
+    Claude Code versions.
+    """
+
+    def _data(self, **extras):
+        base = {
+            "context_window": {"used_percentage": 30,
+                               "current_usage": {"input_tokens": 5000}},
+            "cost": {"total_cost_usd": 0.5, "total_duration_ms": 60000},
+            "git_branch": "main",
+        }
+        base.update(extras)
+        return base
+
+    # ── _normalize behavior ─────────────────────────────────────────
+
+    def test_normalize_extracts_effort_level_from_stdin(self):
+        """Valid effort.level in stdin populates n['effort_level']."""
+        from claude_statusline.cli import _normalize
+        n = _normalize(self._data(effort={"level": "xhigh"}))
+        self.assertEqual(n["effort_level"], "xhigh")
+
+    def test_normalize_accepts_all_valid_levels_from_stdin(self):
+        """Each level in _VALID_EFFORT_LEVELS (except 'medium') is
+        passed through. 'medium' is dropped to None because it's the
+        default and we hide that section by contract."""
+        from claude_statusline.cli import _normalize
+        for level in ("low", "high", "xhigh", "max"):
+            n = _normalize(self._data(effort={"level": level}))
+            self.assertEqual(n["effort_level"], level,
+                "stdin effort.level={!r} should pass through".format(level))
+        # medium is the default; dropped
+        n = _normalize(self._data(effort={"level": "medium"}))
+        self.assertIsNone(n["effort_level"],
+            "stdin effort.level='medium' must be hidden (default contract)")
+
+    def test_normalize_case_insensitive(self):
+        """Mixed-case effort levels in stdin normalize to lowercase
+        — matches existing settings.json behavior, prevents a future
+        Anthropic schema doc using 'Xhigh' or 'XHIGH' from breaking."""
+        from claude_statusline.cli import _normalize
+        for variant in ("XHIGH", "Xhigh", "xHigh"):
+            n = _normalize(self._data(effort={"level": variant}))
+            self.assertEqual(n["effort_level"], "xhigh",
+                "stdin effort.level={!r} should normalize to 'xhigh'".format(variant))
+
+    def test_normalize_rejects_unknown_level_from_stdin(self):
+        """Unknown effort levels (typos, future variants we don't
+        recognize) drop to None so the renderer doesn't display
+        garbage. Users on a newer Claude Code than this claude-status
+        version will fall back to settings.json — better stale-but-
+        valid than fresh-but-garbage."""
+        from claude_statusline.cli import _normalize
+        n = _normalize(self._data(effort={"level": "ultrathink"}))
+        self.assertIsNone(n["effort_level"])
+
+    def test_normalize_rejects_non_string_level(self):
+        """effort.level being an int / list / None must not crash."""
+        from claude_statusline.cli import _normalize
+        for bad in (42, ["xhigh"], None, True, {"level": "nested"}):
+            n = _normalize(self._data(effort={"level": bad}))
+            self.assertIsNone(n["effort_level"],
+                "stdin effort.level={!r} should be rejected".format(bad))
+
+    def test_normalize_rejects_non_dict_effort(self):
+        """effort field being a string / list / None — the isinstance
+        guard prevents an AttributeError on .get()."""
+        from claude_statusline.cli import _normalize
+        for bad in ("xhigh", ["xhigh"], None, 42):
+            n = _normalize(self._data(effort=bad))
+            self.assertIsNone(n["effort_level"],
+                "data['effort']={!r} should be rejected cleanly".format(bad))
+
+    def test_normalize_absent_effort_yields_none(self):
+        """No effort field in stdin (older Claude Code, demo data) —
+        n['effort_level'] is None so the renderer falls back to
+        get_effort_level() (settings.json read)."""
+        from claude_statusline.cli import _normalize
+        n = _normalize(self._data())
+        self.assertIsNone(n["effort_level"])
+
+    # ── render() integration: stdin wins over settings.json ────────
+
+    def test_render_prefers_stdin_over_settings_json(self):
+        """When stdin has effort.level, the settings.json read should
+        be SKIPPED entirely. Pin via a stub that would error if called."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        # Make get_effort_level loud so we know if it was called.
+        called = []
+        def loud_settings_read():
+            called.append(True)
+            return "low"  # would render as effort:low if used
+        cli_mod.get_effort_level = loud_settings_read
+        try:
+            data = self._data(effort={"level": "xhigh"})
+            result = render(data)
+            self.assertIn("effort:xhigh", result,
+                "stdin xhigh should be rendered, not the stubbed 'low'")
+            self.assertNotIn("effort:low", result,
+                "settings.json fallback should not have been consulted")
+            self.assertEqual(len(called), 0,
+                "get_effort_level() must NOT be called when stdin has effort.level")
+        finally:
+            cli_mod.get_effort_level = orig
+
+    def test_render_falls_back_to_settings_when_stdin_absent(self):
+        """No effort field in stdin → renderer must call
+        get_effort_level() to read settings.json. This is the
+        backward-compatibility path for older Claude Code versions."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        called = []
+        def fake_settings_read():
+            called.append(True)
+            return "max"
+        cli_mod.get_effort_level = fake_settings_read
+        try:
+            data = self._data()  # NO effort field
+            result = render(data)
+            self.assertIn("effort:max", result,
+                "settings.json fallback should be consulted and rendered")
+            self.assertEqual(len(called), 1,
+                "get_effort_level() must be called exactly once on the fallback path")
+        finally:
+            cli_mod.get_effort_level = orig
+
+    def test_render_falls_back_when_stdin_effort_level_invalid(self):
+        """Invalid stdin effort.level (e.g. 'ultrathink') → renderer
+        falls back to settings.json. Pinning this means a future
+        Anthropic schema variant we don't recognize won't blank the
+        section if the user has a valid effortLevel in settings.json."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: "high"
+        try:
+            data = self._data(effort={"level": "ultrathink"})
+            result = render(data)
+            self.assertIn("effort:high", result,
+                "invalid stdin should fall through to settings.json read")
+        finally:
+            cli_mod.get_effort_level = orig
+
+    def test_render_stdin_medium_falls_through_to_settings(self):
+        """Stdin effort.level='medium' is normalized to None (hidden
+        by contract). The renderer then falls through to
+        get_effort_level() — which ALSO returns None for medium, so
+        the section stays hidden. Pin both halves of this so a future
+        change to either layer doesn't accidentally start showing
+        'effort:medium' to the user."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: None  # settings.json also says medium
+        try:
+            data = self._data(effort={"level": "medium"})
+            result = render(data)
+            self.assertNotIn("effort:medium", result)
+            self.assertNotIn("effort:", result,
+                "medium from stdin + medium from settings should hide the section")
+        finally:
+            cli_mod.get_effort_level = orig
+
+    def test_render_stdin_medium_with_settings_returning_high(self):
+        """Stdin medium → _normalize drops to None → renderer falls
+        back to settings.json. If settings.json has a NON-medium value,
+        that should render. Pins the contract that medium-from-stdin
+        is NOT a "force hide" signal — it's "no preference, use the
+        fallback chain". Defense against a future refactor that
+        accidentally treats stdin medium as "hide section regardless"."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: "high"
+        try:
+            data = self._data(effort={"level": "medium"})
+            result = render(data)
+            self.assertIn("effort:high", result,
+                "settings.json 'high' should render when stdin says medium "
+                "(stdin medium falls through, doesn't force-hide)")
+        finally:
+            cli_mod.get_effort_level = orig
+
+    def test_render_no_stdin_with_settings_medium(self):
+        """No effort field in stdin → renderer calls get_effort_level()
+        → if settings.json says medium it returns None → section hides.
+        Pins the existing settings.json medium-hidden contract still
+        works after the v0.5.8 changes."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: None  # settings.json medium → None
+        try:
+            data = self._data()  # no effort field
+            result = render(data)
+            self.assertNotIn("effort:", result,
+                "no stdin + settings.json medium should hide the section")
+        finally:
+            cli_mod.get_effort_level = orig
+
+    def test_render_each_valid_level_via_stdin_path(self):
+        """Each non-medium level in _VALID_EFFORT_LEVELS renders
+        correctly through the stdin path. Without this, a future
+        refactor that broke the stdin chain only for non-xhigh values
+        (e.g., a typo in _normalize that passes 'xhigh' but drops
+        'low'/'high'/'max') would not be caught — the existing
+        TestEffortSection tests stub get_effort_level directly and
+        bypass _normalize entirely."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        # Stub settings.json to a known-wrong value so we'd notice
+        # if the renderer accidentally fell through.
+        cli_mod.get_effort_level = lambda: "wrong-value-must-not-appear"
+        try:
+            for level in ("low", "high", "xhigh", "max"):
+                data = self._data(effort={"level": level})
+                result = render(data)
+                self.assertIn("effort:" + level, result,
+                    "stdin level={!r} should render via the stdin path".format(level))
+                self.assertNotIn("wrong-value-must-not-appear", result,
+                    "stdin level={!r} should not fall through to "
+                    "settings.json".format(level))
+        finally:
+            cli_mod.get_effort_level = orig
+
+    def test_normalize_writes_effort_cache_when_stdin_supplies_value(self):
+        """When _normalize extracts a valid effort.level from stdin,
+        it MUST mirror the value to the on-disk effort_level cache.
+
+        Why: if the user later switches to an older Claude Code
+        client (or any tool that doesn't supply stdin effort), the
+        next render falls back to get_effort_level() which reads from
+        the cache. Without the mirror-write, the cache could hold a
+        stale value from before the user's last `/effort` change —
+        rendering the wrong effort with no signal to the user.
+
+        Pins the cache-consistency invariant flagged by the v0.5.8
+        silent-failure review.
+        """
+        import claude_statusline.sessions as sessions_mod
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.sessions import _read_cache
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Patch the cache directory so this test can't pollute
+            # the real user-scoped temp cache.
+            orig_get = sessions_mod._cache_dir
+            sessions_mod._cache_dir = lambda: tmpdir
+            try:
+                cli_mod._normalize(self._data(effort={"level": "xhigh"}))
+                cached = _read_cache("effort_level")
+                self.assertIsNotNone(cached,
+                    "stdin effort.level should mirror to the cache file")
+                self.assertEqual(cached.get("effort"), "xhigh",
+                    "cached value should match the stdin level")
+            finally:
+                sessions_mod._cache_dir = orig_get
+
+    def test_normalize_does_not_write_cache_when_stdin_invalid(self):
+        """If stdin effort.level is invalid (unknown level, wrong
+        type), _normalize must NOT write to the cache — that would
+        propagate the upstream bug to the fallback path.
+        """
+        import claude_statusline.sessions as sessions_mod
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.sessions import _cache_path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_get = sessions_mod._cache_dir
+            sessions_mod._cache_dir = lambda: tmpdir
+            try:
+                cli_mod._normalize(self._data(effort={"level": "ultrathink"}))
+                cache_file = _cache_path("effort_level")
+                self.assertFalse(os.path.exists(cache_file),
+                    "invalid stdin effort.level must not write the cache")
+            finally:
+                sessions_mod._cache_dir = orig_get
+
+
 if __name__ == "__main__":
     unittest.main()

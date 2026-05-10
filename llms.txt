@@ -56,7 +56,9 @@ Line 2: duration, API latency, tokens/sec, lines changed, git branch, git extras
 
 ## Effort Levels
 
-Recognized values from `~/.claude/settings.json`'s `effortLevel` key: `low`, `medium`, `high`, `xhigh`, `max`. The `medium` default is hidden (no `effort:` indicator). `xhigh` and `max` are Opus 4.7 / top-tier — `xhigh` was introduced in Claude Code v2.1.111 (2026-04); `max` is the top of the scale. Other models silently fall back to `high` per Anthropic's docs. Renders as `effort:xhigh` / `effort:max` (bright magenta by default; per-theme `effort_xhigh` and `effort_max` color keys).
+Recognized values: `low`, `medium`, `high`, `xhigh`, `max`. The `medium` default is hidden (no `effort:` indicator). `xhigh` and `max` are Opus 4.7 / top-tier — `xhigh` was introduced in Claude Code v2.1.111 (2026-04); `max` is the top of the scale. Other models silently fall back to `high` per Anthropic's docs. Renders as `effort:xhigh` / `effort:max` (bright magenta by default; per-theme `effort_xhigh` and `effort_max` color keys).
+
+**Source priority (v0.5.8+)**: stdin JSON `effort.level` (Claude Code v2.1.119+) is preferred over `~/.claude/settings.json`'s `effortLevel` key. Stdin updates within one render cycle of `/effort xhigh`; the file read has a 30s cache and is used only as a fallback for older Claude Code versions.
 
 ## Configuration Files
 
@@ -66,7 +68,7 @@ Recognized values from `~/.claude/settings.json`'s `effortLevel` key: `low`, `me
 
 ## StatusLine JSON Fields (from Claude Code stdin)
 
-model.id, model.display_name, cwd, workspace.current_dir, workspace.project_dir, workspace.added_dirs, workspace.git_worktree, cost.total_cost_usd, cost.total_duration_ms, cost.total_api_duration_ms, cost.total_lines_added, cost.total_lines_removed, context_window.used_percentage, context_window.remaining_percentage, context_window.context_window_size, context_window.current_usage.*, exceeds_200k_tokens, rate_limits.five_hour.used_percentage, rate_limits.five_hour.resets_at, rate_limits.seven_day.used_percentage, rate_limits.seven_day.resets_at, session_id, session_name, transcript_path, version, output_style.name, vim.mode, agent.name, worktree.name, worktree.path, worktree.branch
+model.id, model.display_name, cwd, workspace.current_dir, workspace.project_dir, workspace.added_dirs, workspace.git_worktree, cost.total_cost_usd, cost.total_duration_ms, cost.total_api_duration_ms, cost.total_lines_added, cost.total_lines_removed, context_window.used_percentage, context_window.remaining_percentage, context_window.context_window_size, context_window.current_usage.*, exceeds_200k_tokens, rate_limits.five_hour.used_percentage, rate_limits.five_hour.resets_at, rate_limits.seven_day.used_percentage, rate_limits.seven_day.resets_at, session_id, session_name, transcript_path, version, output_style.name, vim.mode, agent.name, worktree.name, worktree.path, worktree.branch, effort.level (v2.1.119+), thinking.enabled (v2.1.119+, not currently rendered)
 
 ## Architecture
 
