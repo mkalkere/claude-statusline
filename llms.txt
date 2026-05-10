@@ -81,13 +81,15 @@ cli.py (entry point, normalization, two-stage layout, rendering) → bar.py (pro
 - All numeric fields use `_first()` helper (not `or`) to preserve zero values
 - OSC 8 clickable links disabled by default (Claude Code's Ink TUI miscounts them)
 
-## Workaround for Upstream Ink Truncation
+## Workarounds for Upstream Bugs
 
-Claude Code's TUI uses Ink `<Text wrap="truncate">` on the statusline (anthropics/claude-code#28750, closed without fix). When Line 1 overflows the terminal width, Line 2 is silently dropped. The two-stage layout (above) measures our actual rendered width and shrinks until we fit — no config required.
+- **Ink truncation** (anthropics/claude-code#28750, closed without fix): Claude Code's TUI uses `<Text wrap="truncate">` on the statusline. When Line 1 overflows the terminal width, Line 2 is silently dropped. Our two-stage layout (above) measures actual rendered width and shrinks until we fit.
+- **Terminal width hidden from subprocess** (anthropics/claude-code#22115, open): the statusLine command is spawned with stdin piped, no TTY, no `COLUMNS` env — so naive width detection always returns the fallback. v0.5.7+ walks a fallback chain (stdin `terminal.columns` → `COLUMNS` env → shutil → `os.get_terminal_size(fd)` → `stty size < /dev/tty` → `tput cols 2>/dev/tty`) to recover the real width and avoid trimming sections users have room for.
+- **rate_limits epoch-timestamp** (anthropics/claude-code#52326, open): on a fresh 5h/7d window, `rate_limits.X.used_percentage` returns the `resets_at` epoch timestamp (~1.7e9) instead of 0/null. v0.5.7+ guards against this — any value above 100 is treated as "no data yet" and the section is hidden.
 
 ## Testing
 
-stdlib unittest only. 300+ tests. CI: 21-job matrix (3 OS x 7 Python versions: 3.8-3.14).
+stdlib unittest only. 350+ tests. CI: 21-job matrix (3 OS x 7 Python versions: 3.8-3.14).
 
 ```
 python -m unittest discover tests/

@@ -7,6 +7,7 @@ import platform
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -165,7 +166,7 @@ def _normalize(data):
     # Claude Code version
     out["cc_version"] = data.get("version") or ""
 
-    # Rate limits (Pro/Max only, added in Claude Code v2.1.80)
+    # Rate limits (Pro/Max only, added in Claude Code v2.1.80).
     rl = data.get("rate_limits")
     rl = rl if isinstance(rl, dict) else {}
     five_h = rl.get("five_hour")
@@ -173,9 +174,31 @@ def _normalize(data):
     seven_d = rl.get("seven_day")
     seven_d = seven_d if isinstance(seven_d, dict) else {}
     # resets_at is Unix epoch seconds per Claude Code docs — convert to ms
-    # for fmt_countdown() which expects milliseconds
+    # for fmt_countdown() which expects milliseconds.
+    #
+    # Upstream bug guard (anthropics/claude-code#52326, still open):
+    # on a fresh 5h/7d window with no usage data yet, Claude Code
+    # returns the resets_at epoch timestamp (~1.7e9) in
+    # used_percentage instead of 0/null. Without this guard, our
+    # downstream clamp(0, 100) silently turns it into a false
+    # `5h:100% (red)` alarm on every fresh session for Pro/Max
+    # users.
+    #
+    # Threshold = 1e6: epoch seconds (~1.7e9) are 7+ orders of
+    # magnitude above any plausible percentage, so this catches the
+    # bug pattern with zero risk of false positives. We deliberately
+    # do NOT use `> 100`: Anthropic could legitimately ship an
+    # "overage" indicator above 100% in the future, and pre-emptively
+    # hiding any value 101-999999 would silently swallow it. Values
+    # in the legitimate-but-out-of-spec range (e.g. 105) still flow
+    # through to the renderer's existing clamp(0, 100) at the
+    # rate_limits section, so they show as `5h:100% (red)` — which
+    # IS the correct UI for "user is maxed out beyond 100%".
     for period, rl_dict in [("5h", five_h), ("7d", seven_d)]:
-        out["rate_limit_{}_pct".format(period)] = _safe_num(rl_dict.get("used_percentage"))
+        pct = _safe_num(rl_dict.get("used_percentage"))
+        if pct is not None and pct >= 1e6:
+            pct = None
+        out["rate_limit_{}_pct".format(period)] = pct
         resets_sec = _safe_num(rl_dict.get("resets_at"))
         out["rate_limit_{}_resets".format(period)] = (
             resets_sec * 1000 if resets_sec is not None else None
@@ -601,6 +624,145 @@ _FIT_DROP_PRIORITY = _COMPACT_DROP + [
 ]
 
 
+# Plausibility bounds for a detected terminal width. Anything outside
+# this range is treated as garbage and ignored — protects against
+# `stty size` returning 0 0 on a closed pty, an OS reporting absurd
+# widths, or stdin JSON containing a stringified value that coerced
+# to a wild number.
+#
+# Upper bound 4000 covers ultrawide / 8K / multi-monitor tmux setups
+# (a 7680px display at 6px monospace cells = ~1280 cols; side-by-side
+# 5K monitors in tmux can exceed 2000 cols). Going wider has no
+# rendering cost — the layout only cares about the 100/150 thresholds —
+# and rejecting a real 1280-col terminal would silently drop the user
+# back into compact layout.
+_TERM_WIDTH_MIN = 20
+_TERM_WIDTH_MAX = 4000
+
+
+def _detect_terminal_width(data=None):
+    """Detect the user's actual terminal width.
+
+    Claude Code spawns the statusLine command as a child process with
+    stdin piped — there is no TTY, no `COLUMNS` env var, and
+    `shutil.get_terminal_size()` returns its fallback. As a result we
+    can't tell from the subprocess context alone whether the user has
+    a 100-col terminal or a 300-col one, and our two-stage layout
+    silently trims to the fallback width.
+
+    Tracked upstream at anthropics/claude-code#22115 (open since Jan
+    2026, no upstream fix). Until Anthropic ships terminal dimensions
+    in the stdin JSON, we try a chain of fallbacks ourselves and
+    return the first plausible value.
+
+    Order (each step caught and ignored on any error):
+
+    1. ``data["terminal"]["columns"]`` from stdin JSON — defensive
+       forward-compat for whenever Anthropic adds it.
+    2. ``COLUMNS`` env var — some shell wrappers / users export it.
+    3. ``shutil.get_terminal_size()`` honoring ``COLUMNS`` and any
+       stdout TTY (rarely TTY in our context but cheap to check).
+    4. ``os.get_terminal_size(N)`` against a TTY file descriptor
+       (stderr/stdout in case one of them is unexpectedly a TTY).
+    5. ``stty size < /dev/tty`` — works on Linux/macOS/WSL when
+       ``/dev/tty`` is reachable. Most reliable signal we have.
+    6. ``tput cols 2>/dev/tty`` — alternate POSIX path; some
+       systems have ``tput`` but not ``stty``.
+    7. Fallback ``_COMPACT_LAYOUT_MIN_COLS`` — current behavior,
+       safe default that keeps Line 2 readable.
+
+    Args:
+        data: Optional parsed stdin JSON dict. If present and contains
+            a numeric ``terminal.columns`` value (int, float, or
+            numeric string — accepted via ``_safe_num``), that is
+            preferred over all other signals.
+
+    Returns:
+        Detected terminal width in columns. Always within
+        ``[_TERM_WIDTH_MIN, _TERM_WIDTH_MAX]`` because the final
+        fallback ``_COMPACT_LAYOUT_MIN_COLS`` itself sits in range.
+        Out-of-range candidates from earlier steps are *rejected*
+        (not clamped) and trigger fall-through to the next signal.
+    """
+    # 1. Stdin JSON terminal.columns (forward-compat).
+    if isinstance(data, dict):
+        term_obj = data.get("terminal")
+        if isinstance(term_obj, dict):
+            cols = _safe_num(term_obj.get("columns"))
+            if cols is not None and _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
+                return int(cols)
+
+    # 2. COLUMNS env var (also honored by step 3, but checked first
+    # so a user explicitly exporting it always wins over OS calls).
+    cols_env = os.environ.get("COLUMNS")
+    if cols_env:
+        try:
+            cols = int(cols_env)
+            if _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
+                return cols
+        except (ValueError, TypeError):
+            pass
+
+    # 3. shutil.get_terminal_size — checks COLUMNS again then any
+    # stdout TTY. Cheap; no external process. Skip its fallback
+    # path (which would just return our compact default early) by
+    # passing a sentinel and only trusting non-sentinel results.
+    try:
+        size = shutil.get_terminal_size((-1, -1))
+        if (_TERM_WIDTH_MIN <= size.columns <= _TERM_WIDTH_MAX
+                and size.columns != -1):
+            return size.columns
+    except (OSError, ValueError):
+        pass
+
+    # 4. os.get_terminal_size on each std fd — Claude Code closes
+    # stdin (it's our JSON pipe) but stderr is often inherited from
+    # the parent TTY.
+    for fd in (2, 1, 0):  # stderr, stdout, stdin
+        try:
+            size = os.get_terminal_size(fd)
+            if _TERM_WIDTH_MIN <= size.columns <= _TERM_WIDTH_MAX:
+                return size.columns
+        except (OSError, AttributeError):
+            continue
+
+    # 5. stty size < /dev/tty — most reliable POSIX path. Captures
+    # the controlling terminal's real width even when stdin/stdout
+    # are pipes. /dev/tty doesn't exist on Windows, where stty is
+    # also typically absent — both raise FileNotFoundError, caught.
+    try:
+        with open("/dev/tty", "r") as tty:
+            result = subprocess.run(
+                ["stty", "size"], stdin=tty,
+                capture_output=True, text=True, timeout=1,
+            )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split()
+            if len(parts) == 2:
+                cols = int(parts[1])
+                if _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
+                    return cols
+    except (OSError, ValueError, subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+    # 6. tput cols 2>/dev/tty — alternate path some systems have.
+    try:
+        with open("/dev/tty", "r") as tty:
+            result = subprocess.run(
+                ["tput", "cols"], stdin=tty,
+                capture_output=True, text=True, timeout=1,
+            )
+        if result.returncode == 0:
+            cols = int(result.stdout.strip())
+            if _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
+                return cols
+    except (OSError, ValueError, subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+    # 7. Last-resort fallback — same value the previous code path used.
+    return _COMPACT_LAYOUT_MIN_COLS
+
+
 def _apply_responsive(sections_list, term_width):
     """Filter section list based on terminal width.
 
@@ -751,9 +913,12 @@ def render(data, theme_name="default"):
     sep = colorize(theme["separator"], theme["colors"]["separator"])
     sep_width = _visible_width(sep)
 
-    # Default to compact layout when terminal size cannot be detected
-    # (non-interactive contexts, piped stdout, some SSH setups).
-    term_width = shutil.get_terminal_size((_COMPACT_LAYOUT_MIN_COLS, 24)).columns
+    # Detect terminal width via fallback chain — Claude Code's
+    # statusLine subprocess context hides this from us, so naive
+    # `shutil.get_terminal_size()` always returns the fallback. See
+    # `_detect_terminal_width()` for the full chain (stdin JSON →
+    # COLUMNS → shutil → /dev/tty stty/tput → compact default).
+    term_width = _detect_terminal_width(data)
     line1 = _apply_responsive(theme["line1"], term_width)
     line2 = _apply_responsive(theme["line2"], term_width)
 
@@ -1402,12 +1567,17 @@ def cmd_doctor():
     print("  Branch: {}".format(branch or "(not in a git repo)"))
     print()
 
-    # Terminal capabilities
+    # Terminal capabilities — show both the naive shutil value AND
+    # the value our fallback chain detects, so users can see whether
+    # our recovery worked when Claude Code's subprocess context hid
+    # the real width.
     print("Terminal:")
     term = os.environ.get("TERM", "(not set)")
-    cols = shutil.get_terminal_size((_COMPACT_LAYOUT_MIN_COLS, 24)).columns
+    naive_cols = shutil.get_terminal_size((_COMPACT_LAYOUT_MIN_COLS, 24)).columns
+    detected_cols = _detect_terminal_width()
     print("  TERM:    {}".format(term))
-    print("  Columns: {}".format(cols))
+    print("  Columns: {} (shutil naive: {})".format(detected_cols, naive_cols))
+    cols = detected_cols
     if cols >= _FULL_LAYOUT_MIN_COLS:
         print("  Layout:  full (>= {} cols)".format(_FULL_LAYOUT_MIN_COLS))
     elif cols >= _COMPACT_LAYOUT_MIN_COLS:

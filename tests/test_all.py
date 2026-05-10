@@ -1863,10 +1863,20 @@ class TestRateLimits(unittest.TestCase):
         self.assertIn("5h:99%", result)
 
     def test_rate_limits_clamped_above_100(self):
-        """Values above 100% should be clamped."""
+        """Values modestly above 100% (e.g. 105) still flow through
+        the renderer's clamp(0, 100) and display as `5h:100%` — this
+        is the legitimate "user is maxed out" UI for any future
+        Anthropic 'overage' indicator. Only values >= 1e6 (the upstream
+        epoch-timestamp bug pattern) are pre-emptively hidden.
+
+        See TestRateLimitsEpochTimestampGuard for the full contract.
+        """
         data = self._data_with_limits(five_h_pct=105)
         result = render(data)
-        self.assertIn("5h:100%", result)
+        self.assertIn("5h:100%", result,
+            "values modestly above 100 should clamp to 100% in the UI, "
+            "not be silently hidden — only the epoch-timestamp bug "
+            "pattern (>= 1e6) triggers the hide-section guard")
 
     def test_rate_limits_nearest_reset(self):
         """Should show countdown to the nearest reset when both present."""
@@ -4181,6 +4191,304 @@ class TestGitStateRebase(unittest.TestCase):
             self.assertIn("rebase", result)
         finally:
             cli_mod.get_git_state = orig
+
+
+# ─── cli.py — _detect_terminal_width fallback chain (#79) ──────────
+
+class TestDetectTerminalWidth(unittest.TestCase):
+    """Pin the fallback order of _detect_terminal_width().
+
+    Claude Code's statusLine subprocess hides the real terminal width
+    (no TTY, no COLUMNS env), so naive shutil returns the fallback.
+    The function tries 7 signals in order and returns the first
+    plausible value. These tests exercise each signal independently
+    and pin the order so a refactor can't silently demote a more-
+    reliable source.
+    """
+
+    def setUp(self):
+        # Always start from a clean slate: clear COLUMNS so step 2/3
+        # don't accidentally win in tests checking later steps.
+        self._old_cols = os.environ.pop("COLUMNS", None)
+        self._old_lines = os.environ.pop("LINES", None)
+
+    def tearDown(self):
+        if self._old_cols is not None:
+            os.environ["COLUMNS"] = self._old_cols
+        if self._old_lines is not None:
+            os.environ["LINES"] = self._old_lines
+
+    # --- Step 1: stdin terminal.columns -------------------------------
+
+    def test_stdin_terminal_columns_wins(self):
+        """When data['terminal']['columns'] is present and plausible,
+        it wins over every other signal — even COLUMNS env."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["COLUMNS"] = "200"
+        result = _detect_terminal_width({"terminal": {"columns": 165}})
+        self.assertEqual(result, 165)
+
+    def test_stdin_terminal_columns_string_coerced(self):
+        """Coerce numeric strings via _safe_num so JSON serializers
+        that stringify integers (rare but real) still work."""
+        from claude_statusline.cli import _detect_terminal_width
+        result = _detect_terminal_width({"terminal": {"columns": "165"}})
+        self.assertEqual(result, 165)
+
+    def test_stdin_terminal_columns_implausible_rejected(self):
+        """Out-of-range values fall through to the next signal —
+        guards against an upstream bug returning 0 or 99999."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["COLUMNS"] = "150"
+        result = _detect_terminal_width({"terminal": {"columns": 0}})
+        self.assertEqual(result, 150, "implausible 0 should fall through to COLUMNS")
+        result = _detect_terminal_width({"terminal": {"columns": 999999}})
+        self.assertEqual(result, 150, "implausible 999999 should fall through to COLUMNS")
+
+    def test_stdin_terminal_not_dict_falls_through(self):
+        """data['terminal'] being a string/list/None must not crash —
+        just fall through. isinstance guard."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["COLUMNS"] = "150"
+        for bad in ("string", [], None, 42):
+            result = _detect_terminal_width({"terminal": bad})
+            self.assertEqual(result, 150,
+                "data['terminal']={!r} should fall through cleanly".format(bad))
+
+    def test_data_none_falls_through(self):
+        """No data argument is the legitimate cmd_doctor case — must
+        not crash; falls through to env / OS signals."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["COLUMNS"] = "150"
+        result = _detect_terminal_width(None)
+        self.assertEqual(result, 150)
+
+    # --- Step 2: COLUMNS env var --------------------------------------
+
+    def test_columns_env_var_wins_when_no_stdin_signal(self):
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["COLUMNS"] = "200"
+        result = _detect_terminal_width({})
+        self.assertEqual(result, 200)
+
+    def test_columns_env_garbage_falls_through(self):
+        """Non-numeric COLUMNS must not crash."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["COLUMNS"] = "wide"
+        # Falls through; result depends on host env, but must be int
+        # in plausible range and not raise.
+        result = _detect_terminal_width({})
+        self.assertIsInstance(result, int)
+        self.assertGreaterEqual(result, 20)
+
+    def test_columns_env_negative_falls_through(self):
+        """Negative COLUMNS (some misconfigured shells) is rejected."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["COLUMNS"] = "-5"
+        result = _detect_terminal_width({})
+        # Falls through, doesn't return -5
+        self.assertGreaterEqual(result, 20)
+
+    # --- Bounds and clamping ------------------------------------------
+
+    def test_stdin_terminal_columns_lower_bound(self):
+        """20 is the minimum plausible width — anything below falls
+        through. 20 itself is accepted."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["COLUMNS"] = "150"
+        result = _detect_terminal_width({"terminal": {"columns": 20}})
+        self.assertEqual(result, 20)
+        result = _detect_terminal_width({"terminal": {"columns": 19}})
+        self.assertEqual(result, 150, "below-min should fall through")
+
+    def test_stdin_terminal_columns_upper_bound(self):
+        """4000 is the max — covers ultrawide / 8K / multi-monitor
+        tmux setups. Anything above falls through."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["COLUMNS"] = "150"
+        result = _detect_terminal_width({"terminal": {"columns": 4000}})
+        self.assertEqual(result, 4000)
+        result = _detect_terminal_width({"terminal": {"columns": 4001}})
+        self.assertEqual(result, 150, "above-max should fall through")
+
+    def test_stdin_terminal_columns_2000_is_accepted(self):
+        """An 8K display in tmux can legitimately reach ~1280 cols;
+        side-by-side multi-monitor setups can exceed 2000. 2000 must
+        be inside the plausible range, not silently dropped to the
+        compact fallback."""
+        from claude_statusline.cli import _detect_terminal_width
+        result = _detect_terminal_width({"terminal": {"columns": 2000}})
+        self.assertEqual(result, 2000)
+
+    # --- Final fallback path ------------------------------------------
+
+    def test_returns_int_in_plausible_range(self):
+        """Even with zero usable signals, we must return an integer
+        in the documented plausible range — never None, never a float,
+        never a crash."""
+        from claude_statusline.cli import (
+            _detect_terminal_width,
+            _TERM_WIDTH_MIN,
+            _TERM_WIDTH_MAX,
+        )
+        # Even when nothing is set, we get something usable
+        result = _detect_terminal_width({})
+        self.assertIsInstance(result, int)
+        self.assertGreaterEqual(result, _TERM_WIDTH_MIN)
+        self.assertLessEqual(result, _TERM_WIDTH_MAX)
+
+
+class TestRenderUsesDetectedWidth(unittest.TestCase):
+    """End-to-end: render() must consume data['terminal']['columns']
+    when present, exposing more sections at wide terminals where the
+    naive `shutil.get_terminal_size` fallback would have hidden them.
+    This is the user-facing fix — regression-grade test guards it."""
+
+    def test_render_at_165_cols_via_stdin_shows_more_sections(self):
+        """The actual user scenario from screenshot at PR #79: a 165-
+        col terminal that previously showed only ~5 sections on Line 2
+        now shows ~10+ because the precise stage has the real width."""
+        # Stub git helpers so this test is deterministic across hosts.
+        import claude_statusline.cli as cli_mod
+        orig = {
+            "get_remote_url": cli_mod.get_remote_url,
+            "get_git_state": cli_mod.get_git_state,
+            "get_last_commit_age_ms": cli_mod.get_last_commit_age_ms,
+            "get_git_extras": cli_mod.get_git_extras,
+            "get_session_tool_count": cli_mod.get_session_tool_count,
+            "get_today_session_count": cli_mod.get_today_session_count,
+            "get_effort_level": cli_mod.get_effort_level,
+        }
+        cli_mod.get_remote_url = lambda: ""
+        cli_mod.get_git_state = lambda: ""
+        cli_mod.get_last_commit_age_ms = lambda: 3600000  # 1h
+        cli_mod.get_git_extras = lambda: {}
+        cli_mod.get_session_tool_count = lambda sid: 0
+        cli_mod.get_today_session_count = lambda: 1
+        cli_mod.get_effort_level = lambda: "xhigh"
+        try:
+            data = {
+                "context_window": {"used_percentage": 18,
+                                   "context_window_size": 1_000_000,
+                                   "current_usage": {"input_tokens": 1, "output_tokens": 242}},
+                "cost": {"total_cost_usd": 879, "total_duration_ms": 196_080_000,
+                         "total_lines_added": 18683, "total_lines_removed": 1628},
+                "git_branch": "main",
+                "model": {"display_name": "Opus 4.7 (1M context)"},
+                "terminal": {"columns": 165},
+            }
+            out = render(data)
+            from claude_statusline.cli import _visible_width
+            lines = out.split("\n")
+            # Line 2 must fit the 165-col budget…
+            line2_width = _visible_width(lines[1])
+            self.assertLessEqual(line2_width, 165,
+                "Line 2 width {} exceeds 165 — fit logic broken".format(line2_width))
+            # …and use significantly more of it than the ~83 chars the
+            # naive fallback would have produced.
+            self.assertGreater(line2_width, 100,
+                "Line 2 width {} is too small — terminal.columns from "
+                "stdin was probably not consumed".format(line2_width))
+            # Specific recovered sections that proved the bug originally:
+            self.assertIn("(1000K)", out, "context_size should appear at 165 cols")
+            self.assertIn("effort:xhigh", out, "effort should appear at 165 cols")
+        finally:
+            for name, fn in orig.items():
+                setattr(cli_mod, name, fn)
+
+
+# ─── cli.py — rate_limits epoch-timestamp guard (#79 / upstream #52326) ──
+
+class TestRateLimitsEpochTimestampGuard(unittest.TestCase):
+    """Anthropic's claude-code#52326: on a fresh 5h or 7d window with
+    no usage data yet, used_percentage returns the resets_at epoch
+    timestamp (~1.7e9) instead of 0/null. Without a guard our
+    downstream clamp(0,100) silently turns it into a false
+    `5h:100% (red)` alarm. The guard treats anything > 100 as
+    'no data yet' and drops to None so the section is hidden."""
+
+    def _data(self, five_h_pct=None, seven_d_pct=None):
+        return {
+            "context_window": {"used_percentage": 20,
+                               "current_usage": {"input_tokens": 1000}},
+            "cost": {"total_cost_usd": 0.5, "total_duration_ms": 60000},
+            "git_branch": "main",
+            "rate_limits": {
+                "five_hour": {
+                    "used_percentage": five_h_pct,
+                    "resets_at": 1_776_950_400,
+                },
+                "seven_day": {
+                    "used_percentage": seven_d_pct,
+                    "resets_at": 1_777_500_000,
+                },
+            },
+        }
+
+    def test_epoch_timestamp_in_5h_used_percentage_is_hidden(self):
+        """5h section must NOT render when upstream returns the
+        timestamp value. Pre-fix, this rendered as '5h:100%' in red."""
+        from claude_statusline.cli import _normalize
+        n = _normalize(self._data(five_h_pct=1_776_950_400, seven_d_pct=18))
+        self.assertIsNone(n["rate_limit_5h_pct"],
+            "5h epoch-timestamp value must drop to None")
+        self.assertEqual(n["rate_limit_7d_pct"], 18.0,
+            "legitimate 7d value must still pass through unchanged")
+
+    def test_epoch_timestamp_in_7d_used_percentage_is_hidden(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize(self._data(five_h_pct=42, seven_d_pct=1_777_500_000))
+        self.assertEqual(n["rate_limit_5h_pct"], 42.0)
+        self.assertIsNone(n["rate_limit_7d_pct"])
+
+    def test_legitimate_values_pass_through_unchanged(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize(self._data(five_h_pct=34, seven_d_pct=68))
+        self.assertEqual(n["rate_limit_5h_pct"], 34.0)
+        self.assertEqual(n["rate_limit_7d_pct"], 68.0)
+
+    def test_boundary_value_100_passes_through(self):
+        """Exactly 100% IS a legitimate used_percentage (truly maxed
+        out) — the guard only triggers at the epoch-timestamp pattern
+        (>= 1e6). Pin the boundary."""
+        from claude_statusline.cli import _normalize
+        n = _normalize(self._data(five_h_pct=100, seven_d_pct=100))
+        self.assertEqual(n["rate_limit_5h_pct"], 100.0)
+        self.assertEqual(n["rate_limit_7d_pct"], 100.0)
+
+    def test_value_modestly_above_100_passes_through(self):
+        """Values 101-999999 are NOT the upstream bug pattern (which is
+        always epoch seconds ~1.7e9). They could be a future Anthropic
+        'overage' indicator above 100%, so we let them through and rely
+        on the renderer's existing clamp(0, 100) for safe display.
+        Pre-emptively hiding these would silently swallow real signals.
+        """
+        from claude_statusline.cli import _normalize
+        n = _normalize(self._data(five_h_pct=105, seven_d_pct=999999))
+        self.assertEqual(n["rate_limit_5h_pct"], 105.0,
+            "value just above 100 should flow through to the renderer's clamp")
+        self.assertEqual(n["rate_limit_7d_pct"], 999999.0,
+            "value just below 1e6 should still flow through (not bug pattern)")
+
+    def test_epoch_pattern_at_threshold_is_dropped(self):
+        """The threshold is 1e6: any value at or above that is treated
+        as the upstream epoch-timestamp bug pattern. Pins the boundary
+        explicitly."""
+        from claude_statusline.cli import _normalize
+        n = _normalize(self._data(five_h_pct=1_000_000, seven_d_pct=1_000_001))
+        self.assertIsNone(n["rate_limit_5h_pct"])
+        self.assertIsNone(n["rate_limit_7d_pct"])
+
+    def test_renders_no_5h_section_when_upstream_bug_present(self):
+        """End-to-end: rate_limits section in render() must hide the
+        bugged value, not render it in red. This is the user-visible
+        contract — 'no false 5h:100% alarm on fresh sessions'."""
+        result = render(self._data(five_h_pct=1_776_950_400, seven_d_pct=68))
+        # Must NOT contain a percentage in the billions
+        self.assertNotIn("5h:", result,
+            "5h section must be hidden when upstream returns epoch timestamp")
+        # 7d section still renders normally
+        self.assertIn("7d:68", result)
 
 
 if __name__ == "__main__":
