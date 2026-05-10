@@ -28,6 +28,8 @@ from .git import (
     get_last_commit_age_ms, get_remote_url,
 )
 from .sessions import (
+    _VALID_EFFORT_LEVELS,
+    _read_cache, _write_cache,
     get_budget_config, get_clickable_links_enabled, get_compaction_threshold,
     get_disabled_sections, get_effort_level, get_session_tool_count,
     get_today_session_count,
@@ -216,6 +218,58 @@ def _normalize(data):
 
     # Native git worktree indicator (v2.1.97+)
     out["git_worktree"] = bool(workspace.get("git_worktree"))
+
+    # Effort level (Claude Code v2.1.119+ exposes this in stdin JSON
+    # under data["effort"]["level"]). When present and valid, it is
+    # the authoritative source — updates within one render cycle of
+    # `/effort xhigh` instead of waiting up to 30s for the
+    # settings.json cache to expire. When absent (older Claude Code,
+    # demo mode, custom statuslines), the renderer falls back to
+    # get_effort_level() which reads ~/.claude/settings.json.
+    #
+    # Validation against _VALID_EFFORT_LEVELS rejects malformed
+    # stdin payloads (e.g. effort.level: 42 or "ultrathink") so the
+    # renderer never sees garbage. "medium" is dropped here because
+    # it's the default and we hide that section by contract.
+    effort_obj = data.get("effort")
+    effort_obj = effort_obj if isinstance(effort_obj, dict) else {}
+    raw_effort = effort_obj.get("level")
+    if isinstance(raw_effort, str):
+        normalized = raw_effort.lower()
+        if normalized in _VALID_EFFORT_LEVELS:
+            # Stdin is the authoritative source — even "medium" is an
+            # explicit user choice we must honor. We use the empty
+            # string as a sentinel for "explicitly medium / hide
+            # section": it satisfies the renderer's `is not None`
+            # check (so the fallback to settings.json is skipped) but
+            # is falsy for the `if effort:` check (so the section
+            # hides). Without this, stdin medium would fall through
+            # to the 30s settings.json cache and the user could see
+            # a stale non-medium value for up to 30s after running
+            # `/effort medium`.
+            if normalized == "medium":
+                out["effort_level"] = ""
+            else:
+                out["effort_level"] = normalized
+            # Mirror to the on-disk cache so a later render that lacks
+            # stdin effort (older Claude Code, mid-session client
+            # switch, demo) sees the most recent authoritative value
+            # via the get_effort_level() fallback instead of a stale
+            # entry from before the user's last `/effort` change.
+            # Read-then-compare avoids the disk write on every render
+            # when the value is unchanged (cheap stat+read vs. atomic
+            # write+rename on every render cycle). Best-effort: cache
+            # failures must never break render.
+            try:
+                cached = _read_cache("effort_level")
+                if cached is None or cached.get("effort") != normalized:
+                    _write_cache("effort_level", {"effort": normalized})
+            except Exception:
+                pass
+        else:
+            out["effort_level"] = None
+    else:
+        out["effort_level"] = None
 
     return out
 
@@ -518,7 +572,25 @@ def _render_sections_named(n, order, theme):
                 sections.append(colorize("gwt", gwtc))
 
         elif section == "effort":
-            effort = get_effort_level()
+            # Prefer stdin-supplied effort.level (Claude Code v2.1.119+,
+            # set by _normalize). Falls back to settings.json read for
+            # older Claude Code versions and demo mode. Stdin source
+            # updates within one render cycle of `/effort xhigh` instead
+            # of waiting for the 30s settings.json cache to expire.
+            #
+            # Tri-state semantics from _normalize:
+            #   None → "no stdin signal at all" → fall back to
+            #          get_effort_level() (settings.json with cache)
+            #   ""   → "explicitly medium / hide section" → skip
+            #          fallback (do NOT read stale settings.json), use
+            #          empty string which fails the `if effort:` test
+            #          below, hiding the section
+            #   str  → "user chose this level" → use directly
+            #
+            # `is not None` is the correct check (not `or`) — empty
+            # string IS a meaningful signal we must honor.
+            stdin_effort = n.get("effort_level")
+            effort = stdin_effort if stdin_effort is not None else get_effort_level()
             if effort:
                 # xhigh and max are Opus 4.7 / top-tier (Claude Code
                 # v2.1.111+). Fall back to effort_high when a custom
