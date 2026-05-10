@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-05-09
+
+### Added
+- **Terminal width detection fallback chain** — Claude Code spawns the statusLine command as a subprocess with stdin piped (no TTY, no `COLUMNS` env var), so naive `shutil.get_terminal_size()` always returns the fallback `(100, 24)`. Result: a user with a 165-col terminal would only see ~83 chars on Line 2, with sections like `rate_limits`, `context_size`, `clock`, `effort`, `version`, `last:`, `style:`, `dirs:` silently hidden. New `_detect_terminal_width()` tries 7 signals in order until one returns a plausible value: stdin `terminal.columns` (forward-compat for whenever Anthropic ships it) → `COLUMNS` env → `shutil.get_terminal_size` → `os.get_terminal_size(fd)` for stderr/stdout/stdin → `stty size < /dev/tty` → `tput cols 2>/dev/tty` → existing `_COMPACT_LAYOUT_MIN_COLS` fallback. Plausible-range guard (20–4000 cols, wide enough for ultrawide / 8K / multi-monitor tmux setups) rejects 0, negative, or absurd values from any source. Each step is wrapped in try/except so missing tools / closed `/dev/tty` fall through silently. Tracked upstream at [anthropics/claude-code#22115](https://github.com/anthropics/claude-code/issues/22115).
+- 12 new tests for the width detection — 11 unit tests (`TestDetectTerminalWidth`: each fallback step, boundary values 20/4000, implausible-input rejection, garbage env vars, non-dict stdin shapes, 2000-col ultrawide acceptance) plus 1 end-to-end render test (`TestRenderUsesDetectedWidth`) that proves a 165-col terminal now shows recovered sections (`(1000K)`, `effort:xhigh`).
+- `--doctor` now reports both the naive `shutil` width and the detected fallback width side-by-side, so users can see whether our recovery worked on their box.
+
+### Fixed
+- **Defensive guard against upstream rate_limits bug** ([anthropics/claude-code#52326](https://github.com/anthropics/claude-code/issues/52326), still open) — on a fresh 5h or 7d window with no usage data yet, Claude Code returns the `resets_at` epoch timestamp (~1.7e9) in `used_percentage` instead of 0/null. Previously our `clamp(0,100)` silently turned this into a false `5h:100% (red)` alarm on every fresh session for Pro/Max subscribers. Now values >= 1e6 (the epoch-timestamp pattern, 7+ orders of magnitude above any plausible percentage) are treated as "no data yet" and the section is hidden. Values 101-999999 still flow through to the renderer's clamp(0,100) — these are NOT the bug pattern and could be a future Anthropic "overage" indicator above 100% that we shouldn't pre-emptively hide.
+- 6 new tests in `TestRateLimitsEpochTimestampGuard` covering 5h epoch hidden, 7d epoch hidden, boundary at 100 (legitimate maxed value passes), boundary at 1e6 (just hits the guard), end-to-end render of the bugged value, and that legitimate values pass through.
+
+### Notes
+- Together these two fixes are the most user-visible improvement since v0.5.4 — every claude-status user with a wide terminal will see significantly more sections after upgrading, with no config required.
+- Closes #79.
+
 ## [0.5.6] - 2026-04-24
 
 ### Added

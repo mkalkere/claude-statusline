@@ -226,6 +226,10 @@ The status line automatically adapts to your terminal width via a two-stage proc
 
 The bar, tokens, cost, branch, and `!CTX` warning are always preserved — even at extreme widths, the statusline keeps its core identity.
 
+### Detecting your real terminal width
+
+Claude Code spawns the statusLine command as a subprocess with stdin piped — there is no TTY and no `COLUMNS` env var, so naive width detection always returns the fallback. Until Anthropic ships terminal dimensions in the stdin JSON ([anthropics/claude-code#22115](https://github.com/anthropics/claude-code/issues/22115), still open), claude-status walks a fallback chain to recover the real width: stdin `terminal.columns` → `COLUMNS` env → `shutil.get_terminal_size` → `os.get_terminal_size(fd)` → `stty size < /dev/tty` → `tput cols 2>/dev/tty`. Run `claude-status --doctor` to see which signal won on your machine.
+
 This design exists because Claude Code's TUI uses Ink `<Text wrap="truncate">` on the statusline (anthropics/claude-code#28750, still unaddressed upstream): if Line 1 overflows the terminal, Line 2 is silently dropped. Measuring our actual rendered width and dropping low-priority sections one at a time prevents this without sacrificing useful information on wider terminals.
 
 ## Manual Configuration
