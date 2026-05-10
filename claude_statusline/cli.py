@@ -726,37 +726,36 @@ def _detect_terminal_width(data=None):
         except (OSError, AttributeError):
             continue
 
-    # 5. stty size < /dev/tty — most reliable POSIX path. Captures
-    # the controlling terminal's real width even when stdin/stdout
-    # are pipes. /dev/tty doesn't exist on Windows, where stty is
-    # also typically absent — both raise FileNotFoundError, caught.
+    # 5+6. stty size / tput cols against /dev/tty — the most reliable
+    # POSIX path. Captures the controlling terminal's real width even
+    # when stdin/stdout are pipes. /dev/tty doesn't exist on Windows,
+    # where stty/tput are also typically absent — all of these raise
+    # FileNotFoundError or OSError, caught and fall through.
+    #
+    # The /dev/tty open is shared across both subprocesses so we pay
+    # the open() syscall once; if it fails we skip both probes
+    # atomically. stty is tried first because its output format
+    # ("rows cols") is more uniform across platforms; tput is the
+    # backstop for systems where stty isn't installed but ncurses is.
     try:
         with open("/dev/tty", "r") as tty:
-            result = subprocess.run(
-                ["stty", "size"], stdin=tty,
-                capture_output=True, text=True, timeout=1,
-            )
-        if result.returncode == 0:
-            parts = result.stdout.strip().split()
-            if len(parts) == 2:
-                cols = int(parts[1])
-                if _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
-                    return cols
-    except (OSError, ValueError, subprocess.SubprocessError, FileNotFoundError):
-        pass
-
-    # 6. tput cols 2>/dev/tty — alternate path some systems have.
-    try:
-        with open("/dev/tty", "r") as tty:
-            result = subprocess.run(
-                ["tput", "cols"], stdin=tty,
-                capture_output=True, text=True, timeout=1,
-            )
-        if result.returncode == 0:
-            cols = int(result.stdout.strip())
-            if _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
-                return cols
-    except (OSError, ValueError, subprocess.SubprocessError, FileNotFoundError):
+            for cmd, parser in (
+                (["stty", "size"], lambda s: int(s.split()[1])),
+                (["tput", "cols"], lambda s: int(s.strip())),
+            ):
+                try:
+                    result = subprocess.run(
+                        cmd, stdin=tty,
+                        capture_output=True, text=True, timeout=1,
+                    )
+                    if result.returncode == 0:
+                        cols = parser(result.stdout)
+                        if _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
+                            return cols
+                except (OSError, ValueError, IndexError,
+                        subprocess.SubprocessError, FileNotFoundError):
+                    continue
+    except (OSError, FileNotFoundError):
         pass
 
     # 7. Last-resort fallback — same value the previous code path used.
