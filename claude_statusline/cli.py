@@ -20,8 +20,8 @@ from .colors import (
     YELLOW, colorize,
 )
 from .formatters import (
-    fmt_burn_rate, fmt_cache_hit_ratio, fmt_cache_pct, fmt_cost, fmt_countdown,
-    fmt_duration, fmt_lines, fmt_speed, fmt_tokens,
+    fmt_burn_rate, fmt_cache_pct, fmt_cost, fmt_countdown, fmt_duration,
+    fmt_lines, fmt_speed, fmt_tokens,
 )
 from .git import (
     get_branch, get_git_extras, get_git_state,
@@ -370,19 +370,6 @@ def _render_sections_named(n, order, theme):
                     colorize("cache:", tc["label"]) + colorize(cache_str, GREEN)
                 )
 
-        elif section == "cache_hit":
-            # Prompt cache hit ratio: of the cacheable input, how much
-            # actually hit the cache. Differs from `cache` (above) which
-            # shows cache_read as a share of total token traffic. This
-            # answers "is my prompt cache-friendly" rather than "is the
-            # cache saving me money." Both can be enabled simultaneously.
-            hit_str = fmt_cache_hit_ratio(cache_read, cache_create, input_tokens)
-            if hit_str:
-                hit_color = tc.get("cache_hit", GREEN)
-                sections.append(
-                    colorize("hit:", tc["label"]) + colorize(hit_str, hit_color)
-                )
-
         elif section == "cost" and cost is not None:
             sections.append(colorize(fmt_cost(cost), tc["cost"]))
 
@@ -705,7 +692,7 @@ _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
     "sessions", "tools", "activity", "latency", "context_size", "session_name",
     "rate_limits", "output_style", "added_dirs", "effort", "git_worktree",
-    "speed", "git_state", "commit_age", "cache_hit",
+    "speed", "git_state", "commit_age",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",
@@ -789,14 +776,14 @@ def _detect_terminal_width_report(data=None):
     silently trims to the fallback width.
 
     Tracked upstream at anthropics/claude-code#22115 (open since Jan
-    2026, no upstream fix). Worse, Claude Code 2.1.139 (2026-05-08)
+    2026, no upstream fix). Worse, Claude Code 2.1.139 (2026-05-11)
     shipped "hooks now run without terminal access," which closed the
     `/dev/tty` escape hatch our stty/tput steps relied on AND caused
     `tput cols` to return its terminfo stub (typically 80) instead of
-    failing — silently regressing the 7-step chain we shipped in
-    v0.5.7. This rewrite adds two defenses: a process-tree walk that
-    reads the controlling terminal of an ancestor process (Linux/macOS),
-    and a stub-detection heuristic that rejects `tput cols == 80` when
+    failing — leaving the earlier fallback chain unable to detect
+    the lie. This rewrite adds two defenses: a process-tree walk that
+    reads the controlling terminal of an ancestor process (Linux), and
+    a stub-detection heuristic that rejects `tput cols == 80` when
     no other TTY probe succeeded. Tracked at #83.
 
     Order (each step caught and ignored on any error):
@@ -805,17 +792,17 @@ def _detect_terminal_width_report(data=None):
        forward-compat for whenever Anthropic adds it.
     2. ``COLUMNS`` env var — some shell wrappers / users export it.
        ``COLUMNS=0`` is rejected and reported distinctly from unset:
-       2.1.139+ sometimes sets it to "0", which is a signal that
-       we're in a no-TTY subprocess (not a missing variable).
+       observed in no-TTY hook subprocesses on 2.1.139+, where the
+       presence-of-zero is itself a signal (not a missing variable).
     3. ``shutil.get_terminal_size()`` honoring ``COLUMNS`` and any
        stdout TTY (rarely TTY in our context but cheap to check).
     4. ``os.get_terminal_size(N)`` against a TTY file descriptor
        (stderr/stdout in case one of them is unexpectedly a TTY).
     5. Process-tree walk: try ``os.get_terminal_size`` on the stderr
-       fd of each ancestor process. Works on Linux/macOS when an
-       ancestor still owns the controlling terminal even though we
-       don't. Independently shipped by Go statuslines (ccstatus,
-       cc-tools) as their primary 2.1.139 workaround.
+       fd of each ancestor process. Works on Linux when an ancestor
+       still owns the controlling terminal even though we don't.
+       macOS lacks an equivalent `/proc/<pid>/fd` exposure and
+       degrades to "checked PPID then bailed."
     6. ``stty size < /dev/tty`` — works on Linux/macOS/WSL when
        ``/dev/tty`` is reachable. Often unreachable on 2.1.139+.
     7. ``tput cols 2>/dev/tty`` — alternate POSIX path. Subject to
@@ -988,7 +975,8 @@ def _detect_terminal_width_report(data=None):
     except (OSError, FileNotFoundError) as exc:
         report.append(("/dev/tty", f"unreachable: {type(exc).__name__}"))
 
-    # 8. Last-resort fallback — same value the previous code path used.
+    # 8. Last-resort fallback — _COMPACT_LAYOUT_MIN_COLS keeps Line 2
+    # readable when no signal is trustworthy.
     report.append(("fallback", f"{_COMPACT_LAYOUT_MIN_COLS} (no signal trusted)"))
     return _COMPACT_LAYOUT_MIN_COLS, report
 
@@ -1030,15 +1018,28 @@ def _detect_width_via_process_tree():
         # This works when the ancestor inherited the controlling
         # terminal — common for the user's shell and Claude Code's
         # main TUI process.
+        #
+        # Low-level os.open with O_NOCTTY + O_NONBLOCK is required:
+        # /proc/<pid>/fd/2 is a symlink to the actual TTY device
+        # (e.g. /dev/pts/3). A plain open() can interact with TTY
+        # job control on some kernels (rare SIGTTIN/SIGTTOU on
+        # background process groups) and could in principle make
+        # the TTY our controlling terminal. O_NOCTTY explicitly
+        # opts out of both behaviors; O_NONBLOCK avoids any block
+        # on devices where open() can stall.
         stderr_path = f"/proc/{pid}/fd/2"
+        fd = -1
         try:
-            with open(stderr_path, "rb") as fh:
-                try:
-                    size = os.get_terminal_size(fh.fileno())
-                    if _TERM_WIDTH_MIN <= size.columns <= _TERM_WIDTH_MAX:
-                        return size.columns, f"pid {pid} stderr"
-                except (OSError, AttributeError):
-                    pass
+            fd = os.open(
+                stderr_path,
+                os.O_RDONLY | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_NONBLOCK", 0),
+            )
+            try:
+                size = os.get_terminal_size(fd)
+                if _TERM_WIDTH_MIN <= size.columns <= _TERM_WIDTH_MAX:
+                    return size.columns, f"pid {pid} stderr"
+            except (OSError, AttributeError):
+                pass
         except (OSError, FileNotFoundError, PermissionError):
             # /proc not present (macOS by default) or fd not readable.
             # On macOS the equivalent of /proc/<pid>/fd is not exposed,
@@ -1046,6 +1047,12 @@ def _detect_width_via_process_tree():
             # That's acceptable: the user gets the safe fallback width,
             # same as before this step existed.
             pass
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
         # Advance to the next ancestor by reading /proc/<pid>/stat
         # (Linux). On macOS this fails and we exit the loop.
@@ -1872,6 +1879,55 @@ def cmd_doctor():
     branch = get_branch()
     print("Git:")
     print("  Branch: {}".format(branch or "(not in a git repo)"))
+    print()
+
+    # Transcript health — useful when diagnosing why the `activity`
+    # section is silently absent. Scans the most-recent transcript
+    # under ~/.claude/projects/ so the user doesn't have to find one
+    # by hand. Skipped silently if the projects dir doesn't exist or
+    # no transcripts are found (legitimate case for first-run users).
+    print("Transcript:")
+    projects_dir = os.path.join(claude_dir, "projects")
+    most_recent = None
+    try:
+        if os.path.isdir(projects_dir):
+            candidates = []
+            for project in os.listdir(projects_dir):
+                project_path = os.path.join(projects_dir, project)
+                if not os.path.isdir(project_path):
+                    continue
+                for name in os.listdir(project_path):
+                    if not name.endswith(".jsonl"):
+                        continue
+                    full = os.path.join(project_path, name)
+                    try:
+                        candidates.append((os.path.getmtime(full), full))
+                    except OSError:
+                        continue
+            if candidates:
+                candidates.sort()
+                most_recent = candidates[-1][1]
+    except OSError:
+        pass
+    if most_recent is None:
+        print("  No transcripts found under ~/.claude/projects/")
+        print("  (The `activity` section needs transcript_path on stdin from Claude Code.)")
+    else:
+        try:
+            size = os.path.getsize(most_recent)
+            mtime = os.path.getmtime(most_recent)
+            age = max(0, time.time() - mtime)
+            print("  Most recent: {}".format(most_recent))
+            print("  Size:        {} bytes".format(size))
+            print("  Modified:    {:.0f}s ago".format(age))
+            # Probe the activity counter against this transcript so
+            # users can see whether parse succeeds end-to-end.
+            from .sessions import get_session_activity_count
+            count = get_session_activity_count(most_recent)
+            print("  Activity:    {} tool_use(s) since last user message".format(count))
+        except (OSError, Exception) as exc:
+            print("  Could not probe transcript: {}: {}".format(
+                type(exc).__name__, exc))
     print()
 
     # Terminal capabilities — show both the naive shutil value AND

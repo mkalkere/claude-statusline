@@ -16,14 +16,19 @@ _TOOL_CACHE_TTL = 10  # seconds — shorter for active session metrics
 _ACTIVITY_CACHE_TTL = 5  # seconds — shortest, this metric is "right now"
 
 # Maximum bytes to tail-read from the session transcript JSONL when
-# counting tool calls since the last user message. 64 KiB comfortably
-# covers a single assistant turn even with multiple large tool inputs
-# (a tool_use block with a 30K-token argument is rare and would still
-# fit in ~30 KiB UTF-8). Going larger would proportionally slow the
-# render hot path on long sessions; smaller risks missing the
-# preceding user message and undercounting. 64 KiB is the smallest
-# safe upper bound for typical Claude Code sessions.
+# counting tool calls since the last user message. 64 KiB is the
+# first attempt; if the tail doesn't reach back to a user message we
+# retry with the expanded cap below. The two-step strategy keeps the
+# render hot path cheap for typical turns (single small reads) but
+# still recovers a correct count when one assistant turn produced
+# very large output (e.g. a long tool_result block).
 _TRANSCRIPT_TAIL_BYTES = 64 * 1024
+# Expanded tail when the initial read missed the preceding user
+# message. 1 MiB comfortably covers a single turn that contains
+# multiple ~100 KiB tool_result blocks — rare but real. Going wider
+# would let pathological transcripts dominate render latency, so we
+# cap here and accept undercount in that extreme edge.
+_TRANSCRIPT_TAIL_BYTES_EXPANDED = 1024 * 1024
 
 _CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
 _SESSIONS_DIR = os.path.join(_CLAUDE_DIR, "sessions")
@@ -237,9 +242,8 @@ def get_session_activity_count(transcript_path):
     Differs from ``get_session_tool_count`` (which counts the whole
     session): this counts only since the most recent ``role: "user"``
     line, so it answers "how many tool calls is the assistant making
-    *right now*" — the active-work signal popularized by Claude HUD.
-    The count resets to 0 when the user sends the next message and
-    ticks up as the assistant uses tools to respond.
+    *right now*." The count resets to 0 when the user sends the next
+    message and ticks up as the assistant uses tools to respond.
 
     Reads only the tail of the transcript file (last
     ``_TRANSCRIPT_TAIL_BYTES``), which:
@@ -267,6 +271,19 @@ def get_session_activity_count(transcript_path):
     if not transcript_path or not isinstance(transcript_path, str):
         return 0
 
+    # Defense-in-depth: transcript_path comes from external JSON. A
+    # buggy upstream or malicious wrapper could pass an arbitrary
+    # path or a symlink that resolves elsewhere. Claude Code writes
+    # transcripts under ~/.claude/ (typically projects/<slug>/...),
+    # so we require the resolved real path to live there. Matches the
+    # _SESSION_ID_RE regex pattern already used for session IDs.
+    try:
+        real = os.path.realpath(transcript_path)
+        if not real.startswith(_CLAUDE_DIR + os.sep) and real != _CLAUDE_DIR:
+            return 0
+    except (OSError, ValueError):
+        return 0
+
     # Cache by hashed path. Multiple sessions in the same wall-clock
     # second would collide on the same cache file without this.
     cache_key = "activity_{}".format(
@@ -279,49 +296,95 @@ def get_session_activity_count(transcript_path):
         return cached.get("count", 0)
 
     count = _count_activity_from_transcript(transcript_path)
-    _write_cache(cache_key, {"count": count})
+    # Cache only non-zero counts. A zero can mean either "no activity
+    # in current turn" (legitimate) or "parse failed / file missing /
+    # transient rotation" (transient, recovers within ms). Caching
+    # zero would freeze that transient state for the full TTL window
+    # and the user would see no activity for up to 5s after recovery.
+    # Non-zero counts are stable enough to cache; an active turn keeps
+    # producing tool_uses so even a "stale" cached 3 will be
+    # superseded by the next refresh.
+    if count > 0:
+        _write_cache(cache_key, {"count": count})
     return count
 
 
 def _count_activity_from_transcript(transcript_path):
     """Pure-function tail-read + parse. No caching — that's the caller's
     job. Split out so tests can exercise the parse logic without
-    having to defeat the TTL cache."""
+    having to defeat the TTL cache.
+
+    Reads the last _TRANSCRIPT_TAIL_BYTES; if the preceding user
+    message wasn't in that window, retries once with the expanded cap
+    so single-turn output up to ~1 MiB still produces a correct count.
+    """
     try:
         if not os.path.isfile(transcript_path):
             return 0
         size = os.path.getsize(transcript_path)
         if size <= 0:
             return 0
+    except (OSError, IOError):
+        return 0
 
-        # Seek to the tail. On a small file, read from the start.
-        start = max(0, size - _TRANSCRIPT_TAIL_BYTES)
+    # First attempt: cheap 64 KiB tail. Covers the vast majority of
+    # turns. Only retry with the expanded cap if no user message was
+    # found in the initial window.
+    count = _parse_transcript_tail(transcript_path, size, _TRANSCRIPT_TAIL_BYTES)
+    if count is not None:
+        return count
+
+    # Expanded retry — but only if the file is bigger than the first
+    # cap (otherwise the result is identical and we'd waste a read).
+    if size > _TRANSCRIPT_TAIL_BYTES:
+        count = _parse_transcript_tail(
+            transcript_path, size, _TRANSCRIPT_TAIL_BYTES_EXPANDED)
+        if count is not None:
+            return count
+
+    # Two reads still couldn't find a user message — the assistant
+    # turn is genuinely larger than 1 MiB, or the file is malformed.
+    # Return 0 rather than count window contents (which would belong
+    # to a previous turn).
+    return 0
+
+
+def _parse_transcript_tail(transcript_path, size, tail_bytes):
+    """Read tail_bytes from the end of transcript_path and count
+    tool_use blocks since the most recent user message.
+
+    Returns the count (int >= 0) when a user message was found in the
+    window, or None when no user message was found (signals to the
+    caller that a wider window might find one).
+    """
+    try:
+        start = max(0, size - tail_bytes)
         with open(transcript_path, "rb") as f:
             f.seek(start)
             chunk = f.read()
     except (OSError, IOError):
         return 0
 
-    # Drop the first (possibly truncated) line when we started mid-file.
-    # If we read from byte 0 the first line is whole and we keep it.
     try:
         text = chunk.decode("utf-8", errors="replace")
     except (UnicodeDecodeError, AttributeError):
         return 0
 
+    # Discard the first (possibly truncated) line when we started
+    # mid-file. The special case: if the very first byte of our chunk
+    # is '\n', the previous line ended exactly at `start - 1` and our
+    # `lines[0]` is the empty string — no truncation, no discard
+    # needed. Without this guard we'd drop a real complete line.
     lines = text.split("\n")
-    if start > 0 and lines:
+    if start > 0 and lines and not chunk.startswith(b"\n"):
         lines = lines[1:]
 
-    # Walk backwards: find the most recent user message, then count
-    # tool_use blocks on assistant messages between that point and EOF.
-    # We pre-filter cheaply on a substring to avoid json.loads on every
-    # line (a session JSONL can be thousands of lines).
+    # Walk backwards: find the most recent user message. Pre-filter
+    # on a cheap substring to avoid json.loads on every line (a
+    # session JSONL can be thousands of lines).
     last_user_idx = -1
     for i in range(len(lines) - 1, -1, -1):
         line = lines[i]
-        # Quick reject: every record we care about contains a role
-        # field. The actual JSON check happens only on candidates.
         if '"role"' not in line or '"user"' not in line:
             continue
         try:
@@ -330,20 +393,23 @@ def _count_activity_from_transcript(transcript_path):
             continue
         # Claude Code's transcript wraps the role on the inner message
         # object, not the outer envelope, on most schema versions.
-        msg = entry.get("message") if isinstance(entry, dict) else None
-        if isinstance(msg, dict) and msg.get("role") == "user":
-            last_user_idx = i
-            break
-        # Fallback: some schema versions put role at the outer envelope.
-        if isinstance(entry, dict) and entry.get("role") == "user":
-            last_user_idx = i
-            break
+        if isinstance(entry, dict):
+            msg = entry.get("message")
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                last_user_idx = i
+                break
+            # Fallback: some schema versions put role at the outer envelope.
+            if entry.get("role") == "user":
+                last_user_idx = i
+                break
 
-    # No user message in our tail window — return 0 rather than count
-    # the whole window as "activity," which would be misleading.
+    # No user message in this window — signal the caller that a wider
+    # read might find one.
     if last_user_idx < 0:
-        return 0
+        return None
 
+    # Count tool_use blocks on assistant messages between the user
+    # message and EOF.
     count = 0
     for line in lines[last_user_idx + 1:]:
         if '"tool_use"' not in line:

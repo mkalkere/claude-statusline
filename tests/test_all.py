@@ -4988,6 +4988,107 @@ class TestClaudeCode2139WidthRegression(unittest.TestCase):
         self.assertNotIn(120, _TPUT_STUB_VALUES)
         self.assertNotIn(200, _TPUT_STUB_VALUES)
 
+    def test_stub_heuristic_not_triggered_when_prior_tty_signal_exists(self):
+        """The inverse of test_tput_stub_80_rejected_when_no_tty_signal:
+        if any earlier step succeeded with a TTY probe, then a tput
+        cols=80 reading is a REAL 80-col terminal, not a stub —
+        accept it.
+
+        Without this test, the heuristic could be inverted
+        (`and any_tty_probe_succeeded` instead of `and not …`) and
+        every existing test would still pass.
+
+        We don't simulate the full chain — we just verify the gating
+        flag's intent by checking the `any_tty_probe_succeeded`
+        condition in the source. This is a structural test, not
+        behavioral: it ensures the heuristic's PRECONDITION (no prior
+        TTY signal) is in the code, so a future refactor that drops
+        the gating fails this test.
+        """
+        import inspect
+        from claude_statusline import cli as cli_mod
+        source = inspect.getsource(cli_mod._detect_terminal_width_report)
+        # The gating condition is the difference between "reject every
+        # tput 80" (would harm real 80-col users) and "reject tput 80
+        # only when no other TTY signal succeeded" (correct).
+        self.assertIn("any_tty_probe_succeeded", source,
+            "stub heuristic must gate on whether any earlier TTY probe "
+            "succeeded — otherwise users with a real 80-col terminal would "
+            "be miscategorized when other signals also fail")
+        # Must check the FALSE branch (no signal), not the true branch.
+        self.assertIn("not any_tty_probe_succeeded", source,
+            "stub heuristic must reject only when no earlier TTY signal "
+            "succeeded — guard against accidental inversion of the gate")
+
+    def test_stub_heuristic_actually_reachable_on_platform(self):
+        """The headline test_tput_stub_80_rejected_when_no_tty_signal
+        monkey-patches __builtins__["open"]. On Windows, if that
+        patch fails to take (some Python build configs), the chain
+        never opens /dev/tty and the stub branch is never reached —
+        the assertion passes trivially via the safe fallback path.
+
+        This test makes the silent skip loud: the report MUST contain
+        a tput cols entry that mentions 'stub' or 'rejected', proving
+        the stub branch actually fired. Without this, the green CI
+        on Windows could be hiding a broken patch.
+        """
+        import subprocess as subprocess_mod
+        import claude_statusline.cli as cli_mod
+
+        orig_run = subprocess_mod.run
+        orig_open = __builtins__["open"] if isinstance(__builtins__, dict) else open
+
+        class FakeTTY:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return ""
+            def fileno(self): return 0
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[0] == "stty":
+                return subprocess_mod.CompletedProcess(cmd, 1, "", "")
+            if cmd[0] == "tput":
+                return subprocess_mod.CompletedProcess(cmd, 0, "80\n", "")
+            return orig_run(cmd, *args, **kwargs)
+
+        def fake_open(path, *args, **kwargs):
+            if path == "/dev/tty":
+                return FakeTTY()
+            return orig_open(path, *args, **kwargs)
+
+        cli_mod.subprocess.run = fake_run
+        os.environ.pop("COLUMNS", None)
+        cli_builtins = cli_mod.__builtins__
+        cli_open_was_dict = isinstance(cli_builtins, dict)
+        cli_orig_open = (cli_builtins["open"] if cli_open_was_dict
+                         else cli_builtins.open)
+        try:
+            if cli_open_was_dict:
+                cli_builtins["open"] = fake_open
+            else:
+                cli_builtins.open = fake_open
+            _result, report = cli_mod._detect_terminal_width_report({})
+        finally:
+            cli_mod.subprocess.run = orig_run
+            if cli_open_was_dict:
+                cli_builtins["open"] = cli_orig_open
+            else:
+                cli_builtins.open = cli_orig_open
+
+        # Find the tput entry. If it's not there, the patch silently
+        # failed and the headline test would have green-lit a broken
+        # build. Make that LOUD.
+        tput_entries = [s for label, s in report if label == "tput cols"]
+        self.assertTrue(tput_entries,
+            "tput cols step must have produced a report entry — if absent, "
+            "the /dev/tty open path failed to reach the stty/tput block "
+            "and the stub-rejection assertion in the headline test is "
+            "vacuous on this platform")
+        self.assertTrue(
+            any("stub" in s or "rejected" in s for s in tput_entries),
+            "tput cols must show the stub-rejection signature ('stub' or "
+            "'rejected'); got: {!r}".format(tput_entries))
+
     # --- Process-tree walk --------------------------------------------
 
     def test_process_tree_walk_skipped_on_windows(self):
@@ -5057,109 +5158,6 @@ class TestClaudeCode2139WidthRegression(unittest.TestCase):
         self.assertIsInstance(result_no_arg, int)
 
 
-class TestCacheHitRatio(unittest.TestCase):
-    """fmt_cache_hit_ratio and the `cache_hit` section.
-
-    Differs from existing fmt_cache_pct: this is cache_read divided
-    by the cacheable input (cache_read + cache_create + input), not
-    by total token traffic. Answers "is my prompt structure cache-
-    friendly" rather than "is the cache saving me money." Both can
-    be enabled simultaneously without overlap.
-    """
-
-    def test_all_zero_returns_empty(self):
-        """First user turn, before any cache exists, must not display."""
-        from claude_statusline.formatters import fmt_cache_hit_ratio
-        self.assertEqual(fmt_cache_hit_ratio(0, 0, 0), "")
-        self.assertEqual(fmt_cache_hit_ratio(None, None, None), "")
-
-    def test_perfect_hit(self):
-        """All input came from cache → 100%."""
-        from claude_statusline.formatters import fmt_cache_hit_ratio
-        self.assertEqual(fmt_cache_hit_ratio(1000, 0, 0), "100%")
-
-    def test_mixed(self):
-        """800 hit, 100 written, 100 fresh input → 800/1000 = 80%."""
-        from claude_statusline.formatters import fmt_cache_hit_ratio
-        self.assertEqual(fmt_cache_hit_ratio(800, 100, 100), "80%")
-
-    def test_no_hits(self):
-        """Cache being built, none being read yet → 0%."""
-        from claude_statusline.formatters import fmt_cache_hit_ratio
-        self.assertEqual(fmt_cache_hit_ratio(0, 500, 100), "0%")
-
-    def test_none_fields_treated_as_zero(self):
-        """JSON fields that didn't ship in older Claude Code versions
-        come through as None — must not crash."""
-        from claude_statusline.formatters import fmt_cache_hit_ratio
-        self.assertEqual(fmt_cache_hit_ratio(None, None, 100), "0%")
-        self.assertEqual(fmt_cache_hit_ratio(100, None, None), "100%")
-
-    def test_cache_hit_section_renders(self):
-        """End-to-end: enabling the cache_hit section produces a
-        visible 'hit:N%' fragment in the rendered statusline."""
-        import claude_statusline.cli as cli_mod
-        from claude_statusline.themes import THEMES
-
-        # Mutate THEMES["default"] temporarily — render() takes a
-        # theme name, not a theme dict, so this is the canonical way
-        # to test custom layouts (matches existing test pattern at
-        # tests/test_all.py:2455).
-        orig_line2 = THEMES["default"]["line2"]
-        orig_branch = cli_mod.get_branch
-        cli_mod.get_branch = lambda: "main"
-        try:
-            THEMES["default"]["line2"] = ["cache_hit", "branch"]
-            data = {
-                "context_window": {
-                    "current_usage": {
-                        "input_tokens": 100,
-                        "cache_read_input_tokens": 800,
-                        "cache_creation_input_tokens": 100,
-                    },
-                    "context_window_size": 200_000,
-                },
-                "git_branch": "main",
-            }
-            output = cli_mod.render(data, "default")
-            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
-            self.assertIn("hit:", plain,
-                "cache_hit section must render 'hit:' label when enabled")
-            self.assertIn("80%", plain,
-                "cache_hit must render the computed ratio")
-        finally:
-            THEMES["default"]["line2"] = orig_line2
-            cli_mod.get_branch = orig_branch
-
-    def test_cache_hit_section_hidden_when_no_input(self):
-        """No tokens of any kind → section silently absent. Must NOT
-        crash and must NOT emit a 'hit:' label with no value."""
-        import claude_statusline.cli as cli_mod
-        from claude_statusline.themes import THEMES
-
-        orig_line2 = THEMES["default"]["line2"]
-        orig_branch = cli_mod.get_branch
-        cli_mod.get_branch = lambda: "main"
-        try:
-            THEMES["default"]["line2"] = ["cache_hit", "branch"]
-            data = {
-                "context_window": {
-                    "current_usage": {
-                        "input_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                        "cache_creation_input_tokens": 0,
-                    },
-                },
-                "git_branch": "main",
-            }
-            output = cli_mod.render(data, "default")
-            self.assertNotIn("hit:", output,
-                "cache_hit must be silent when no cacheable tokens exist")
-        finally:
-            THEMES["default"]["line2"] = orig_line2
-            cli_mod.get_branch = orig_branch
-
-
 class TestActivityCounter(unittest.TestCase):
     """Transcript-tail-read tool-call counter (the `activity` section).
 
@@ -5170,11 +5168,16 @@ class TestActivityCounter(unittest.TestCase):
     """
 
     def _write_transcript(self, lines):
-        """Helper: write a JSONL transcript and return its path. The
-        tmpdir is cleaned up at tearDown."""
+        """Helper: write a JSONL transcript and return its path.
+
+        Transcripts MUST live under ~/.claude/ for the realpath
+        validation in get_session_activity_count to accept them.
+        We create a temp subdirectory under ~/.claude/ and clean up
+        at tearDown.
+        """
         f = tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", suffix=".jsonl",
-            delete=False, newline="",
+            delete=False, newline="", dir=self._test_dir,
         )
         for entry in lines:
             f.write(json.dumps(entry) + "\n")
@@ -5183,10 +5186,20 @@ class TestActivityCounter(unittest.TestCase):
         return f.name
 
     def setUp(self):
+        from claude_statusline import sessions as sessions_mod
+        # Create a transient directory under ~/.claude/ so transcripts
+        # written by tests pass the realpath validation. We mkdir
+        # _CLAUDE_DIR itself if needed (some CI runners don't have it).
+        try:
+            os.makedirs(sessions_mod._CLAUDE_DIR, exist_ok=True)
+        except OSError:
+            pass
+        self._test_dir = tempfile.mkdtemp(
+            prefix="claude-status-test-", dir=sessions_mod._CLAUDE_DIR,
+        )
         self._created_paths = []
         # Clear the activity cache for each test so we don't get
         # cross-test contamination from the 5s TTL.
-        from claude_statusline import sessions as sessions_mod
         try:
             cache_dir = sessions_mod._cache_dir()
             if os.path.isdir(cache_dir):
@@ -5205,6 +5218,10 @@ class TestActivityCounter(unittest.TestCase):
                 os.remove(p)
             except OSError:
                 pass
+        try:
+            os.rmdir(self._test_dir)
+        except OSError:
+            pass
 
     # --- happy path ---------------------------------------------------
 
@@ -5290,23 +5307,23 @@ class TestActivityCounter(unittest.TestCase):
             ]}}) + "\n")
         self.assertEqual(_count_activity_from_transcript(path), 1)
 
-    def test_tail_read_only(self):
-        """A multi-MB transcript must not be read in full — the tail-
-        read cap is what keeps render latency single-digit ms. Verify
-        the cap is respected by writing a file just over the cap."""
+    def test_expanded_retry_when_initial_tail_misses_user(self):
+        """When the cheap 64 KiB tail doesn't reach back to a user
+        message, the function retries with the expanded 1 MiB cap.
+        Real-world scenario: an assistant turn produced > 64 KiB of
+        output (long tool_result block). Without the retry we'd
+        return 0 and the activity counter would silently vanish
+        mid-turn."""
         from claude_statusline.sessions import (
             _TRANSCRIPT_TAIL_BYTES,
             _count_activity_from_transcript,
         )
-        # Write padding before the user message so the user message is
-        # outside the tail window — should return 0 (no user in tail).
+        # User message at start, then enough padding to push it well
+        # beyond the 64 KiB initial cap but inside the 1 MiB expanded
+        # cap, then a fresh tool_use.
         path = self._write_transcript([
-            {"message": {"role": "user", "content": "old"}},
+            {"message": {"role": "user", "content": "go"}},
         ])
-        # Append enough padding lines that the user message is outside
-        # the tail window, then add a fresh assistant tool_use that
-        # falls inside the tail. The function should return 0 because
-        # no user message exists within the tail window.
         padding_line = json.dumps({
             "message": {"role": "assistant", "content": [
                 {"type": "text", "text": "x" * 1000},
@@ -5320,11 +5337,162 @@ class TestActivityCounter(unittest.TestCase):
             f.write(json.dumps({"message": {"role": "assistant", "content": [
                 {"type": "tool_use", "name": "Bash"},
             ]}}) + "\n")
-        # The user message at the start of the file is now beyond our
-        # tail window, so we return 0 rather than the misleading count
-        # of activity from a previous turn.
+        # Initial 64 KiB tail misses the user; expanded 1 MiB retry
+        # finds it and counts the tool_use.
+        self.assertEqual(_count_activity_from_transcript(path), 1,
+            "expanded retry must find a user message in the 1 MiB window")
+
+    def test_outer_envelope_role_schema_supported(self):
+        """Some Claude Code schema versions put `role` at the outer
+        envelope rather than under `message`. The fallback branch at
+        sessions.py:_parse_transcript_tail must accept this shape.
+        Without this test, that branch was dead code in the suite."""
+        from claude_statusline.sessions import _count_activity_from_transcript
+        # NOTE: write raw JSONL because _write_transcript wraps in
+        # {"message": ...} which is the OTHER schema.
+        path = self._write_transcript([])  # creates the file
+        with open(path, "w", encoding="utf-8") as f:
+            # Outer-envelope role: no 'message' wrapper.
+            f.write(json.dumps({"role": "user", "content": "go"}) + "\n")
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}}) + "\n")
+        self.assertEqual(_count_activity_from_transcript(path), 1,
+            "outer-envelope role:user must be recognized as a user message")
+
+    def test_consecutive_user_messages_use_most_recent(self):
+        """Real sessions sometimes have adjacent user messages
+        (system-injected reminders, retries). The walk-backwards
+        loop must pick the MOST RECENT user message — counting only
+        tool_uses after the LAST one, not the first."""
+        from claude_statusline.sessions import _count_activity_from_transcript
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "first"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},  # would be counted if we picked first user
+                {"type": "tool_use", "name": "Read"},
+            ]}},
+            {"message": {"role": "user", "content": "second"}},
+            {"message": {"role": "user", "content": "third"}},  # consecutive
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Edit"},  # only this counts
+            ]}},
+        ])
+        self.assertEqual(_count_activity_from_transcript(path), 1,
+            "consecutive user messages: count only from the most recent")
+
+    def test_user_message_containing_literal_tool_use_text(self):
+        """A user message body that contains the literal text
+        '"tool_use"' (e.g., the user asking 'what does "tool_use"
+        mean?') must NOT inflate the count. The cheap pre-filter
+        admits it, but the JSON parse + structural check should
+        exclude it."""
+        from claude_statusline.sessions import _count_activity_from_transcript
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": 'what is "tool_use" type?'}},
+            {"message": {"role": "assistant", "content": [
+                # A text block that mentions "tool_use" in its body.
+                {"type": "text", "text": 'the "tool_use" type is a content block'},
+            ]}},
+        ])
         self.assertEqual(_count_activity_from_transcript(path), 0,
-            "tail-read must not reach the user message at the file start")
+            "literal 'tool_use' text in message bodies must not inflate count")
+
+    def test_path_is_directory_returns_zero(self):
+        """transcript_path pointing at a directory (instead of a
+        JSONL file) must return 0, not crash. Guards against an
+        upstream that mistakenly sets transcript_path to the
+        containing folder."""
+        from claude_statusline.sessions import _count_activity_from_transcript
+        # self._test_dir is a real directory under ~/.claude/ — passes
+        # the realpath validation but isn't a file.
+        self.assertEqual(_count_activity_from_transcript(self._test_dir), 0)
+
+    def test_transcript_path_outside_claude_dir_rejected(self):
+        """Defense in depth: transcript_path comes from external JSON.
+        A path outside ~/.claude/ (whether by buggy upstream or
+        symlink escape) must be rejected by get_session_activity_count
+        before any open() is attempted.
+
+        Even though the parse function tolerates arbitrary paths
+        (returns 0 on any error), the caller-side validation is the
+        security boundary that prevents read attempts on /etc/shadow
+        and similar paths.
+        """
+        from claude_statusline.sessions import get_session_activity_count
+        # Use a tempfile outside ~/.claude/ — the standard tmp dir.
+        f = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".jsonl", delete=False)
+        f.write(json.dumps({"message": {"role": "user", "content": "x"}}) + "\n")
+        f.write(json.dumps({"message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash"},
+        ]}}) + "\n")
+        f.close()
+        try:
+            # If validation were missing, this would return 1.
+            self.assertEqual(get_session_activity_count(f.name), 0,
+                "transcript_path outside ~/.claude/ must be rejected by "
+                "the realpath check, not silently read")
+        finally:
+            try:
+                os.remove(f.name)
+            except OSError:
+                pass
+
+    def test_zero_counts_not_cached(self):
+        """A zero count can mean 'no activity' OR 'parse failed,
+        transient file issue.' Caching zero would suppress recovery
+        for the full 5s TTL. Verify zero is NOT cached: an empty
+        file (returns 0) followed by a populated state (returns >0)
+        must show the new count immediately, not a stale 0."""
+        from claude_statusline.sessions import get_session_activity_count
+        # Create a file that initially has no tool_use after the user.
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "go"}},
+        ])
+        first = get_session_activity_count(path)
+        self.assertEqual(first, 0)
+        # Append a tool_use right after — without TTL expiry, a cached
+        # 0 would still be returned. With our non-zero-cache fix, the
+        # function should re-read and find the new tool_use.
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}}) + "\n")
+        second = get_session_activity_count(path)
+        self.assertEqual(second, 1,
+            "zero result must NOT be cached — recovery should be immediate, "
+            "not blocked behind the 5s TTL")
+
+    def test_returns_zero_when_turn_exceeds_expanded_cap(self):
+        """When even the expanded 1 MiB retry can't find a user
+        message, we return 0 — this is the genuine giving-up case
+        for pathologically large single turns. Prevents misleading
+        counts of activity from a previous turn."""
+        from claude_statusline.sessions import (
+            _TRANSCRIPT_TAIL_BYTES_EXPANDED,
+            _count_activity_from_transcript,
+        )
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "old"}},
+        ])
+        padding_line = json.dumps({
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "x" * 1000},
+            ]},
+        }) + "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            bytes_written = 0
+            # Push the user message past the 1 MiB expanded cap.
+            while bytes_written < _TRANSCRIPT_TAIL_BYTES_EXPANDED + 10_000:
+                f.write(padding_line)
+                bytes_written += len(padding_line.encode("utf-8"))
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}}) + "\n")
+        self.assertEqual(_count_activity_from_transcript(path), 0,
+            "even the expanded retry cannot reach the user — return 0 rather "
+            "than misleadingly count a previous turn's activity")
 
     def test_partial_first_line_discarded(self):
         """When reading from a tail offset (start > 0), the first line
