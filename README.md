@@ -46,7 +46,8 @@ The setup wizard walks you through theme selection, budget configuration, and in
 |---------|-------------|----------------|
 | Context Bar | `[████████░░░░░░░░░░░░]` | Green/yellow/red adaptive — know your context budget instantly |
 | Token Counts | `in:245K out:18K` | Human-readable (K/M) — no squinting at raw numbers |
-| Cache Efficiency | `cache:41%` | See how much prompt cache is saving you |
+| Cache Efficiency | `cache:41%` | See how much prompt cache is saving you (cache_read as share of total tokens) |
+| Cache Hit Ratio | `hit:87%` | Of cacheable input, how much actually hit the cache — answers "is my prompt cache-friendly?" (opt-in) |
 | Cost | `$0.73` | Session cost in real-time — cents for small, dollars for large |
 | Budget | `$0.73/$10` | Color-coded daily budget tracker (green/yellow/red) |
 | Burn Rate | `burn:37K/min` | Tokens/min consumption — unique to claude-status |
@@ -68,6 +69,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Token Speed | `speed:1.2K/s` | Token throughput (tokens/sec) |
 | Git Worktree | `gwt` | Indicator when inside a native git worktree |
 | Tool Calls | `tools:42` | Number of tool calls in current session |
+| Activity | `act:3` | Live tool-call counter for the current assistant turn — resets on each user prompt (opt-in; reads transcript tail, 5s cache, hidden when zero) |
 | Sessions Today | `sessions:3` | How many sessions you've started today |
 | Session Name | `✦ refactor auth` | Custom session name (via `--name` or `/rename`) |
 | Vim Mode | `NORMAL` | Blue for NORMAL, green for INSERT |
@@ -228,7 +230,9 @@ The bar, tokens, cost, branch, and `!CTX` warning are always preserved — even 
 
 ### Detecting your real terminal width
 
-Claude Code spawns the statusLine command as a subprocess with stdin piped — there is no TTY and no `COLUMNS` env var, so naive width detection always returns the fallback. Until Anthropic ships terminal dimensions in the stdin JSON ([anthropics/claude-code#22115](https://github.com/anthropics/claude-code/issues/22115), still open), claude-status walks a fallback chain to recover the real width: stdin `terminal.columns` → `COLUMNS` env → `shutil.get_terminal_size` → `os.get_terminal_size(fd)` → `stty size < /dev/tty` → `tput cols 2>/dev/tty`. Run `claude-status --doctor` to see which signal won on your machine.
+Claude Code spawns the statusLine command as a subprocess with stdin piped — there is no TTY and no `COLUMNS` env var, so naive width detection always returns the fallback. Until Anthropic ships terminal dimensions in the stdin JSON ([anthropics/claude-code#22115](https://github.com/anthropics/claude-code/issues/22115), still open), claude-status walks a fallback chain to recover the real width: stdin `terminal.columns` → `COLUMNS` env → `shutil.get_terminal_size` → `os.get_terminal_size(fd)` → **process-tree walk** (find a TTY-owning ancestor process, Linux only) → `stty size < /dev/tty` → `tput cols 2>/dev/tty`. Run `claude-status --doctor` to see which signal won on your machine and which signals lied or fell through.
+
+**Claude Code 2.1.139+ regression handling.** 2.1.139 (2026-05-08) shipped "hooks now run without terminal access," which closed the `/dev/tty` escape hatch and — more dangerously — caused `tput cols` to confidently return its terminfo default (80 for most `TERM` values) instead of failing. v0.6.0 added two specific defenses: a stub-detection heuristic that rejects `tput cols == 80` when no earlier TTY probe succeeded (the 2.1.139 fingerprint), and a process-tree walk that reads the controlling terminal of an ancestor process on Linux. Without these, users on 2.1.139 with a 220-col terminal were silently rendering an 80-col layout.
 
 This design exists because Claude Code's TUI uses Ink `<Text wrap="truncate">` on the statusline (anthropics/claude-code#28750, still unaddressed upstream): if Line 1 overflows the terminal, Line 2 is silently dropped. Measuring our actual rendered width and dropping low-priority sections one at a time prevents this without sacrificing useful information on wider terminals.
 

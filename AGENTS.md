@@ -76,7 +76,7 @@ pip uninstall -y claude-status
 claude-status --doctor
 ```
 
-Prints Python version, install path, settings.json status, config files, write permissions, terminal capabilities, and the current responsive-layout bucket. Run this first when reporting any issue.
+Prints Python version, install path, settings.json status, config files, write permissions, terminal capabilities, the current responsive-layout bucket, and the **per-step width-detection report** (added in v0.6.0 — shows which signal won and which were rejected, e.g. `tput cols: 80 (likely terminfo stub — rejected; no earlier TTY signal)`). Run this first when reporting any issue, especially "wrong layout on a wide terminal" on Claude Code 2.1.139+.
 
 ## Key facts for agents
 
