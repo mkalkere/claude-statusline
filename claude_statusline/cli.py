@@ -28,7 +28,7 @@ from .git import (
     get_last_commit_age_ms, get_remote_url,
 )
 from .sessions import (
-    _VALID_EFFORT_LEVELS,
+    _CLAUDE_DIR, _CLAUDE_DIR_REAL, _VALID_EFFORT_LEVELS,
     _count_activity_with_status,
     _read_cache, _write_cache,
     get_budget_config, get_clickable_links_enabled, get_compaction_threshold,
@@ -1888,6 +1888,15 @@ def cmd_doctor():
     # by hand. Skipped silently if the projects dir doesn't exist or
     # no transcripts are found (legitimate case for first-run users).
     print("Transcript:")
+    # If ~/.claude is a symlink to a non-existent target (e.g.
+    # unmounted volume, archived dir), every downstream check
+    # silently returns "file missing" with no hint that the root
+    # cause is the broken symlink. Flag that here so users debugging
+    # a vanished `activity` section see the actual root cause.
+    if _CLAUDE_DIR_REAL != _CLAUDE_DIR and not os.path.exists(_CLAUDE_DIR_REAL):
+        print("  WARNING: ~/.claude is a symlink to a non-existent target:")
+        print("           {} -> {}".format(_CLAUDE_DIR, _CLAUDE_DIR_REAL))
+        print("           Mount the target or fix the symlink to restore activity counting.")
     projects_dir = os.path.join(claude_dir, "projects")
     most_recent = None
     try:

@@ -14,6 +14,12 @@ import time
 _CACHE_TTL = 30  # seconds — longer than git cache since this is heavier
 _TOOL_CACHE_TTL = 10  # seconds — shorter for active session metrics
 _ACTIVITY_CACHE_TTL = 5  # seconds — shortest, this metric is "right now"
+# Longer TTL for the "gave up — turn larger than 1 MiB window" case.
+# This is a per-render 1 MiB tail read that will keep failing the
+# same way until the user sends the next prompt. 30s caps the worst-
+# case cost; if the user IS sending prompts every 5s the cache still
+# expires naturally on the next legitimate parse-success.
+_ACTIVITY_GAVE_UP_TTL = 30
 
 # Maximum bytes to tail-read from the session transcript JSONL when
 # counting tool calls since the last user message. 64 KiB is the
@@ -301,28 +307,43 @@ def get_session_activity_count(transcript_path):
     except (OSError, ValueError):
         return 0
 
-    # Cache by hashed path. Multiple sessions in the same wall-clock
-    # second would collide on the same cache file without this.
-    cache_key = "activity_{}".format(
-        hashlib.md5(
-            transcript_path.encode("utf-8", errors="replace")
-        ).hexdigest()[:12]
-    )
+    # Cache by hashed path. Two distinct keys for two TTL regimes:
+    # the standard short-TTL key for "live activity" caching, and a
+    # separate long-TTL "gave up" key that prevents re-reading 1 MiB
+    # on every render of a single huge assistant turn. The gave-up
+    # key is checked first so a long turn doesn't trigger a 1 MiB
+    # read just to discover what we already know.
+    path_hash = hashlib.md5(
+        transcript_path.encode("utf-8", errors="replace")
+    ).hexdigest()[:12]
+    cache_key = "activity_{}".format(path_hash)
+    gave_up_key = "activity_gaveup_{}".format(path_hash)
+
+    gave_up = _read_cache(gave_up_key, ttl=_ACTIVITY_GAVE_UP_TTL)
+    if gave_up is not None:
+        return 0
+
     cached = _read_cache(cache_key, ttl=_ACTIVITY_CACHE_TTL)
     if cached is not None:
         return cached.get("count", 0)
 
-    count = _count_activity_from_transcript(transcript_path)
-    # Cache only non-zero counts. A zero can mean either "no activity
-    # in current turn" (legitimate) or "parse failed / file missing /
-    # transient rotation" (transient, recovers within ms). Caching
-    # zero would freeze that transient state for the full TTL window
-    # and the user would see no activity for up to 5s after recovery.
-    # Non-zero counts are stable enough to cache; an active turn keeps
-    # producing tool_uses so even a "stale" cached 3 will be
-    # superseded by the next refresh.
+    count, status = _count_activity_with_status(transcript_path)
+    # Cache strategy:
+    #   - count > 0: stable signal (active turn keeps producing
+    #     tool_uses), cache for the standard short TTL.
+    #   - count == 0 with "gave up" status (single assistant turn
+    #     larger than 1 MiB): write to the long-TTL gave_up key so
+    #     subsequent renders short-circuit without the 1 MiB read.
+    #     Worst-case staleness is one render cycle after the user
+    #     sends the next prompt (the gave_up cache entry returns 0
+    #     on that render, then expires).
+    #   - count == 0 with any other status: transient (file
+    #     missing / parse error / no activity yet), do NOT cache —
+    #     recovery should be immediate, not blocked for 5s.
     if count > 0:
         _write_cache(cache_key, {"count": count})
+    elif status.startswith("no user message in 1 MiB"):
+        _write_cache(gave_up_key, {"count": 0})
     return count
 
 
@@ -378,20 +399,36 @@ def _count_activity_with_status(transcript_path):
         if count is not None:
             return count, "parsed (1 MiB expanded tail; {} tool_use(s))".format(count)
 
-    # Two reads still couldn't find a user message — the assistant
-    # turn is genuinely larger than 1 MiB, or the file is malformed.
-    # Return 0 rather than count window contents (which would belong
-    # to a previous turn).
-    return 0, "no user message in 1 MiB tail (turn exceeds window or malformed file)"
+    # Two reads still couldn't find a user message. Two distinct
+    # cases need distinct diagnostics:
+    #   - file is bigger than 64 KiB AND we tried the 1 MiB expanded
+    #     retry: a single assistant turn larger than 1 MiB (or
+    #     malformed JSONL).
+    #   - file is smaller than 64 KiB: we already read the WHOLE
+    #     file in the first pass and skipped the 1 MiB retry as
+    #     pointless. The "1 MiB tail" wording would be misleading
+    #     here — the user sees `--doctor` reporting "1 MiB tail" on
+    #     a 12 KB file.
+    if size > _TRANSCRIPT_TAIL_BYTES:
+        return 0, "no user message in 1 MiB tail (turn exceeds window or malformed file)"
+    return 0, "no user message in {} byte file (truncated or schema mismatch)".format(size)
 
 
 def _parse_transcript_tail(transcript_path, size, tail_bytes):
     """Read tail_bytes from the end of transcript_path and count
     tool_use blocks since the most recent user message.
 
-    Returns the count (int >= 0) when a user message was found in the
-    window, or None when no user message was found (signals to the
-    caller that a wider window might find one).
+    Returns:
+      - int >= 0: a user message was found in the window and this
+        many tool_use blocks followed it.
+      - None: no user message in this window (caller should retry
+        with a wider window if available) OR the read failed
+        transiently (file rotated mid-read, etc). The caller
+        cannot meaningfully distinguish these — both end with the
+        same "give up cleanly" behavior — but read errors must NOT
+        be conflated with "0 tool_uses since user found," which is
+        a genuine parse-success signal the caller uses for its
+        Parse: status string.
     """
     try:
         start = max(0, size - tail_bytes)
@@ -399,12 +436,17 @@ def _parse_transcript_tail(transcript_path, size, tail_bytes):
             f.seek(start)
             chunk = f.read()
     except (OSError, IOError):
-        return 0
+        # Conflating this with "0 tool_uses since user" would make
+        # --doctor falsely report "parsed; 0 tool_use(s)" on a file
+        # that wasn't actually parsed. Return None so the caller's
+        # status string correctly says "no user message in ..." —
+        # less precise but not misleading.
+        return None
 
     try:
         text = chunk.decode("utf-8", errors="replace")
     except (UnicodeDecodeError, AttributeError):
-        return 0
+        return None
 
     # Discard the first (possibly truncated) line when we started
     # mid-file. The special case: if the very first byte of our chunk

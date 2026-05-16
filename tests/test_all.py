@@ -5193,9 +5193,13 @@ class TestClaudeCode2139WidthRegression(unittest.TestCase):
         # we definitely reach the os.get_terminal_size step.
         orig_shutil_gts = cli_mod.shutil.get_terminal_size
         orig_os_gts = cli_mod.os.get_terminal_size
+        # Restore COLUMNS too: module-level baseline at line 21 seeds
+        # it; if we leak the pop here, every subsequent test in the
+        # process runs without that baseline. Captured before pop,
+        # restored in finally to keep cross-test ordering insensitive.
+        saved_cols = os.environ.pop("COLUMNS", None)
         cli_mod.shutil.get_terminal_size = lambda fallback=None: os.terminal_size((-1, -1))
         cli_mod.os.get_terminal_size = lambda fd: os.terminal_size((0, 0))
-        os.environ.pop("COLUMNS", None)
         try:
             result = cli_mod._detect_terminal_width({})
             self.assertNotEqual(result, 0,
@@ -5205,6 +5209,8 @@ class TestClaudeCode2139WidthRegression(unittest.TestCase):
         finally:
             cli_mod.shutil.get_terminal_size = orig_shutil_gts
             cli_mod.os.get_terminal_size = orig_os_gts
+            if saved_cols is not None:
+                os.environ["COLUMNS"] = saved_cols
 
     def test_stty_returns_0_0_rejected_by_range_check(self):
         """If stty started returning '0 0' tomorrow (analogous to the
@@ -5240,7 +5246,9 @@ class TestClaudeCode2139WidthRegression(unittest.TestCase):
             return orig_open(path, *args, **kwargs)
 
         cli_mod.subprocess.run = fake_run
-        os.environ.pop("COLUMNS", None)
+        # Restore COLUMNS in finally — without this, the module-level
+        # baseline at line 21 leaks and later tests run without it.
+        saved_cols = os.environ.pop("COLUMNS", None)
         cli_builtins = cli_mod.__builtins__
         cli_open_was_dict = isinstance(cli_builtins, dict)
         cli_orig_open = (cli_builtins["open"] if cli_open_was_dict
@@ -5257,6 +5265,8 @@ class TestClaudeCode2139WidthRegression(unittest.TestCase):
                 cli_builtins["open"] = cli_orig_open
             else:
                 cli_builtins.open = cli_orig_open
+            if saved_cols is not None:
+                os.environ["COLUMNS"] = saved_cols
 
         self.assertNotEqual(result, 0,
             "stty returning '0 0' must be rejected by the range check")
@@ -5584,6 +5594,27 @@ class TestActivityCounter(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_small_file_no_user_has_distinct_status(self):
+        """When the WHOLE file fits in the 64 KiB cap (no retry
+        needed) and contains no user message, the status must say
+        'in N byte file' — not the misleading '1 MiB tail' wording
+        that would suggest we tried something we didn't."""
+        from claude_statusline.sessions import _count_activity_with_status
+        # Tiny file (~ a few hundred bytes) with no user message.
+        path = self._write_transcript([
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "hi"},
+            ]}},
+        ])
+        count, status = _count_activity_with_status(path)
+        self.assertEqual(count, 0)
+        self.assertNotIn("1 MiB", status,
+            "small-file no-user-found status must not falsely claim "
+            "we tried a 1 MiB tail read; got: {!r}".format(status))
+        self.assertIn("byte file", status,
+            "small-file status should name the actual file size; "
+            "got: {!r}".format(status))
+
     def test_count_with_status_disambiguates_zero(self):
         """_count_activity_with_status returns a (count, status)
         tuple so --doctor can distinguish:
@@ -5615,6 +5646,54 @@ class TestActivityCounter(unittest.TestCase):
         self.assertIn("missing", status,
             "missing file must produce a distinguishable status, not "
             "the same string as legitimate idle; got: {!r}".format(status))
+
+    def test_gave_up_state_cached_to_avoid_repeated_1mib_reads(self):
+        """When _count_activity_with_status returns the gave-up
+        status (turn larger than 1 MiB), get_session_activity_count
+        writes a separate long-TTL cache entry. Subsequent calls
+        within that TTL must short-circuit without re-reading the
+        1 MiB tail — verify by mutating the file and confirming the
+        cached 0 still wins."""
+        from claude_statusline.sessions import (
+            _TRANSCRIPT_TAIL_BYTES_EXPANDED,
+            get_session_activity_count,
+        )
+        # Construct a "gave up" file: user message at the start,
+        # padding past the 1 MiB expanded cap, then a tool_use.
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "old"}},
+        ])
+        padding_line = json.dumps({
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "x" * 1000},
+            ]},
+        }) + "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            bytes_written = 0
+            while bytes_written < _TRANSCRIPT_TAIL_BYTES_EXPANDED + 10_000:
+                f.write(padding_line)
+                bytes_written += len(padding_line.encode("utf-8"))
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}}) + "\n")
+
+        # First call: gave-up state, writes the gaveup cache entry.
+        first = get_session_activity_count(path)
+        self.assertEqual(first, 0,
+            "huge-turn case must return 0 (no user message in window)")
+
+        # Mutate the file to make a fresh user → tool_use pattern
+        # near the end (would normally be detectable). The gaveup
+        # cache must still return 0 — proves we did NOT re-read.
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"message": {"role": "user", "content": "next"}}) + "\n")
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Read"},
+            ]}}) + "\n")
+        second = get_session_activity_count(path)
+        self.assertEqual(second, 0,
+            "gave-up cache must short-circuit subsequent calls within TTL — "
+            "without it we would re-read 1 MiB on every render of a stuck turn")
 
     def test_zero_counts_not_cached(self):
         """A zero count can mean 'no activity' OR 'parse failed,
