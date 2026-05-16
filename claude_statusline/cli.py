@@ -20,8 +20,8 @@ from .colors import (
     YELLOW, colorize,
 )
 from .formatters import (
-    fmt_burn_rate, fmt_cache_pct, fmt_cost, fmt_countdown, fmt_duration,
-    fmt_lines, fmt_speed, fmt_tokens,
+    fmt_burn_rate, fmt_cache_hit_ratio, fmt_cache_pct, fmt_cost, fmt_countdown,
+    fmt_duration, fmt_lines, fmt_speed, fmt_tokens,
 )
 from .git import (
     get_branch, get_git_extras, get_git_state,
@@ -31,8 +31,8 @@ from .sessions import (
     _VALID_EFFORT_LEVELS,
     _read_cache, _write_cache,
     get_budget_config, get_clickable_links_enabled, get_compaction_threshold,
-    get_disabled_sections, get_effort_level, get_session_tool_count,
-    get_today_session_count,
+    get_disabled_sections, get_effort_level, get_session_activity_count,
+    get_session_tool_count, get_today_session_count,
 )
 from .themes import THEMES, get_theme
 
@@ -161,6 +161,14 @@ def _normalize(data):
 
     # Session ID (for tool call counting)
     out["session_id"] = data.get("session_id") or ""
+
+    # Transcript path (for live activity counter — tool calls since
+    # the most recent user message). Stored only if it's a non-empty
+    # string; downstream readers tolerate missing/invalid paths and
+    # silently render no activity section, per the degrade-gracefully
+    # pattern.
+    transcript = data.get("transcript_path")
+    out["transcript_path"] = transcript if isinstance(transcript, str) else ""
 
     # Session name (custom name via --name or /rename)
     out["session_name"] = data.get("session_name") or ""
@@ -362,6 +370,19 @@ def _render_sections_named(n, order, theme):
                     colorize("cache:", tc["label"]) + colorize(cache_str, GREEN)
                 )
 
+        elif section == "cache_hit":
+            # Prompt cache hit ratio: of the cacheable input, how much
+            # actually hit the cache. Differs from `cache` (above) which
+            # shows cache_read as a share of total token traffic. This
+            # answers "is my prompt cache-friendly" rather than "is the
+            # cache saving me money." Both can be enabled simultaneously.
+            hit_str = fmt_cache_hit_ratio(cache_read, cache_create, input_tokens)
+            if hit_str:
+                hit_color = tc.get("cache_hit", GREEN)
+                sections.append(
+                    colorize("hit:", tc["label"]) + colorize(hit_str, hit_color)
+                )
+
         elif section == "cost" and cost is not None:
             sections.append(colorize(fmt_cost(cost), tc["cost"]))
 
@@ -470,6 +491,22 @@ def _render_sections_named(n, order, theme):
                     sections.append(
                         colorize("tools:", tc["label"])
                         + colorize(str(tool_count), tc["value"])
+                    )
+
+        elif section == "activity":
+            # Live tool-call counter for the current assistant turn
+            # (since the most recent user message). Differs from
+            # `tools` (above) which is a session-cumulative count.
+            # Reads the tail of transcript_path; cached 5s; hidden
+            # when zero so the section is invisible during idle.
+            transcript = n.get("transcript_path", "")
+            if transcript:
+                act_count = get_session_activity_count(transcript)
+                if act_count > 0:
+                    act_color = tc.get("activity", CYAN)
+                    sections.append(
+                        colorize("act:", tc["label"])
+                        + colorize(str(act_count), act_color)
                     )
 
         elif section == "sessions":
@@ -666,9 +703,9 @@ _COMPACT_LAYOUT_MIN_COLS = 100
 # Below _FULL_LAYOUT_MIN_COLS: drop least-essential sections progressively.
 _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
-    "sessions", "tools", "latency", "context_size", "session_name",
+    "sessions", "tools", "activity", "latency", "context_size", "session_name",
     "rate_limits", "output_style", "added_dirs", "effort", "git_worktree",
-    "speed", "git_state", "commit_age",
+    "speed", "git_state", "commit_age", "cache_hit",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",
@@ -711,9 +748,38 @@ _FIT_DROP_PRIORITY = _COMPACT_DROP + [
 _TERM_WIDTH_MIN = 20
 _TERM_WIDTH_MAX = 4000
 
+# Common terminfo "cols" defaults that `tput cols` returns when invoked
+# without a controlling TTY. Claude Code 2.1.139+ runs hooks "without
+# terminal access" (release notes, 2026-05-08), which causes tput to
+# fall back to the terminfo default for $TERM rather than reporting an
+# error. The most common stub value is 80 (xterm / xterm-256color /
+# xterm-kitty / vt100 / ansi all default to 80 cols). When we see
+# `tput cols == 80` AND every prior TTY probe failed, it is almost
+# certainly the stub — accepting it would render an 80-col layout into
+# the user's real (often 120+) terminal. We reject it and fall through
+# to the next signal. A user who genuinely has an 80-col terminal will
+# have been caught earlier by shutil/os.get_terminal_size if any TTY
+# was reachable; if none were reachable, we cannot distinguish a real
+# 80 from the stub and choose to fall through (the safe default keeps
+# Line 2 visible; rendering at 80 when the real width is 200 hides
+# half the statusline).
+_TPUT_STUB_VALUES = frozenset({80})
+
 
 def _detect_terminal_width(data=None):
     """Detect the user's actual terminal width.
+
+    Thin wrapper around :func:`_detect_terminal_width_report` that
+    returns just the winning value. See that function for the full
+    fallback chain and the stub-rejection logic for Claude Code
+    2.1.139+ (which removed all terminal access from hooks).
+    """
+    winner, _report = _detect_terminal_width_report(data)
+    return winner
+
+
+def _detect_terminal_width_report(data=None):
+    """Detect terminal width and return both the winner and a per-step report.
 
     Claude Code spawns the statusLine command as a child process with
     stdin piped — there is no TTY, no `COLUMNS` env var, and
@@ -723,25 +789,41 @@ def _detect_terminal_width(data=None):
     silently trims to the fallback width.
 
     Tracked upstream at anthropics/claude-code#22115 (open since Jan
-    2026, no upstream fix). Until Anthropic ships terminal dimensions
-    in the stdin JSON, we try a chain of fallbacks ourselves and
-    return the first plausible value.
+    2026, no upstream fix). Worse, Claude Code 2.1.139 (2026-05-08)
+    shipped "hooks now run without terminal access," which closed the
+    `/dev/tty` escape hatch our stty/tput steps relied on AND caused
+    `tput cols` to return its terminfo stub (typically 80) instead of
+    failing — silently regressing the 7-step chain we shipped in
+    v0.5.7. This rewrite adds two defenses: a process-tree walk that
+    reads the controlling terminal of an ancestor process (Linux/macOS),
+    and a stub-detection heuristic that rejects `tput cols == 80` when
+    no other TTY probe succeeded. Tracked at #83.
 
     Order (each step caught and ignored on any error):
 
     1. ``data["terminal"]["columns"]`` from stdin JSON — defensive
        forward-compat for whenever Anthropic adds it.
     2. ``COLUMNS`` env var — some shell wrappers / users export it.
+       ``COLUMNS=0`` is rejected and reported distinctly from unset:
+       2.1.139+ sometimes sets it to "0", which is a signal that
+       we're in a no-TTY subprocess (not a missing variable).
     3. ``shutil.get_terminal_size()`` honoring ``COLUMNS`` and any
        stdout TTY (rarely TTY in our context but cheap to check).
     4. ``os.get_terminal_size(N)`` against a TTY file descriptor
        (stderr/stdout in case one of them is unexpectedly a TTY).
-    5. ``stty size < /dev/tty`` — works on Linux/macOS/WSL when
-       ``/dev/tty`` is reachable. Most reliable signal we have.
-    6. ``tput cols 2>/dev/tty`` — alternate POSIX path; some
-       systems have ``tput`` but not ``stty``.
-    7. Fallback ``_COMPACT_LAYOUT_MIN_COLS`` — current behavior,
-       safe default that keeps Line 2 readable.
+    5. Process-tree walk: try ``os.get_terminal_size`` on the stderr
+       fd of each ancestor process. Works on Linux/macOS when an
+       ancestor still owns the controlling terminal even though we
+       don't. Independently shipped by Go statuslines (ccstatus,
+       cc-tools) as their primary 2.1.139 workaround.
+    6. ``stty size < /dev/tty`` — works on Linux/macOS/WSL when
+       ``/dev/tty`` is reachable. Often unreachable on 2.1.139+.
+    7. ``tput cols 2>/dev/tty`` — alternate POSIX path. Subject to
+       stub-value rejection: if `tput` returns a known terminfo
+       default AND every prior TTY probe failed, the result is
+       treated as a lie and rejected.
+    8. Fallback ``_COMPACT_LAYOUT_MIN_COLS`` — safe default that keeps
+       Line 2 readable when no signal is trustworthy.
 
     Args:
         data: Optional parsed stdin JSON dict. If present and contains
@@ -750,30 +832,55 @@ def _detect_terminal_width(data=None):
             preferred over all other signals.
 
     Returns:
-        Detected terminal width in columns. Always within
-        ``[_TERM_WIDTH_MIN, _TERM_WIDTH_MAX]`` because the final
-        fallback ``_COMPACT_LAYOUT_MIN_COLS`` itself sits in range.
-        Out-of-range candidates from earlier steps are *rejected*
-        (not clamped) and trigger fall-through to the next signal.
+        Tuple of ``(winner_int, report_list)`` where ``winner_int`` is
+        the detected width (always within ``[_TERM_WIDTH_MIN,
+        _TERM_WIDTH_MAX]``) and ``report_list`` is a list of
+        ``(step_label, status_string)`` tuples in chain order. The
+        report is consumed by ``--doctor`` to show which signal won
+        and which signals lied or fell through.
     """
+    report = []
+
+    # Track whether any earlier step found a real TTY signal. Used by
+    # the tput-stub heuristic: if every prior probe failed, an exactly-
+    # default tput return is treated as the stub, not a real reading.
+    any_tty_probe_succeeded = False
+
     # 1. Stdin JSON terminal.columns (forward-compat).
     if isinstance(data, dict):
         term_obj = data.get("terminal")
         if isinstance(term_obj, dict):
             cols = _safe_num(term_obj.get("columns"))
             if cols is not None and _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
-                return int(cols)
+                report.append(("stdin.terminal.columns", f"{int(cols)} (winner)"))
+                return int(cols), report
+            report.append((
+                "stdin.terminal.columns",
+                f"present but out of range ({cols!r}) — rejected" if cols is not None
+                else "field present but not numeric — rejected",
+            ))
+        else:
+            report.append(("stdin.terminal.columns", "absent"))
+    else:
+        report.append(("stdin.terminal.columns", "no stdin data"))
 
-    # 2. COLUMNS env var (also honored by step 3, but checked first
-    # so a user explicitly exporting it always wins over OS calls).
+    # 2. COLUMNS env var.
     cols_env = os.environ.get("COLUMNS")
-    if cols_env:
+    if cols_env is None:
+        report.append(("COLUMNS env", "unset"))
+    else:
         try:
             cols = int(cols_env)
-            if _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
-                return cols
+            if cols == 0:
+                # 2.1.139 failure mode — distinct from unset.
+                report.append(("COLUMNS env", "set to 0 — likely no-TTY subprocess, rejected"))
+            elif _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
+                report.append(("COLUMNS env", f"{cols} (winner)"))
+                return cols, report
+            else:
+                report.append(("COLUMNS env", f"{cols} out of range — rejected"))
         except (ValueError, TypeError):
-            pass
+            report.append(("COLUMNS env", f"{cols_env!r} not an int — rejected"))
 
     # 3. shutil.get_terminal_size — checks COLUMNS again then any
     # stdout TTY. Cheap; no external process. Skip its fallback
@@ -781,28 +888,60 @@ def _detect_terminal_width(data=None):
     # passing a sentinel and only trusting non-sentinel results.
     try:
         size = shutil.get_terminal_size((-1, -1))
-        if (_TERM_WIDTH_MIN <= size.columns <= _TERM_WIDTH_MAX
-                and size.columns != -1):
-            return size.columns
-    except (OSError, ValueError):
-        pass
+        if size.columns == -1:
+            report.append(("shutil.get_terminal_size", "no TTY (fallback)"))
+        elif _TERM_WIDTH_MIN <= size.columns <= _TERM_WIDTH_MAX:
+            any_tty_probe_succeeded = True
+            report.append(("shutil.get_terminal_size", f"{size.columns} (winner)"))
+            return size.columns, report
+        else:
+            report.append(("shutil.get_terminal_size", f"{size.columns} out of range — rejected"))
+    except (OSError, ValueError) as exc:
+        report.append(("shutil.get_terminal_size", f"error: {exc}"))
 
     # 4. os.get_terminal_size on each std fd — Claude Code closes
     # stdin (it's our JSON pipe) but stderr is often inherited from
     # the parent TTY.
-    for fd in (2, 1, 0):  # stderr, stdout, stdin
+    fd_winner = None
+    fd_status = []
+    for fd_num, fd_name in ((2, "stderr"), (1, "stdout"), (0, "stdin")):
         try:
-            size = os.get_terminal_size(fd)
+            size = os.get_terminal_size(fd_num)
             if _TERM_WIDTH_MIN <= size.columns <= _TERM_WIDTH_MAX:
-                return size.columns
-        except (OSError, AttributeError):
-            continue
+                fd_winner = (fd_name, size.columns)
+                break
+            fd_status.append(f"{fd_name}={size.columns} out of range")
+        except (OSError, AttributeError) as exc:
+            fd_status.append(f"{fd_name}=ENOTTY/{type(exc).__name__}")
+    if fd_winner is not None:
+        any_tty_probe_succeeded = True
+        report.append((
+            "os.get_terminal_size(fd)",
+            f"{fd_winner[1]} via {fd_winner[0]} (winner)",
+        ))
+        return fd_winner[1], report
+    report.append(("os.get_terminal_size(fd)", "; ".join(fd_status) or "no fds"))
 
-    # 5+6. stty size / tput cols against /dev/tty — the most reliable
-    # POSIX path. Captures the controlling terminal's real width even
-    # when stdin/stdout are pipes. /dev/tty doesn't exist on Windows,
-    # where stty/tput are also typically absent — all of these raise
-    # FileNotFoundError or OSError, caught and fall through.
+    # 5. Process-tree walk — try the stderr fd of each ancestor process.
+    # Linux/macOS only (Windows has no /proc and process ancestry of
+    # subprocess hooks is structured differently). When Claude Code
+    # 2.1.139+ strips terminal access from the immediate hook process,
+    # an ancestor (the user's shell, the Claude Code main process)
+    # often still owns the controlling terminal.
+    walk_result, walk_status = _detect_width_via_process_tree()
+    if walk_result is not None:
+        any_tty_probe_succeeded = True
+        report.append(("process-tree walk", f"{walk_result} (winner; {walk_status})"))
+        return walk_result, report
+    report.append(("process-tree walk", walk_status))
+
+    # 6+7. stty size / tput cols against /dev/tty — the most reliable
+    # POSIX path historically. Captures the controlling terminal's
+    # real width even when stdin/stdout are pipes. /dev/tty doesn't
+    # exist on Windows, where stty/tput are also typically absent —
+    # all of these raise FileNotFoundError or OSError, caught and
+    # fall through. On Claude Code 2.1.139+ /dev/tty is unreachable
+    # and tput returns its terminfo stub (see _TPUT_STUB_VALUES).
     #
     # The /dev/tty open is shared across both subprocesses so we pay
     # the open() syscall once; if it fails we skip both probes
@@ -811,9 +950,9 @@ def _detect_terminal_width(data=None):
     # backstop for systems where stty isn't installed but ncurses is.
     try:
         with open("/dev/tty", "r") as tty:
-            for cmd, parser in (
-                (["stty", "size"], lambda s: int(s.split()[1])),
-                (["tput", "cols"], lambda s: int(s.strip())),
+            for cmd_name, cmd, parser in (
+                ("stty size", ["stty", "size"], lambda s: int(s.split()[1])),
+                ("tput cols", ["tput", "cols"], lambda s: int(s.strip())),
             ):
                 try:
                     result = subprocess.run(
@@ -822,16 +961,113 @@ def _detect_terminal_width(data=None):
                     )
                     if result.returncode == 0:
                         cols = parser(result.stdout)
+                        # Stub-detection heuristic for tput on 2.1.139+:
+                        # if tput says exactly a terminfo default and we
+                        # never got a real TTY signal earlier in the
+                        # chain, it is almost certainly the stub.
+                        if (cmd_name == "tput cols"
+                                and cols in _TPUT_STUB_VALUES
+                                and not any_tty_probe_succeeded):
+                            report.append((
+                                cmd_name,
+                                f"{cols} (likely terminfo stub — rejected; "
+                                "no earlier TTY signal)",
+                            ))
+                            continue
                         if _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
-                            return cols
+                            any_tty_probe_succeeded = True
+                            report.append((cmd_name, f"{cols} (winner)"))
+                            return cols, report
+                        report.append((cmd_name, f"{cols} out of range — rejected"))
+                    else:
+                        report.append((cmd_name, f"exit {result.returncode}"))
                 except (OSError, ValueError, IndexError,
-                        subprocess.SubprocessError, FileNotFoundError):
+                        subprocess.SubprocessError, FileNotFoundError) as exc:
+                    report.append((cmd_name, f"error: {type(exc).__name__}"))
                     continue
-    except (OSError, FileNotFoundError):
-        pass
+    except (OSError, FileNotFoundError) as exc:
+        report.append(("/dev/tty", f"unreachable: {type(exc).__name__}"))
 
-    # 7. Last-resort fallback — same value the previous code path used.
-    return _COMPACT_LAYOUT_MIN_COLS
+    # 8. Last-resort fallback — same value the previous code path used.
+    report.append(("fallback", f"{_COMPACT_LAYOUT_MIN_COLS} (no signal trusted)"))
+    return _COMPACT_LAYOUT_MIN_COLS, report
+
+
+def _detect_width_via_process_tree():
+    """Walk the parent process chain looking for a TTY-owning ancestor.
+
+    Returns ``(width_int, status_string)`` where ``width_int`` is the
+    detected width (or ``None`` if no ancestor has a usable TTY) and
+    ``status_string`` describes what happened (for --doctor output).
+
+    Linux/macOS only — Windows has no /proc and a different ancestry
+    model for subprocess hooks. The walk stops at PID 1 or after a
+    safety cap of 16 ancestors (deep nesting like
+    shell→Claude Code→hook→our binary is realistic; pathological
+    fork chains are not).
+    """
+    # Windows: no /proc, no inheritable controlling terminal across
+    # subprocess boundaries in this fashion. Bail cheap.
+    if platform.system() == "Windows":
+        return None, "skipped on Windows"
+
+    try:
+        pid = os.getppid()
+    except (OSError, AttributeError):
+        return None, "getppid unavailable"
+
+    visited = set()
+    max_depth = 16
+    checked = []
+
+    for _ in range(max_depth):
+        if pid <= 1 or pid in visited:
+            break
+        visited.add(pid)
+        checked.append(pid)
+
+        # Try opening the ancestor's stderr fd and reading its size.
+        # This works when the ancestor inherited the controlling
+        # terminal — common for the user's shell and Claude Code's
+        # main TUI process.
+        stderr_path = f"/proc/{pid}/fd/2"
+        try:
+            with open(stderr_path, "rb") as fh:
+                try:
+                    size = os.get_terminal_size(fh.fileno())
+                    if _TERM_WIDTH_MIN <= size.columns <= _TERM_WIDTH_MAX:
+                        return size.columns, f"pid {pid} stderr"
+                except (OSError, AttributeError):
+                    pass
+        except (OSError, FileNotFoundError, PermissionError):
+            # /proc not present (macOS by default) or fd not readable.
+            # On macOS the equivalent of /proc/<pid>/fd is not exposed,
+            # so this whole walk degrades to "checked PPID then bailed."
+            # That's acceptable: the user gets the safe fallback width,
+            # same as before this step existed.
+            pass
+
+        # Advance to the next ancestor by reading /proc/<pid>/stat
+        # (Linux). On macOS this fails and we exit the loop.
+        try:
+            with open(f"/proc/{pid}/stat", "r") as fh:
+                # Format: pid (comm) state ppid ...
+                # `comm` may contain spaces or parens, so split from the
+                # right of the closing paren.
+                stat = fh.read()
+                rparen = stat.rfind(")")
+                if rparen < 0:
+                    break
+                fields = stat[rparen + 1:].split()
+                if len(fields) < 2:
+                    break
+                pid = int(fields[1])
+        except (OSError, ValueError, FileNotFoundError):
+            break
+
+    if not checked:
+        return None, "no ancestors checked"
+    return None, f"walked {len(checked)} ancestor(s), no TTY found"
 
 
 def _apply_responsive(sections_list, term_width):
@@ -1645,7 +1881,7 @@ def cmd_doctor():
     print("Terminal:")
     term = os.environ.get("TERM", "(not set)")
     naive_cols = shutil.get_terminal_size((_COMPACT_LAYOUT_MIN_COLS, 24)).columns
-    detected_cols = _detect_terminal_width()
+    detected_cols, width_report = _detect_terminal_width_report()
     print("  TERM:    {}".format(term))
     print("  Columns: {} (shutil naive: {})".format(detected_cols, naive_cols))
     cols = detected_cols
@@ -1658,6 +1894,14 @@ def cmd_doctor():
         print("  Layout:  narrow (< {} cols)".format(_COMPACT_LAYOUT_MIN_COLS))
     print("  Note:    precise width-aware fit further trims sections to fit")
     print("  Unicode: \u2588\u2591\u2593 \u2387 \ue0b0")
+    # Per-step width-detection report. Shows which signal won and
+    # which signals were rejected (including the 2.1.139 tput stub).
+    # Useful when a user reports "my layout looks wrong on a wide
+    # terminal" \u2014 they can paste this section to show whether tput
+    # lied, /dev/tty was unreachable, etc.
+    print("  Width detection chain:")
+    for step_label, status in width_report:
+        print("    {:32} {}".format(step_label, status))
     print()
 
 
