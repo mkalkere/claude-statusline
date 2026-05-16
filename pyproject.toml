@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-status"
-version = "0.5.8"
+version = "0.6.0"
 description = "Beautiful, informative status line for Claude Code — zero dependencies, cross-platform"
 readme = "README.md"
 license = {text = "MIT"}
@@ -13,13 +13,17 @@ authors = [
     {name = "Mallikarjuna"}
 ]
 keywords = [
-    "claude-code", "claude", "statusline", "status-bar", "cli",
-    "terminal", "developer-tools", "anthropic", "claude-status",
-    "prompt", "productivity", "ai-tools", "llm", "coding-assistant",
-    "token-usage", "context-window", "budget-monitor", "burn-rate",
-    "rate-limit", "session-monitor",
-    "claude-code-plugin", "coding-agent", "agent-tooling",
-    "ai-coding", "llm-tooling", "ai-developer-tools",
+    "claude-code", "claude", "statusline", "status-bar", "statusbar",
+    "claude-code-statusline", "cli", "terminal", "developer-tools",
+    "anthropic", "claude-status", "prompt", "productivity", "ai-tools",
+    "llm", "coding-assistant", "token-usage", "tokens",
+    "context-window", "context-tracking", "budget-monitor",
+    "cost-tracking", "burn-rate", "rate-limit", "session-monitor",
+    "claude-code-plugin", "coding-agent", "agent-tooling", "agentic",
+    "ai-agent", "subagent", "ai-coding", "llm-tooling",
+    "ai-developer-tools", "prompt-engineering", "prompt-cache",
+    "responsive-layout", "terminal-width", "git-status",
+    "observability", "devtool",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

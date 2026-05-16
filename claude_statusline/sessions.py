@@ -13,8 +13,44 @@ import time
 
 _CACHE_TTL = 30  # seconds — longer than git cache since this is heavier
 _TOOL_CACHE_TTL = 10  # seconds — shorter for active session metrics
+_ACTIVITY_CACHE_TTL = 5  # seconds — shortest, this metric is "right now"
+# Longer TTL for the "gave up — turn larger than 1 MiB window" case.
+# This is a per-render 1 MiB tail read that will keep failing the
+# same way until the user sends the next prompt. 30s caps the worst-
+# case cost; if the user IS sending prompts every 5s the cache still
+# expires naturally on the next legitimate parse-success.
+_ACTIVITY_GAVE_UP_TTL = 30
+
+# Maximum bytes to tail-read from the session transcript JSONL when
+# counting tool calls since the last user message. 64 KiB is the
+# first attempt; if the tail doesn't reach back to a user message we
+# retry with the expanded cap below. The two-step strategy keeps the
+# render hot path cheap for typical turns (single small reads) but
+# still recovers a correct count when one assistant turn produced
+# very large output (e.g. a long tool_result block).
+_TRANSCRIPT_TAIL_BYTES = 64 * 1024
+# Expanded tail when the initial read missed the preceding user
+# message. 1 MiB comfortably covers a single turn that contains
+# multiple ~100 KiB tool_result blocks — rare but real. Going wider
+# would let pathological transcripts dominate render latency, so we
+# cap here and accept undercount in that extreme edge.
+_TRANSCRIPT_TAIL_BYTES_EXPANDED = 1024 * 1024
 
 _CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
+# Resolved variant used only by the transcript_path security check:
+# users who relocate Claude state via `~/.claude -> /Volumes/x/claude`
+# (common on macOS / NAS setups / devs who symlink dotdirs) would
+# otherwise see their legitimate transcripts rejected by the prefix
+# check, because os.path.realpath(transcript_path) resolves the
+# symlink but the unresolved _CLAUDE_DIR doesn't. Resolving once at
+# module load lets the check work for both direct and symlinked
+# layouts. Falls back to _CLAUDE_DIR itself when the dir doesn't
+# exist yet — realpath of a missing path just returns the path
+# unchanged on every platform we support, so the fallback is silent.
+try:
+    _CLAUDE_DIR_REAL = os.path.realpath(_CLAUDE_DIR)
+except (OSError, ValueError):
+    _CLAUDE_DIR_REAL = _CLAUDE_DIR
 _SESSIONS_DIR = os.path.join(_CLAUDE_DIR, "sessions")
 _PROJECTS_DIR = os.path.join(_CLAUDE_DIR, "projects")
 
@@ -217,6 +253,260 @@ def get_session_tool_count(session_id):
         pass
 
     _write_cache(cache_key, {"count": count})
+    return count
+
+
+def get_session_activity_count(transcript_path):
+    """Count tool_use entries in the *current assistant turn* of a session.
+
+    Differs from ``get_session_tool_count`` (which counts the whole
+    session): this counts only since the most recent ``role: "user"``
+    line, so it answers "how many tool calls is the assistant making
+    *right now*." The count resets to 0 when the user sends the next
+    message and ticks up as the assistant uses tools to respond.
+
+    Reads only the tail of the transcript file (last
+    ``_TRANSCRIPT_TAIL_BYTES``), which:
+      - keeps the render hot path in single-digit ms even on multi-MB
+        sessions;
+      - tolerates the rare case where the user message preceding the
+        current turn was further back than the tail window (in which
+        case we'd undercount — but the alternative is full-file scan
+        on every render, which we explicitly do not want);
+      - tolerates the transcript file being rotated, truncated, or
+        absent entirely (all errors silently swallowed → return 0).
+
+    Args:
+        transcript_path: Path to the session transcript JSONL, taken
+            directly from Claude Code's stdin JSON. Validated as a
+            real, regular file before any read.
+
+    Returns:
+        Count of ``tool_use`` content blocks on assistant messages
+        since the most recent user message. 0 when the path is
+        invalid, the file can't be read, parsing fails, or no user
+        message exists in the tail (in which case the count is
+        meaningless and 0 is the safe degrade).
+    """
+    if not transcript_path or not isinstance(transcript_path, str):
+        return 0
+
+    # Defense-in-depth: transcript_path comes from external JSON. A
+    # buggy upstream or malicious wrapper could pass an arbitrary
+    # path or a symlink that resolves elsewhere. Claude Code writes
+    # transcripts under ~/.claude/ (typically projects/<slug>/...),
+    # so we require the resolved real path to live there. Matches the
+    # _SESSION_ID_RE regex pattern already used for session IDs.
+    #
+    # Compare both sides resolved (_CLAUDE_DIR_REAL) so users who
+    # relocated ~/.claude via symlink aren't silently locked out.
+    try:
+        real = os.path.realpath(transcript_path)
+        if not real.startswith(_CLAUDE_DIR_REAL + os.sep) and real != _CLAUDE_DIR_REAL:
+            return 0
+    except (OSError, ValueError):
+        return 0
+
+    # Cache by hashed path. Two distinct keys for two TTL regimes:
+    # the standard short-TTL key for "live activity" caching, and a
+    # separate long-TTL "gave up" key that prevents re-reading 1 MiB
+    # on every render of a single huge assistant turn. The gave-up
+    # key is checked first so a long turn doesn't trigger a 1 MiB
+    # read just to discover what we already know.
+    path_hash = hashlib.md5(
+        transcript_path.encode("utf-8", errors="replace")
+    ).hexdigest()[:12]
+    cache_key = "activity_{}".format(path_hash)
+    gave_up_key = "activity_gaveup_{}".format(path_hash)
+
+    gave_up = _read_cache(gave_up_key, ttl=_ACTIVITY_GAVE_UP_TTL)
+    if gave_up is not None:
+        return 0
+
+    cached = _read_cache(cache_key, ttl=_ACTIVITY_CACHE_TTL)
+    if cached is not None:
+        return cached.get("count", 0)
+
+    count, status = _count_activity_with_status(transcript_path)
+    # Cache strategy:
+    #   - count > 0: stable signal (active turn keeps producing
+    #     tool_uses), cache for the standard short TTL.
+    #   - count == 0 with "gave up" status (single assistant turn
+    #     larger than 1 MiB): write to the long-TTL gave_up key so
+    #     subsequent renders short-circuit without the 1 MiB read.
+    #     Worst-case staleness is one render cycle after the user
+    #     sends the next prompt (the gave_up cache entry returns 0
+    #     on that render, then expires).
+    #   - count == 0 with any other status: transient (file
+    #     missing / parse error / no activity yet), do NOT cache —
+    #     recovery should be immediate, not blocked for 5s.
+    if count > 0:
+        _write_cache(cache_key, {"count": count})
+    elif status.startswith("no user message in 1 MiB"):
+        _write_cache(gave_up_key, {"count": 0})
+    return count
+
+
+def _count_activity_from_transcript(transcript_path):
+    """Pure-function tail-read + parse. Returns int count (>= 0).
+
+    Thin wrapper around :func:`_count_activity_with_status`. Use the
+    `_with_status` form when you need to distinguish "no activity"
+    from "parse failed / window too small" (e.g. --doctor probe).
+    """
+    count, _status = _count_activity_with_status(transcript_path)
+    return count
+
+
+def _count_activity_with_status(transcript_path):
+    """Tail-read + parse, returning (count, status_string).
+
+    Status disambiguates count==0:
+      - "parsed (... ; 0 tool_use(s) since last user)" — legitimate idle
+      - "file missing or not a regular file"           — transient
+      - "file is empty"                                — transient
+      - "stat error: <ErrorClass>"                     — transient
+      - "no user message in 1 MiB tail (...)"          — gave up
+    Used by --doctor so users can distinguish silent-section-empty
+    from genuinely-no-activity. ``get_session_activity_count``
+    discards the status and just returns the count.
+
+    Reads the last _TRANSCRIPT_TAIL_BYTES; if the preceding user
+    message wasn't in that window, retries once with the expanded cap
+    so single-turn output up to ~1 MiB still produces a correct count.
+    """
+    try:
+        if not os.path.isfile(transcript_path):
+            return 0, "file missing or not a regular file"
+        size = os.path.getsize(transcript_path)
+        if size <= 0:
+            return 0, "file is empty"
+    except (OSError, IOError) as exc:
+        return 0, "stat error: {}".format(type(exc).__name__)
+
+    # First attempt: cheap 64 KiB tail. Covers the vast majority of
+    # turns. Only retry with the expanded cap if no user message was
+    # found in the initial window.
+    count = _parse_transcript_tail(transcript_path, size, _TRANSCRIPT_TAIL_BYTES)
+    if count is not None:
+        return count, "parsed (64 KiB tail; {} tool_use(s) since last user)".format(count)
+
+    # Expanded retry — but only if the file is bigger than the first
+    # cap (otherwise the result is identical and we'd waste a read).
+    if size > _TRANSCRIPT_TAIL_BYTES:
+        count = _parse_transcript_tail(
+            transcript_path, size, _TRANSCRIPT_TAIL_BYTES_EXPANDED)
+        if count is not None:
+            return count, "parsed (1 MiB expanded tail; {} tool_use(s))".format(count)
+
+    # Two reads still couldn't find a user message. Two distinct
+    # cases need distinct diagnostics:
+    #   - file is bigger than 64 KiB AND we tried the 1 MiB expanded
+    #     retry: a single assistant turn larger than 1 MiB (or
+    #     malformed JSONL).
+    #   - file is smaller than 64 KiB: we already read the WHOLE
+    #     file in the first pass and skipped the 1 MiB retry as
+    #     pointless. The "1 MiB tail" wording would be misleading
+    #     here — the user sees `--doctor` reporting "1 MiB tail" on
+    #     a 12 KB file.
+    if size > _TRANSCRIPT_TAIL_BYTES:
+        return 0, "no user message in 1 MiB tail (turn exceeds window or malformed file)"
+    return 0, "no user message in {} byte file (truncated or schema mismatch)".format(size)
+
+
+def _parse_transcript_tail(transcript_path, size, tail_bytes):
+    """Read tail_bytes from the end of transcript_path and count
+    tool_use blocks since the most recent user message.
+
+    Returns:
+      - int >= 0: a user message was found in the window and this
+        many tool_use blocks followed it.
+      - None: no user message in this window (caller should retry
+        with a wider window if available) OR the read failed
+        transiently (file rotated mid-read, etc). The caller
+        cannot meaningfully distinguish these — both end with the
+        same "give up cleanly" behavior — but read errors must NOT
+        be conflated with "0 tool_uses since user found," which is
+        a genuine parse-success signal the caller uses for its
+        Parse: status string.
+    """
+    try:
+        start = max(0, size - tail_bytes)
+        with open(transcript_path, "rb") as f:
+            f.seek(start)
+            chunk = f.read()
+    except (OSError, IOError):
+        # Conflating this with "0 tool_uses since user" would make
+        # --doctor falsely report "parsed; 0 tool_use(s)" on a file
+        # that wasn't actually parsed. Return None so the caller's
+        # status string correctly says "no user message in ..." —
+        # less precise but not misleading.
+        return None
+
+    try:
+        text = chunk.decode("utf-8", errors="replace")
+    except (UnicodeDecodeError, AttributeError):
+        return None
+
+    # Discard the first (possibly truncated) line when we started
+    # mid-file. The special case: if the very first byte of our chunk
+    # is '\n', the previous line ended exactly at `start - 1` and our
+    # `lines[0]` is the empty string — no truncation, no discard
+    # needed. Without this guard we'd drop a real complete line.
+    lines = text.split("\n")
+    if start > 0 and lines and not chunk.startswith(b"\n"):
+        lines = lines[1:]
+
+    # Walk backwards: find the most recent user message. Pre-filter
+    # on a cheap substring to avoid json.loads on every line (a
+    # session JSONL can be thousands of lines).
+    last_user_idx = -1
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i]
+        if '"role"' not in line or '"user"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        # Claude Code's transcript wraps the role on the inner message
+        # object, not the outer envelope, on most schema versions.
+        if isinstance(entry, dict):
+            msg = entry.get("message")
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                last_user_idx = i
+                break
+            # Fallback: some schema versions put role at the outer envelope.
+            if entry.get("role") == "user":
+                last_user_idx = i
+                break
+
+    # No user message in this window — signal the caller that a wider
+    # read might find one.
+    if last_user_idx < 0:
+        return None
+
+    # Count tool_use blocks on assistant messages between the user
+    # message and EOF.
+    count = 0
+    for line in lines[last_user_idx + 1:]:
+        if '"tool_use"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        msg = entry.get("message") or {}
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                count += 1
     return count
 
 

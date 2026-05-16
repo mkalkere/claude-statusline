@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -4841,6 +4842,1050 @@ class TestEffortLevelFromStdin(unittest.TestCase):
                     "different level than the existing cached value")
             finally:
                 sessions_mod._cache_dir = orig_get
+
+
+class TestClaudeCode2139WidthRegression(unittest.TestCase):
+    """Width-detection guards for the Claude Code 2.1.139 regression.
+
+    2.1.139 (2026-05-11 release notes: "hooks now run without terminal
+    access") removed every TTY signal the earlier fallback chain
+    depended on. Symptoms confirmed by independent statusline authors
+    in anthropics/claude-code#22115:
+
+      - COLUMNS env: set to "0" (not unset)
+      - /dev/tty:    ENXIO
+      - stty size:   fails
+      - tput cols:   returns 80 (terminfo default — LIES with a straight face)
+
+    Without these guards we would parse `tput cols == 80` as a real
+    reading and render an 80-col layout into a 220-col terminal.
+    Tracked at issue #83.
+    """
+
+    def setUp(self):
+        self._old_cols = os.environ.pop("COLUMNS", None)
+        self._old_lines = os.environ.pop("LINES", None)
+
+    def tearDown(self):
+        if self._old_cols is not None:
+            os.environ["COLUMNS"] = self._old_cols
+        if self._old_lines is not None:
+            os.environ["LINES"] = self._old_lines
+
+    # --- COLUMNS=0 (distinct from unset) ------------------------------
+
+    def test_columns_env_zero_rejected_distinctly(self):
+        """COLUMNS="0" must be rejected and reported as a no-TTY
+        signal — not silently treated as "unset" or "garbage." The
+        report distinction matters for --doctor diagnostics."""
+        from claude_statusline.cli import _detect_terminal_width_report
+        os.environ["COLUMNS"] = "0"
+        result, report = _detect_terminal_width_report({})
+        # Result must NOT be 0 (would be far below _TERM_WIDTH_MIN)
+        self.assertGreaterEqual(result, 20)
+        # Report must mention 0 explicitly as a no-TTY signal, not
+        # collapse it into "unset" or "garbage"
+        cols_entries = [s for label, s in report if label == "COLUMNS env"]
+        self.assertEqual(len(cols_entries), 1)
+        self.assertIn("0", cols_entries[0])
+        self.assertNotEqual(cols_entries[0], "unset",
+            "COLUMNS=0 must be distinguished from COLUMNS unset")
+
+    def test_columns_env_unset_reported_as_unset(self):
+        """COLUMNS unset (the normal case) must report 'unset' — pin
+        the report wording so --doctor remains intelligible."""
+        from claude_statusline.cli import _detect_terminal_width_report
+        os.environ.pop("COLUMNS", None)
+        _result, report = _detect_terminal_width_report({})
+        cols_entries = [s for label, s in report if label == "COLUMNS env"]
+        self.assertEqual(cols_entries, ["unset"])
+
+    # --- tput stub rejection (the headline 2.1.139 fix) ---------------
+
+    def test_tput_stub_80_rejected_when_no_tty_signal(self):
+        """When subprocess.run returns tput cols=80 AND no earlier TTY
+        probe succeeded, the 80 must be rejected as a likely terminfo
+        stub. The chain must fall through to the safe default, not
+        return 80."""
+        import subprocess as subprocess_mod
+        from claude_statusline.cli import (
+            _COMPACT_LAYOUT_MIN_COLS,
+            _detect_terminal_width_report,
+        )
+
+        # Simulate 2.1.139: /dev/tty is reachable (some hosts still
+        # have it), stty fails, tput returns 80. We must NOT return 80.
+        orig_run = subprocess_mod.run
+        orig_open = __builtins__["open"] if isinstance(__builtins__, dict) else open
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[0] == "stty":
+                # Simulate stty failing in the no-controlling-TTY env
+                return subprocess_mod.CompletedProcess(cmd, 1, "", "stty: stdin isn't a tty\n")
+            if cmd[0] == "tput":
+                return subprocess_mod.CompletedProcess(cmd, 0, "80\n", "")
+            return orig_run(cmd, *args, **kwargs)
+
+        # Patch open() so /dev/tty appears reachable even on Windows
+        # test hosts. We pass through every other path.
+        class FakeTTY:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return ""
+            def fileno(self): return 0
+
+        def fake_open(path, *args, **kwargs):
+            if path == "/dev/tty":
+                return FakeTTY()
+            return orig_open(path, *args, **kwargs)
+
+        import claude_statusline.cli as cli_mod
+        cli_mod.subprocess.run = fake_run
+        # Hide every higher-priority signal so we're forced into the
+        # stty/tput step where the stub rejection lives.
+        os.environ.pop("COLUMNS", None)
+        # Patch open at the cli module level so the chain's
+        # `open("/dev/tty", "r")` returns our fake.
+        cli_mod_open = cli_mod.__builtins__["open"] if isinstance(
+            cli_mod.__builtins__, dict) else cli_mod.__builtins__.open
+        try:
+            if isinstance(cli_mod.__builtins__, dict):
+                cli_mod.__builtins__["open"] = fake_open
+            else:
+                cli_mod.__builtins__.open = fake_open
+            result, report = _detect_terminal_width_report({})
+        finally:
+            cli_mod.subprocess.run = orig_run
+            if isinstance(cli_mod.__builtins__, dict):
+                cli_mod.__builtins__["open"] = cli_mod_open
+            else:
+                cli_mod.__builtins__.open = cli_mod_open
+
+        # The fake tput returned 80; we must have rejected it. The
+        # final result should be the safe compact fallback, NOT 80.
+        self.assertNotEqual(result, 80,
+            "tput cols=80 with no earlier TTY signal must be rejected as a "
+            "likely terminfo stub (Claude Code 2.1.139 regression)")
+        self.assertEqual(result, _COMPACT_LAYOUT_MIN_COLS,
+            "should fall through to the safe default when no signal is "
+            "trustworthy")
+
+        # The report must explain why we rejected the 80
+        tput_entries = [s for label, s in report if label == "tput cols"]
+        self.assertTrue(any("stub" in s or "rejected" in s for s in tput_entries),
+            "report must explain the rejection so --doctor users see why; "
+            "got: {!r}".format(tput_entries))
+
+    def test_tput_value_other_than_stub_not_rejected(self):
+        """tput cols=137 must NOT be rejected even when no earlier
+        signal succeeded — only the known stub values (80) trip the
+        heuristic. Real-but-unusual widths must pass through."""
+        from claude_statusline.cli import _TPUT_STUB_VALUES
+        self.assertIn(80, _TPUT_STUB_VALUES,
+            "80 is the documented terminfo default for xterm-family TERMs")
+        self.assertNotIn(137, _TPUT_STUB_VALUES,
+            "137 is a plausible real width — must not be on the stub list")
+        self.assertNotIn(120, _TPUT_STUB_VALUES)
+        self.assertNotIn(200, _TPUT_STUB_VALUES)
+
+    def test_stub_heuristic_not_triggered_when_prior_tty_signal_exists(self):
+        """The inverse of test_tput_stub_80_rejected_when_no_tty_signal:
+        if any earlier step succeeded with a TTY probe, then a tput
+        cols=80 reading is a REAL 80-col terminal, not a stub —
+        accept it.
+
+        Without this test, the heuristic could be inverted
+        (`and any_tty_probe_succeeded` instead of `and not …`) and
+        every existing test would still pass.
+
+        We don't simulate the full chain — we just verify the gating
+        flag's intent by checking the `any_tty_probe_succeeded`
+        condition in the source. This is a structural test, not
+        behavioral: it ensures the heuristic's PRECONDITION (no prior
+        TTY signal) is in the code, so a future refactor that drops
+        the gating fails this test.
+        """
+        import inspect
+        from claude_statusline import cli as cli_mod
+        source = inspect.getsource(cli_mod._detect_terminal_width_report)
+        # The gating condition is the difference between "reject every
+        # tput 80" (would harm real 80-col users) and "reject tput 80
+        # only when no other TTY signal succeeded" (correct).
+        self.assertIn("any_tty_probe_succeeded", source,
+            "stub heuristic must gate on whether any earlier TTY probe "
+            "succeeded — otherwise users with a real 80-col terminal would "
+            "be miscategorized when other signals also fail")
+        # Must check the FALSE branch (no signal), not the true branch.
+        self.assertIn("not any_tty_probe_succeeded", source,
+            "stub heuristic must reject only when no earlier TTY signal "
+            "succeeded — guard against accidental inversion of the gate")
+
+    def test_stub_heuristic_actually_reachable_on_platform(self):
+        """The headline test_tput_stub_80_rejected_when_no_tty_signal
+        monkey-patches __builtins__["open"]. On Windows, if that
+        patch fails to take (some Python build configs), the chain
+        never opens /dev/tty and the stub branch is never reached —
+        the assertion passes trivially via the safe fallback path.
+
+        This test makes the silent skip loud: the report MUST contain
+        a tput cols entry that mentions 'stub' or 'rejected', proving
+        the stub branch actually fired. Without this, the green CI
+        on Windows could be hiding a broken patch.
+        """
+        import subprocess as subprocess_mod
+        import claude_statusline.cli as cli_mod
+
+        orig_run = subprocess_mod.run
+        orig_open = __builtins__["open"] if isinstance(__builtins__, dict) else open
+
+        class FakeTTY:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return ""
+            def fileno(self): return 0
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[0] == "stty":
+                return subprocess_mod.CompletedProcess(cmd, 1, "", "")
+            if cmd[0] == "tput":
+                return subprocess_mod.CompletedProcess(cmd, 0, "80\n", "")
+            return orig_run(cmd, *args, **kwargs)
+
+        def fake_open(path, *args, **kwargs):
+            if path == "/dev/tty":
+                return FakeTTY()
+            return orig_open(path, *args, **kwargs)
+
+        cli_mod.subprocess.run = fake_run
+        os.environ.pop("COLUMNS", None)
+        cli_builtins = cli_mod.__builtins__
+        cli_open_was_dict = isinstance(cli_builtins, dict)
+        cli_orig_open = (cli_builtins["open"] if cli_open_was_dict
+                         else cli_builtins.open)
+        try:
+            if cli_open_was_dict:
+                cli_builtins["open"] = fake_open
+            else:
+                cli_builtins.open = fake_open
+            _result, report = cli_mod._detect_terminal_width_report({})
+        finally:
+            cli_mod.subprocess.run = orig_run
+            if cli_open_was_dict:
+                cli_builtins["open"] = cli_orig_open
+            else:
+                cli_builtins.open = cli_orig_open
+
+        # Find the tput entry. If it's not there, the patch silently
+        # failed and the headline test would have green-lit a broken
+        # build. Make that LOUD.
+        tput_entries = [s for label, s in report if label == "tput cols"]
+        self.assertTrue(tput_entries,
+            "tput cols step must have produced a report entry — if absent, "
+            "the /dev/tty open path failed to reach the stty/tput block "
+            "and the stub-rejection assertion in the headline test is "
+            "vacuous on this platform")
+        self.assertTrue(
+            any("stub" in s or "rejected" in s for s in tput_entries),
+            "tput cols must show the stub-rejection signature ('stub' or "
+            "'rejected'); got: {!r}".format(tput_entries))
+
+    # --- Process-tree walk --------------------------------------------
+
+    def test_process_tree_walk_skipped_on_windows(self):
+        """Windows has no /proc and a different subprocess ancestry
+        model — the walk must short-circuit cleanly."""
+        from claude_statusline.cli import _detect_width_via_process_tree
+        if platform.system() != "Windows":
+            self.skipTest("Windows-only check")
+        result, status = _detect_width_via_process_tree()
+        self.assertIsNone(result)
+        self.assertIn("Windows", status)
+
+    def test_process_tree_walk_returns_tuple(self):
+        """The walk must always return a 2-tuple (Optional[int], str)
+        regardless of platform — never raise, never return None alone.
+        --doctor concatenates the status string into its output."""
+        from claude_statusline.cli import _detect_width_via_process_tree
+        result = _detect_width_via_process_tree()
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        winner, status = result
+        self.assertTrue(winner is None or isinstance(winner, int))
+        self.assertIsInstance(status, str)
+        self.assertGreater(len(status), 0,
+            "status must be non-empty for --doctor formatting")
+
+    # --- Report shape (consumed by --doctor) --------------------------
+
+    def test_report_is_list_of_pairs(self):
+        """_detect_terminal_width_report returns (int, list[(str, str)])
+        — pin the shape so --doctor formatting doesn't break."""
+        from claude_statusline.cli import _detect_terminal_width_report
+        result, report = _detect_terminal_width_report({})
+        self.assertIsInstance(result, int)
+        self.assertIsInstance(report, list)
+        self.assertGreater(len(report), 0)
+        for entry in report:
+            self.assertIsInstance(entry, tuple)
+            self.assertEqual(len(entry), 2)
+            label, status = entry
+            self.assertIsInstance(label, str)
+            self.assertIsInstance(status, str)
+
+    def test_report_marks_winner(self):
+        """The winning step's status must contain '(winner)' so the
+        report is scannable. Stdin terminal.columns is the cheapest
+        guaranteed-winning path to test this on."""
+        from claude_statusline.cli import _detect_terminal_width_report
+        _result, report = _detect_terminal_width_report({"terminal": {"columns": 165}})
+        winner_entries = [s for _label, s in report if "(winner)" in s]
+        self.assertEqual(len(winner_entries), 1,
+            "exactly one step should be marked as the winner")
+        self.assertIn("165", winner_entries[0])
+
+    def test_thin_wrapper_unchanged_signature(self):
+        """_detect_terminal_width(data) must still return a plain int
+        — every existing caller relies on the int return shape. The
+        refactor that added the report path must not have changed the
+        public signature."""
+        from claude_statusline.cli import _detect_terminal_width
+        result = _detect_terminal_width({"terminal": {"columns": 165}})
+        self.assertIsInstance(result, int)
+        self.assertEqual(result, 165)
+        # No-arg form must also still work (used by --doctor and the
+        # historical fallback path).
+        result_no_arg = _detect_terminal_width()
+        self.assertIsInstance(result_no_arg, int)
+
+    # --- Lying-signal regression tests --------------------------------
+    #
+    # These tests pin the generic "what if step N lies with a bogus
+    # value" pattern. The 2.1.139 regression was specifically tput
+    # returning 80, but the same shape of bug could appear at any
+    # other probe step in the future. Each test below simulates one
+    # probe returning a wildly wrong value and asserts the chain
+    # rejects it (via the _TERM_WIDTH_MIN/_MAX range check or the
+    # stub heuristic) rather than blindly trusting it.
+
+    def test_shutil_get_terminal_size_columns_0_rejected(self):
+        """shutil.get_terminal_size returning columns=0 (some
+        misconfigured environments / future regressions) must be
+        rejected by the range check, not accepted as a real width."""
+        import claude_statusline.cli as cli_mod
+        orig_shutil_gts = cli_mod.shutil.get_terminal_size
+        cli_mod.shutil.get_terminal_size = lambda fallback=None: os.terminal_size((0, 0))
+        try:
+            result = cli_mod._detect_terminal_width({})
+            self.assertNotEqual(result, 0,
+                "shutil returning 0 must be rejected by the >= 20 range check; "
+                "blindly accepting it would render an unusable layout")
+            self.assertGreaterEqual(result, 20)
+        finally:
+            cli_mod.shutil.get_terminal_size = orig_shutil_gts
+
+    def test_os_get_terminal_size_fd_columns_0_rejected(self):
+        """os.get_terminal_size(fd) returning columns=0 (e.g., a
+        closed pty that still claims to be a terminal) must be
+        rejected. Forces the chain to fall through to the next step
+        rather than render an unusable 0-col layout."""
+        import claude_statusline.cli as cli_mod
+        # Force shutil to return -1 (its sentinel "no TTY" value) so
+        # we definitely reach the os.get_terminal_size step.
+        orig_shutil_gts = cli_mod.shutil.get_terminal_size
+        orig_os_gts = cli_mod.os.get_terminal_size
+        # Restore COLUMNS too: module-level baseline at line 21 seeds
+        # it; if we leak the pop here, every subsequent test in the
+        # process runs without that baseline. Captured before pop,
+        # restored in finally to keep cross-test ordering insensitive.
+        saved_cols = os.environ.pop("COLUMNS", None)
+        cli_mod.shutil.get_terminal_size = lambda fallback=None: os.terminal_size((-1, -1))
+        cli_mod.os.get_terminal_size = lambda fd: os.terminal_size((0, 0))
+        try:
+            result = cli_mod._detect_terminal_width({})
+            self.assertNotEqual(result, 0,
+                "os.get_terminal_size returning 0 must be rejected; "
+                "without the range check we would render an unusable layout")
+            self.assertGreaterEqual(result, 20)
+        finally:
+            cli_mod.shutil.get_terminal_size = orig_shutil_gts
+            cli_mod.os.get_terminal_size = orig_os_gts
+            if saved_cols is not None:
+                os.environ["COLUMNS"] = saved_cols
+
+    def test_stty_returns_0_0_rejected_by_range_check(self):
+        """If stty started returning '0 0' tomorrow (analogous to the
+        2.1.139 tput stub but at a different layer), the result must
+        be rejected. This is the generic test pattern that would have
+        caught the original 2.1.139 regression if it had been in
+        place."""
+        import subprocess as subprocess_mod
+        import claude_statusline.cli as cli_mod
+
+        orig_run = subprocess_mod.run
+        orig_open = __builtins__["open"] if isinstance(__builtins__, dict) else open
+
+        class FakeTTY:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return ""
+            def fileno(self): return 0
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[0] == "stty":
+                # The hypothetical future regression: stty returns 0 0
+                # without erroring.
+                return subprocess_mod.CompletedProcess(cmd, 0, "0 0\n", "")
+            if cmd[0] == "tput":
+                # Make tput also fail so we don't accidentally win there.
+                return subprocess_mod.CompletedProcess(cmd, 1, "", "")
+            return orig_run(cmd, *args, **kwargs)
+
+        def fake_open(path, *args, **kwargs):
+            if path == "/dev/tty":
+                return FakeTTY()
+            return orig_open(path, *args, **kwargs)
+
+        cli_mod.subprocess.run = fake_run
+        # Restore COLUMNS in finally — without this, the module-level
+        # baseline at line 21 leaks and later tests run without it.
+        saved_cols = os.environ.pop("COLUMNS", None)
+        cli_builtins = cli_mod.__builtins__
+        cli_open_was_dict = isinstance(cli_builtins, dict)
+        cli_orig_open = (cli_builtins["open"] if cli_open_was_dict
+                         else cli_builtins.open)
+        try:
+            if cli_open_was_dict:
+                cli_builtins["open"] = fake_open
+            else:
+                cli_builtins.open = fake_open
+            result, report = cli_mod._detect_terminal_width_report({})
+        finally:
+            cli_mod.subprocess.run = orig_run
+            if cli_open_was_dict:
+                cli_builtins["open"] = cli_orig_open
+            else:
+                cli_builtins.open = cli_orig_open
+            if saved_cols is not None:
+                os.environ["COLUMNS"] = saved_cols
+
+        self.assertNotEqual(result, 0,
+            "stty returning '0 0' must be rejected by the range check")
+        # stty entry should record the rejection.
+        stty_entries = [s for label, s in report if label == "stty size"]
+        if stty_entries:
+            # Only meaningful when the chain actually reached stty
+            # (e.g., on Windows the /dev/tty fake-open might not take).
+            self.assertTrue(
+                any("out of range" in s or "rejected" in s
+                    for s in stty_entries),
+                "report must mark the 0 rejection so --doctor users "
+                "can see the lie; got: {!r}".format(stty_entries))
+
+
+class TestActivityCounter(unittest.TestCase):
+    """Transcript-tail-read tool-call counter (the `activity` section).
+
+    Reads the last _TRANSCRIPT_TAIL_BYTES of the JSONL transcript_path
+    from stdin, counts tool_use blocks since the most recent user
+    message, caches the result for _ACTIVITY_CACHE_TTL seconds. Hidden
+    when count is zero so idle sessions show nothing.
+    """
+
+    def _write_transcript(self, lines):
+        """Helper: write a JSONL transcript and return its path.
+
+        Transcripts MUST live under ~/.claude/ for the realpath
+        validation in get_session_activity_count to accept them.
+        We create a temp subdirectory under ~/.claude/ and clean up
+        at tearDown.
+        """
+        f = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".jsonl",
+            delete=False, newline="", dir=self._test_dir,
+        )
+        for entry in lines:
+            f.write(json.dumps(entry) + "\n")
+        f.close()
+        self._created_paths.append(f.name)
+        return f.name
+
+    def setUp(self):
+        import shutil as shutil_mod
+        from claude_statusline import sessions as sessions_mod
+        self._shutil_mod = shutil_mod
+        # Create a transient directory under ~/.claude/ so transcripts
+        # written by tests pass the realpath validation. mkdir
+        # _CLAUDE_DIR if missing — let any creation error surface as
+        # a real test failure (silent skip would hide CI misconfig).
+        os.makedirs(sessions_mod._CLAUDE_DIR, exist_ok=True)
+        self._test_dir = tempfile.mkdtemp(
+            prefix="claude-status-test-", dir=sessions_mod._CLAUDE_DIR,
+        )
+        self._created_paths = []
+        # Clear the activity cache for each test so we don't get
+        # cross-test contamination from the 5s TTL.
+        try:
+            cache_dir = sessions_mod._cache_dir()
+            if os.path.isdir(cache_dir):
+                for name in os.listdir(cache_dir):
+                    if name.startswith("activity_"):
+                        try:
+                            os.remove(os.path.join(cache_dir, name))
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+
+    def tearDown(self):
+        # shutil.rmtree (not os.rmdir) so the cleanup survives any
+        # test that writes extra files into _test_dir without
+        # registering them in _created_paths. ignore_errors=True
+        # keeps a tearDown hiccup from masking a real test failure.
+        self._shutil_mod.rmtree(self._test_dir, ignore_errors=True)
+
+    # --- happy path ---------------------------------------------------
+
+    def test_counts_tool_uses_since_last_user(self):
+        from claude_statusline.sessions import _count_activity_from_transcript
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "first prompt"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+                {"type": "text", "text": "ok"},
+            ]}},
+            {"message": {"role": "user", "content": "second prompt"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Read"},
+                {"type": "tool_use", "name": "Edit"},
+                {"type": "tool_use", "name": "Bash"},
+            ]}},
+        ])
+        # Three tool uses in the most recent assistant turn; the one
+        # before the second user message must NOT be counted.
+        self.assertEqual(_count_activity_from_transcript(path), 3)
+
+    def test_zero_when_no_tool_use_after_last_user(self):
+        from claude_statusline.sessions import _count_activity_from_transcript
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "hi"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "hello"},
+            ]}},
+        ])
+        self.assertEqual(_count_activity_from_transcript(path), 0)
+
+    def test_zero_when_no_user_message_in_tail(self):
+        """If our tail window doesn't reach back to a user message,
+        return 0 rather than count the whole window as activity (which
+        would be misleading — that activity belongs to a previous turn)."""
+        from claude_statusline.sessions import _count_activity_from_transcript
+        # Only assistant tool_uses, no user message at all → 0.
+        path = self._write_transcript([
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}},
+        ])
+        self.assertEqual(_count_activity_from_transcript(path), 0)
+
+    # --- edge cases ---------------------------------------------------
+
+    def test_path_missing(self):
+        from claude_statusline.sessions import _count_activity_from_transcript
+        self.assertEqual(
+            _count_activity_from_transcript("/nonexistent/transcript.jsonl"), 0)
+
+    def test_path_none(self):
+        from claude_statusline.sessions import get_session_activity_count
+        self.assertEqual(get_session_activity_count(None), 0)
+        self.assertEqual(get_session_activity_count(""), 0)
+
+    def test_path_non_string(self):
+        from claude_statusline.sessions import get_session_activity_count
+        for bad in (42, [], {}, True):
+            self.assertEqual(get_session_activity_count(bad), 0,
+                "non-string transcript_path={!r} must return 0, not crash".format(bad))
+
+    def test_empty_file(self):
+        from claude_statusline.sessions import _count_activity_from_transcript
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
+        f.close()
+        self._created_paths.append(f.name)
+        self.assertEqual(_count_activity_from_transcript(f.name), 0)
+
+    def test_malformed_json_lines_skipped(self):
+        """A garbled line in the middle must not abort parsing — skip
+        it and continue counting the valid lines."""
+        from claude_statusline.sessions import _count_activity_from_transcript
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "go"}},
+        ])
+        # Append a malformed line and another valid tool_use line.
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("{this is not json\n")
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}}) + "\n")
+        self.assertEqual(_count_activity_from_transcript(path), 1)
+
+    def test_expanded_retry_when_initial_tail_misses_user(self):
+        """When the cheap 64 KiB tail doesn't reach back to a user
+        message, the function retries with the expanded 1 MiB cap.
+        Real-world scenario: an assistant turn produced > 64 KiB of
+        output (long tool_result block). Without the retry we'd
+        return 0 and the activity counter would silently vanish
+        mid-turn."""
+        from claude_statusline.sessions import (
+            _TRANSCRIPT_TAIL_BYTES,
+            _count_activity_from_transcript,
+        )
+        # User message at start, then enough padding to push it well
+        # beyond the 64 KiB initial cap but inside the 1 MiB expanded
+        # cap, then a fresh tool_use.
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "go"}},
+        ])
+        padding_line = json.dumps({
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "x" * 1000},
+            ]},
+        }) + "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            bytes_written = 0
+            while bytes_written < _TRANSCRIPT_TAIL_BYTES + 10_000:
+                f.write(padding_line)
+                bytes_written += len(padding_line.encode("utf-8"))
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}}) + "\n")
+        # Initial 64 KiB tail misses the user; expanded 1 MiB retry
+        # finds it and counts the tool_use.
+        self.assertEqual(_count_activity_from_transcript(path), 1,
+            "expanded retry must find a user message in the 1 MiB window")
+
+    def test_outer_envelope_role_schema_supported(self):
+        """Some Claude Code schema versions put `role` at the outer
+        envelope rather than under `message`. The fallback branch at
+        sessions.py:_parse_transcript_tail must accept this shape.
+        Without this test, that branch was dead code in the suite."""
+        from claude_statusline.sessions import _count_activity_from_transcript
+        # NOTE: write raw JSONL because _write_transcript wraps in
+        # {"message": ...} which is the OTHER schema.
+        path = self._write_transcript([])  # creates the file
+        with open(path, "w", encoding="utf-8") as f:
+            # Outer-envelope role: no 'message' wrapper.
+            f.write(json.dumps({"role": "user", "content": "go"}) + "\n")
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}}) + "\n")
+        self.assertEqual(_count_activity_from_transcript(path), 1,
+            "outer-envelope role:user must be recognized as a user message")
+
+    def test_consecutive_user_messages_use_most_recent(self):
+        """Real sessions sometimes have adjacent user messages
+        (system-injected reminders, retries). The walk-backwards
+        loop must pick the MOST RECENT user message — counting only
+        tool_uses after the LAST one, not the first."""
+        from claude_statusline.sessions import _count_activity_from_transcript
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "first"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},  # would be counted if we picked first user
+                {"type": "tool_use", "name": "Read"},
+            ]}},
+            {"message": {"role": "user", "content": "second"}},
+            {"message": {"role": "user", "content": "third"}},  # consecutive
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Edit"},  # only this counts
+            ]}},
+        ])
+        self.assertEqual(_count_activity_from_transcript(path), 1,
+            "consecutive user messages: count only from the most recent")
+
+    def test_user_message_containing_literal_tool_use_text(self):
+        """A user message body that contains the literal text
+        '"tool_use"' (e.g., the user asking 'what does "tool_use"
+        mean?') must NOT inflate the count. The cheap pre-filter
+        admits it, but the JSON parse + structural check should
+        exclude it."""
+        from claude_statusline.sessions import _count_activity_from_transcript
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": 'what is "tool_use" type?'}},
+            {"message": {"role": "assistant", "content": [
+                # A text block that mentions "tool_use" in its body.
+                {"type": "text", "text": 'the "tool_use" type is a content block'},
+            ]}},
+        ])
+        self.assertEqual(_count_activity_from_transcript(path), 0,
+            "literal 'tool_use' text in message bodies must not inflate count")
+
+    def test_path_is_directory_returns_zero(self):
+        """transcript_path pointing at a directory (instead of a
+        JSONL file) must return 0, not crash. Guards against an
+        upstream that mistakenly sets transcript_path to the
+        containing folder."""
+        from claude_statusline.sessions import _count_activity_from_transcript
+        # self._test_dir is a real directory under ~/.claude/ — passes
+        # the realpath validation but isn't a file.
+        self.assertEqual(_count_activity_from_transcript(self._test_dir), 0)
+
+    def test_claude_dir_symlinked_paths_accepted(self):
+        """When ~/.claude is itself a symlink to another location
+        (common on macOS / NAS setups / users who symlink dotdirs),
+        a legitimate transcript_path under ~/.claude/projects/...
+        must still be accepted.
+
+        Before the fix, _CLAUDE_DIR was unresolved (expanduser only)
+        but transcript_path was compared via os.path.realpath, so the
+        symlink-resolved real path didn't share the unresolved prefix
+        and every transcript was silently rejected. Users in that
+        layout would see `act:` permanently absent with no diagnostic.
+
+        We can't easily symlink a real ~/.claude in a unit test, but
+        we can verify the module-level _CLAUDE_DIR_REAL constant
+        exists and equals the resolved form (the actual fix).
+        """
+        from claude_statusline import sessions as sessions_mod
+        # The fix: _CLAUDE_DIR_REAL is the resolved form, used by
+        # get_session_activity_count's prefix check.
+        self.assertTrue(hasattr(sessions_mod, "_CLAUDE_DIR_REAL"),
+            "fix introduces _CLAUDE_DIR_REAL — must exist at module level")
+        # The resolved form must equal realpath of the unresolved form.
+        self.assertEqual(sessions_mod._CLAUDE_DIR_REAL,
+                         os.path.realpath(sessions_mod._CLAUDE_DIR))
+        # Crucially: the get_session_activity_count validation must
+        # check against _CLAUDE_DIR_REAL, not _CLAUDE_DIR. Pin via
+        # source inspection so a future refactor that reverts to
+        # _CLAUDE_DIR fails this test.
+        import inspect
+        source = inspect.getsource(sessions_mod.get_session_activity_count)
+        self.assertIn("_CLAUDE_DIR_REAL", source,
+            "get_session_activity_count must use _CLAUDE_DIR_REAL for "
+            "the prefix check — using unresolved _CLAUDE_DIR breaks "
+            "users whose ~/.claude is symlinked")
+
+    def test_transcript_path_outside_claude_dir_rejected(self):
+        """Defense in depth: transcript_path comes from external JSON.
+        A path outside ~/.claude/ (whether by buggy upstream or
+        symlink escape) must be rejected by get_session_activity_count
+        before any open() is attempted.
+
+        Even though the parse function tolerates arbitrary paths
+        (returns 0 on any error), the caller-side validation is the
+        security boundary that prevents read attempts on /etc/shadow
+        and similar paths.
+        """
+        from claude_statusline.sessions import get_session_activity_count
+        # Use a tempfile outside ~/.claude/ — the standard tmp dir.
+        f = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".jsonl", delete=False)
+        f.write(json.dumps({"message": {"role": "user", "content": "x"}}) + "\n")
+        f.write(json.dumps({"message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash"},
+        ]}}) + "\n")
+        f.close()
+        try:
+            # If validation were missing, this would return 1.
+            self.assertEqual(get_session_activity_count(f.name), 0,
+                "transcript_path outside ~/.claude/ must be rejected by "
+                "the realpath check, not silently read")
+        finally:
+            try:
+                os.remove(f.name)
+            except OSError:
+                pass
+
+    def test_small_file_no_user_has_distinct_status(self):
+        """When the WHOLE file fits in the 64 KiB cap (no retry
+        needed) and contains no user message, the status must say
+        'in N byte file' — not the misleading '1 MiB tail' wording
+        that would suggest we tried something we didn't."""
+        from claude_statusline.sessions import _count_activity_with_status
+        # Tiny file (~ a few hundred bytes) with no user message.
+        path = self._write_transcript([
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "hi"},
+            ]}},
+        ])
+        count, status = _count_activity_with_status(path)
+        self.assertEqual(count, 0)
+        self.assertNotIn("1 MiB", status,
+            "small-file no-user-found status must not falsely claim "
+            "we tried a 1 MiB tail read; got: {!r}".format(status))
+        self.assertIn("byte file", status,
+            "small-file status should name the actual file size; "
+            "got: {!r}".format(status))
+
+    def test_count_with_status_disambiguates_zero(self):
+        """_count_activity_with_status returns a (count, status)
+        tuple so --doctor can distinguish:
+          - legitimate idle (parsed OK, 0 tool_uses since last user)
+          - transient failure (file missing / empty / stat error)
+          - giving-up (turn larger than 1 MiB expanded window)
+
+        Without this, the --doctor Transcript: block could not
+        explain WHY the activity counter shows 0. Pin all three
+        cases below."""
+        from claude_statusline.sessions import _count_activity_with_status
+        # Case 1: legitimate idle — file parses OK, no tool_uses.
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "go"}},
+        ])
+        count, status = _count_activity_with_status(path)
+        self.assertEqual(count, 0)
+        self.assertIn("parsed", status,
+            "legitimate idle must report 'parsed' so --doctor users "
+            "see the parse succeeded; got: {!r}".format(status))
+        self.assertIn("0 tool_use", status)
+
+        # Case 2: file missing — security check (path outside
+        # ~/.claude/) would normally reject, but here we test the
+        # parse function directly which only checks isfile.
+        count, status = _count_activity_with_status(
+            os.path.join(self._test_dir, "does-not-exist.jsonl"))
+        self.assertEqual(count, 0)
+        self.assertIn("missing", status,
+            "missing file must produce a distinguishable status, not "
+            "the same string as legitimate idle; got: {!r}".format(status))
+
+    def test_gave_up_state_cached_to_avoid_repeated_1mib_reads(self):
+        """When _count_activity_with_status returns the gave-up
+        status (turn larger than 1 MiB), get_session_activity_count
+        writes a separate long-TTL cache entry. Subsequent calls
+        within that TTL must short-circuit without re-reading the
+        1 MiB tail — verify by mutating the file and confirming the
+        cached 0 still wins."""
+        from claude_statusline.sessions import (
+            _TRANSCRIPT_TAIL_BYTES_EXPANDED,
+            get_session_activity_count,
+        )
+        # Construct a "gave up" file: user message at the start,
+        # padding past the 1 MiB expanded cap, then a tool_use.
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "old"}},
+        ])
+        padding_line = json.dumps({
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "x" * 1000},
+            ]},
+        }) + "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            bytes_written = 0
+            while bytes_written < _TRANSCRIPT_TAIL_BYTES_EXPANDED + 10_000:
+                f.write(padding_line)
+                bytes_written += len(padding_line.encode("utf-8"))
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}}) + "\n")
+
+        # First call: gave-up state, writes the gaveup cache entry.
+        first = get_session_activity_count(path)
+        self.assertEqual(first, 0,
+            "huge-turn case must return 0 (no user message in window)")
+
+        # Mutate the file to make a fresh user → tool_use pattern
+        # near the end (would normally be detectable). The gaveup
+        # cache must still return 0 — proves we did NOT re-read.
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"message": {"role": "user", "content": "next"}}) + "\n")
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Read"},
+            ]}}) + "\n")
+        second = get_session_activity_count(path)
+        self.assertEqual(second, 0,
+            "gave-up cache must short-circuit subsequent calls within TTL — "
+            "without it we would re-read 1 MiB on every render of a stuck turn")
+
+    def test_zero_counts_not_cached(self):
+        """A zero count can mean 'no activity' OR 'parse failed,
+        transient file issue.' Caching zero would suppress recovery
+        for the full 5s TTL. Verify zero is NOT cached: an empty
+        file (returns 0) followed by a populated state (returns >0)
+        must show the new count immediately, not a stale 0."""
+        from claude_statusline.sessions import get_session_activity_count
+        # Create a file that initially has no tool_use after the user.
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "go"}},
+        ])
+        first = get_session_activity_count(path)
+        self.assertEqual(first, 0)
+        # Append a tool_use right after — without TTL expiry, a cached
+        # 0 would still be returned. With our non-zero-cache fix, the
+        # function should re-read and find the new tool_use.
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}}) + "\n")
+        second = get_session_activity_count(path)
+        self.assertEqual(second, 1,
+            "zero result must NOT be cached — recovery should be immediate, "
+            "not blocked behind the 5s TTL")
+
+    def test_returns_zero_when_turn_exceeds_expanded_cap(self):
+        """When even the expanded 1 MiB retry can't find a user
+        message, we return 0 — this is the genuine giving-up case
+        for pathologically large single turns. Prevents misleading
+        counts of activity from a previous turn."""
+        from claude_statusline.sessions import (
+            _TRANSCRIPT_TAIL_BYTES_EXPANDED,
+            _count_activity_from_transcript,
+        )
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "old"}},
+        ])
+        padding_line = json.dumps({
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "x" * 1000},
+            ]},
+        }) + "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            bytes_written = 0
+            # Push the user message past the 1 MiB expanded cap.
+            while bytes_written < _TRANSCRIPT_TAIL_BYTES_EXPANDED + 10_000:
+                f.write(padding_line)
+                bytes_written += len(padding_line.encode("utf-8"))
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}}) + "\n")
+        self.assertEqual(_count_activity_from_transcript(path), 0,
+            "even the expanded retry cannot reach the user — return 0 rather "
+            "than misleadingly count a previous turn's activity")
+
+    def test_partial_first_line_discarded(self):
+        """When reading from a tail offset (start > 0), the first line
+        of the chunk may be partial — must be discarded, not parsed."""
+        from claude_statusline.sessions import (
+            _TRANSCRIPT_TAIL_BYTES,
+            _count_activity_from_transcript,
+        )
+        # Construct a file where the byte at _TRANSCRIPT_TAIL_BYTES
+        # offset from EOF falls in the middle of a JSON object.
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "go"}},
+        ])
+        # Pad so that the tail window starts mid-line of an earlier
+        # entry. The first read line will be malformed JSON that the
+        # discard logic must drop without erroring.
+        with open(path, "a", encoding="utf-8") as f:
+            # Single very long line larger than the tail cap.
+            big = "x" * (_TRANSCRIPT_TAIL_BYTES + 5000)
+            f.write(json.dumps({
+                "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": big},
+                ]},
+            }) + "\n")
+            f.write(json.dumps({"message": {"role": "user", "content": "next"}}) + "\n")
+            f.write(json.dumps({"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+                {"type": "tool_use", "name": "Read"},
+            ]}}) + "\n")
+        # Must not crash on the partial first line; must find the user
+        # message that's whole inside the tail; must count 2 tool_uses.
+        result = _count_activity_from_transcript(path)
+        self.assertEqual(result, 2)
+
+    # --- caching ------------------------------------------------------
+
+    def test_result_cached(self):
+        """A second call within TTL must hit cache (not re-read file).
+        Verify by mutating the file between calls and confirming the
+        second call returns the stale value."""
+        from claude_statusline.sessions import get_session_activity_count
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "go"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+            ]}},
+        ])
+        first = get_session_activity_count(path)
+        self.assertEqual(first, 1)
+        # Mutate the file to have 5 tool_uses — but cache should still
+        # return 1 because the TTL hasn't expired.
+        with open(path, "a", encoding="utf-8") as f:
+            for _ in range(4):
+                f.write(json.dumps({"message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "name": "Bash"},
+                ]}}) + "\n")
+        second = get_session_activity_count(path)
+        self.assertEqual(second, 1, "must return cached value within TTL")
+
+    # --- end-to-end render --------------------------------------------
+
+    def test_activity_section_renders(self):
+        """Enabling the activity section produces 'act:N' in output
+        when count > 0."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "go"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash"},
+                {"type": "tool_use", "name": "Read"},
+            ]}},
+        ])
+
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["activity", "branch"]
+            data = {
+                "transcript_path": path,
+                "git_branch": "main",
+            }
+            output = cli_mod.render(data, "default")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            self.assertIn("act:", plain,
+                "activity section must render 'act:' label")
+            self.assertIn("2", plain,
+                "activity section must render the count value")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_activity_section_hidden_when_zero(self):
+        """Idle session (no tool calls in current turn) → section absent."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "go"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "no tools"},
+            ]}},
+        ])
+
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["activity", "branch"]
+            data = {"transcript_path": path, "git_branch": "main"}
+            output = cli_mod.render(data, "default")
+            self.assertNotIn("act:", output,
+                "activity must be silent when no tool calls in current turn")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_render_with_missing_transcript_path(self):
+        """A session without transcript_path on stdin must not crash —
+        the activity section just doesn't render."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["activity", "branch"]
+            data = {"git_branch": "main"}  # no transcript_path
+            output = cli_mod.render(data, "default")
+            self.assertNotIn("act:", output)
+            self.assertIn("main", output, "rest of the line must still render")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
 
 
 if __name__ == "__main__":

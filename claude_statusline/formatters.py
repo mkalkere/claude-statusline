@@ -104,7 +104,14 @@ def fmt_lines(added, removed):
 
 
 def fmt_cache_pct(cache_read, total_input):
-    """Format cache efficiency as percentage."""
+    """Format prompt cache hit ratio as a percentage.
+
+    Called with total_input = cache_read + cache_creation + input
+    (everything that could have been served from cache). The result
+    is "of the cacheable prompt input, how much actually hit the
+    cache" — close to 100% means the dynamic portion of each prompt
+    is small relative to the cached prefix.
+    """
     if not cache_read or not total_input or total_input <= 0:
         return ""
     pct = (cache_read / total_input) * 100
