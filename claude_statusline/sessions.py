@@ -13,6 +13,17 @@ import time
 
 _CACHE_TTL = 30  # seconds — longer than git cache since this is heavier
 _TOOL_CACHE_TTL = 10  # seconds — shorter for active session metrics
+_ACTIVITY_CACHE_TTL = 5  # seconds — shortest, this metric is "right now"
+
+# Maximum bytes to tail-read from the session transcript JSONL when
+# counting tool calls since the last user message. 64 KiB comfortably
+# covers a single assistant turn even with multiple large tool inputs
+# (a tool_use block with a 30K-token argument is rare and would still
+# fit in ~30 KiB UTF-8). Going larger would proportionally slow the
+# render hot path on long sessions; smaller risks missing the
+# preceding user message and undercounting. 64 KiB is the smallest
+# safe upper bound for typical Claude Code sessions.
+_TRANSCRIPT_TAIL_BYTES = 64 * 1024
 
 _CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
 _SESSIONS_DIR = os.path.join(_CLAUDE_DIR, "sessions")
@@ -217,6 +228,141 @@ def get_session_tool_count(session_id):
         pass
 
     _write_cache(cache_key, {"count": count})
+    return count
+
+
+def get_session_activity_count(transcript_path):
+    """Count tool_use entries in the *current assistant turn* of a session.
+
+    Differs from ``get_session_tool_count`` (which counts the whole
+    session): this counts only since the most recent ``role: "user"``
+    line, so it answers "how many tool calls is the assistant making
+    *right now*" — the active-work signal popularized by Claude HUD.
+    The count resets to 0 when the user sends the next message and
+    ticks up as the assistant uses tools to respond.
+
+    Reads only the tail of the transcript file (last
+    ``_TRANSCRIPT_TAIL_BYTES``), which:
+      - keeps the render hot path in single-digit ms even on multi-MB
+        sessions;
+      - tolerates the rare case where the user message preceding the
+        current turn was further back than the tail window (in which
+        case we'd undercount — but the alternative is full-file scan
+        on every render, which we explicitly do not want);
+      - tolerates the transcript file being rotated, truncated, or
+        absent entirely (all errors silently swallowed → return 0).
+
+    Args:
+        transcript_path: Path to the session transcript JSONL, taken
+            directly from Claude Code's stdin JSON. Validated as a
+            real, regular file before any read.
+
+    Returns:
+        Count of ``tool_use`` content blocks on assistant messages
+        since the most recent user message. 0 when the path is
+        invalid, the file can't be read, parsing fails, or no user
+        message exists in the tail (in which case the count is
+        meaningless and 0 is the safe degrade).
+    """
+    if not transcript_path or not isinstance(transcript_path, str):
+        return 0
+
+    # Cache by hashed path. Multiple sessions in the same wall-clock
+    # second would collide on the same cache file without this.
+    cache_key = "activity_{}".format(
+        hashlib.md5(
+            transcript_path.encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
+    )
+    cached = _read_cache(cache_key, ttl=_ACTIVITY_CACHE_TTL)
+    if cached is not None:
+        return cached.get("count", 0)
+
+    count = _count_activity_from_transcript(transcript_path)
+    _write_cache(cache_key, {"count": count})
+    return count
+
+
+def _count_activity_from_transcript(transcript_path):
+    """Pure-function tail-read + parse. No caching — that's the caller's
+    job. Split out so tests can exercise the parse logic without
+    having to defeat the TTL cache."""
+    try:
+        if not os.path.isfile(transcript_path):
+            return 0
+        size = os.path.getsize(transcript_path)
+        if size <= 0:
+            return 0
+
+        # Seek to the tail. On a small file, read from the start.
+        start = max(0, size - _TRANSCRIPT_TAIL_BYTES)
+        with open(transcript_path, "rb") as f:
+            f.seek(start)
+            chunk = f.read()
+    except (OSError, IOError):
+        return 0
+
+    # Drop the first (possibly truncated) line when we started mid-file.
+    # If we read from byte 0 the first line is whole and we keep it.
+    try:
+        text = chunk.decode("utf-8", errors="replace")
+    except (UnicodeDecodeError, AttributeError):
+        return 0
+
+    lines = text.split("\n")
+    if start > 0 and lines:
+        lines = lines[1:]
+
+    # Walk backwards: find the most recent user message, then count
+    # tool_use blocks on assistant messages between that point and EOF.
+    # We pre-filter cheaply on a substring to avoid json.loads on every
+    # line (a session JSONL can be thousands of lines).
+    last_user_idx = -1
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i]
+        # Quick reject: every record we care about contains a role
+        # field. The actual JSON check happens only on candidates.
+        if '"role"' not in line or '"user"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        # Claude Code's transcript wraps the role on the inner message
+        # object, not the outer envelope, on most schema versions.
+        msg = entry.get("message") if isinstance(entry, dict) else None
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            last_user_idx = i
+            break
+        # Fallback: some schema versions put role at the outer envelope.
+        if isinstance(entry, dict) and entry.get("role") == "user":
+            last_user_idx = i
+            break
+
+    # No user message in our tail window — return 0 rather than count
+    # the whole window as "activity," which would be misleading.
+    if last_user_idx < 0:
+        return 0
+
+    count = 0
+    for line in lines[last_user_idx + 1:]:
+        if '"tool_use"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        msg = entry.get("message") or {}
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                count += 1
     return count
 
 

@@ -111,6 +111,37 @@ def fmt_cache_pct(cache_read, total_input):
     return "{}%".format(int(pct))
 
 
+def fmt_cache_hit_ratio(cache_read, cache_create, input_tokens):
+    """Format prompt cache hit ratio: of the cacheable prompt input,
+    how much actually hit the cache.
+
+    Differs from fmt_cache_pct (which shows cache_read as a share of
+    total token traffic, dominated by output). This is the cleaner
+    signal for "is my prompt structure cache-friendly?" — close to
+    100% means the dynamic portion of each prompt is small relative
+    to the cached prefix; low values mean the cache is being missed
+    often (prompt prefix changing, cache expired, first turn of a
+    session, etc.).
+
+    Denominator = cache_read + cache_create + input_tokens
+    (everything that could have been served from cache).
+    Numerator   = cache_read (everything that actually was).
+
+    Returns "" when there is no cacheable input at all (first user
+    turn before any cache is written, or all token fields zero/None).
+    Cleanly handles None/0 in any field per the existing degrade-
+    gracefully pattern.
+    """
+    cache_read = cache_read or 0
+    cache_create = cache_create or 0
+    input_tokens = input_tokens or 0
+    denom = cache_read + cache_create + input_tokens
+    if denom <= 0:
+        return ""
+    pct = (cache_read / denom) * 100
+    return "{}%".format(int(pct))
+
+
 def fmt_countdown(resets_at_ms):
     """Format a reset countdown from a Unix epoch timestamp (ms).
 
