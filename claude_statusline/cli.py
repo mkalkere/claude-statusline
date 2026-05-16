@@ -29,6 +29,7 @@ from .git import (
 )
 from .sessions import (
     _VALID_EFFORT_LEVELS,
+    _count_activity_with_status,
     _read_cache, _write_cache,
     get_budget_config, get_clickable_links_enabled, get_compaction_threshold,
     get_disabled_sections, get_effort_level, get_session_activity_count,
@@ -737,16 +738,16 @@ _TERM_WIDTH_MAX = 4000
 
 # Common terminfo "cols" defaults that `tput cols` returns when invoked
 # without a controlling TTY. Claude Code 2.1.139+ runs hooks "without
-# terminal access" (release notes, 2026-05-08), which causes tput to
+# terminal access" (release notes, 2026-05-11), which causes tput to
 # fall back to the terminfo default for $TERM rather than reporting an
 # error. The most common stub value is 80 (xterm / xterm-256color /
-# xterm-kitty / vt100 / ansi all default to 80 cols). When we see
-# `tput cols == 80` AND every prior TTY probe failed, it is almost
-# certainly the stub — accepting it would render an 80-col layout into
-# the user's real (often 120+) terminal. We reject it and fall through
-# to the next signal. A user who genuinely has an 80-col terminal will
-# have been caught earlier by shutil/os.get_terminal_size if any TTY
-# was reachable; if none were reachable, we cannot distinguish a real
+# vt100 / ansi all default to 80 cols). When we see `tput cols == 80`
+# AND every prior TTY probe failed, it is almost certainly the stub —
+# accepting it would render an 80-col layout into the user's real
+# (often 120+) terminal. We reject it and fall through to the next
+# signal. A user who genuinely has an 80-col terminal will have been
+# caught earlier by shutil/os.get_terminal_size if any TTY was
+# reachable; if none were reachable, we cannot distinguish a real
 # 80 from the stub and choose to fall through (the safe default keeps
 # Line 2 visible; rendering at 80 when the real width is 200 hides
 # half the statusline).
@@ -1920,12 +1921,16 @@ def cmd_doctor():
             print("  Most recent: {}".format(most_recent))
             print("  Size:        {} bytes".format(size))
             print("  Modified:    {:.0f}s ago".format(age))
-            # Probe the activity counter against this transcript so
-            # users can see whether parse succeeds end-to-end.
-            from .sessions import get_session_activity_count
-            count = get_session_activity_count(most_recent)
+            # Probe the activity counter with the status-returning
+            # variant so users can distinguish "no activity yet" (idle)
+            # from "parse failed / window too small" (giving-up). The
+            # plain get_session_activity_count would lose that detail.
+            count, status = _count_activity_with_status(most_recent)
             print("  Activity:    {} tool_use(s) since last user message".format(count))
-        except (OSError, Exception) as exc:
+            print("  Parse:       {}".format(status))
+        except (OSError, ValueError) as exc:
+            # Narrow to expected failure modes; programmer errors
+            # (AttributeError, ImportError) bubble up so they're seen.
             print("  Could not probe transcript: {}: {}".format(
                 type(exc).__name__, exc))
     print()

@@ -31,6 +31,20 @@ _TRANSCRIPT_TAIL_BYTES = 64 * 1024
 _TRANSCRIPT_TAIL_BYTES_EXPANDED = 1024 * 1024
 
 _CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
+# Resolved variant used only by the transcript_path security check:
+# users who relocate Claude state via `~/.claude -> /Volumes/x/claude`
+# (common on macOS / NAS setups / devs who symlink dotdirs) would
+# otherwise see their legitimate transcripts rejected by the prefix
+# check, because os.path.realpath(transcript_path) resolves the
+# symlink but the unresolved _CLAUDE_DIR doesn't. Resolving once at
+# module load lets the check work for both direct and symlinked
+# layouts. Falls back to _CLAUDE_DIR itself when the dir doesn't
+# exist yet — realpath of a missing path just returns the path
+# unchanged on every platform we support, so the fallback is silent.
+try:
+    _CLAUDE_DIR_REAL = os.path.realpath(_CLAUDE_DIR)
+except (OSError, ValueError):
+    _CLAUDE_DIR_REAL = _CLAUDE_DIR
 _SESSIONS_DIR = os.path.join(_CLAUDE_DIR, "sessions")
 _PROJECTS_DIR = os.path.join(_CLAUDE_DIR, "projects")
 
@@ -277,9 +291,12 @@ def get_session_activity_count(transcript_path):
     # transcripts under ~/.claude/ (typically projects/<slug>/...),
     # so we require the resolved real path to live there. Matches the
     # _SESSION_ID_RE regex pattern already used for session IDs.
+    #
+    # Compare both sides resolved (_CLAUDE_DIR_REAL) so users who
+    # relocated ~/.claude via symlink aren't silently locked out.
     try:
         real = os.path.realpath(transcript_path)
-        if not real.startswith(_CLAUDE_DIR + os.sep) and real != _CLAUDE_DIR:
+        if not real.startswith(_CLAUDE_DIR_REAL + os.sep) and real != _CLAUDE_DIR_REAL:
             return 0
     except (OSError, ValueError):
         return 0
@@ -310,9 +327,28 @@ def get_session_activity_count(transcript_path):
 
 
 def _count_activity_from_transcript(transcript_path):
-    """Pure-function tail-read + parse. No caching — that's the caller's
-    job. Split out so tests can exercise the parse logic without
-    having to defeat the TTL cache.
+    """Pure-function tail-read + parse. Returns int count (>= 0).
+
+    Thin wrapper around :func:`_count_activity_with_status`. Use the
+    `_with_status` form when you need to distinguish "no activity"
+    from "parse failed / window too small" (e.g. --doctor probe).
+    """
+    count, _status = _count_activity_with_status(transcript_path)
+    return count
+
+
+def _count_activity_with_status(transcript_path):
+    """Tail-read + parse, returning (count, status_string).
+
+    Status disambiguates count==0:
+      - "parsed (... ; 0 tool_use(s) since last user)" — legitimate idle
+      - "file missing or not a regular file"           — transient
+      - "file is empty"                                — transient
+      - "stat error: <ErrorClass>"                     — transient
+      - "no user message in 1 MiB tail (...)"          — gave up
+    Used by --doctor so users can distinguish silent-section-empty
+    from genuinely-no-activity. ``get_session_activity_count``
+    discards the status and just returns the count.
 
     Reads the last _TRANSCRIPT_TAIL_BYTES; if the preceding user
     message wasn't in that window, retries once with the expanded cap
@@ -320,19 +356,19 @@ def _count_activity_from_transcript(transcript_path):
     """
     try:
         if not os.path.isfile(transcript_path):
-            return 0
+            return 0, "file missing or not a regular file"
         size = os.path.getsize(transcript_path)
         if size <= 0:
-            return 0
-    except (OSError, IOError):
-        return 0
+            return 0, "file is empty"
+    except (OSError, IOError) as exc:
+        return 0, "stat error: {}".format(type(exc).__name__)
 
     # First attempt: cheap 64 KiB tail. Covers the vast majority of
     # turns. Only retry with the expanded cap if no user message was
     # found in the initial window.
     count = _parse_transcript_tail(transcript_path, size, _TRANSCRIPT_TAIL_BYTES)
     if count is not None:
-        return count
+        return count, "parsed (64 KiB tail; {} tool_use(s) since last user)".format(count)
 
     # Expanded retry — but only if the file is bigger than the first
     # cap (otherwise the result is identical and we'd waste a read).
@@ -340,13 +376,13 @@ def _count_activity_from_transcript(transcript_path):
         count = _parse_transcript_tail(
             transcript_path, size, _TRANSCRIPT_TAIL_BYTES_EXPANDED)
         if count is not None:
-            return count
+            return count, "parsed (1 MiB expanded tail; {} tool_use(s))".format(count)
 
     # Two reads still couldn't find a user message — the assistant
     # turn is genuinely larger than 1 MiB, or the file is malformed.
     # Return 0 rather than count window contents (which would belong
     # to a previous turn).
-    return 0
+    return 0, "no user message in 1 MiB tail (turn exceeds window or malformed file)"
 
 
 def _parse_transcript_tail(transcript_path, size, tail_bytes):

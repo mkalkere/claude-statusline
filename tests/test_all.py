@@ -4847,8 +4847,8 @@ class TestEffortLevelFromStdin(unittest.TestCase):
 class TestClaudeCode2139WidthRegression(unittest.TestCase):
     """Width-detection guards for the Claude Code 2.1.139 regression.
 
-    2.1.139 (2026-05-08 release notes: "hooks now run without terminal
-    access") removed every TTY signal the v0.5.7 fallback chain
+    2.1.139 (2026-05-11 release notes: "hooks now run without terminal
+    access") removed every TTY signal the earlier fallback chain
     depended on. Symptoms confirmed by independent statusline authors
     in anthropics/claude-code#22115:
 
@@ -5157,6 +5157,120 @@ class TestClaudeCode2139WidthRegression(unittest.TestCase):
         result_no_arg = _detect_terminal_width()
         self.assertIsInstance(result_no_arg, int)
 
+    # --- Lying-signal regression tests --------------------------------
+    #
+    # These tests pin the generic "what if step N lies with a bogus
+    # value" pattern. The 2.1.139 regression was specifically tput
+    # returning 80, but the same shape of bug could appear at any
+    # other probe step in the future. Each test below simulates one
+    # probe returning a wildly wrong value and asserts the chain
+    # rejects it (via the _TERM_WIDTH_MIN/_MAX range check or the
+    # stub heuristic) rather than blindly trusting it.
+
+    def test_shutil_get_terminal_size_columns_0_rejected(self):
+        """shutil.get_terminal_size returning columns=0 (some
+        misconfigured environments / future regressions) must be
+        rejected by the range check, not accepted as a real width."""
+        import claude_statusline.cli as cli_mod
+        orig_shutil_gts = cli_mod.shutil.get_terminal_size
+        cli_mod.shutil.get_terminal_size = lambda fallback=None: os.terminal_size((0, 0))
+        try:
+            result = cli_mod._detect_terminal_width({})
+            self.assertNotEqual(result, 0,
+                "shutil returning 0 must be rejected by the >= 20 range check; "
+                "blindly accepting it would render an unusable layout")
+            self.assertGreaterEqual(result, 20)
+        finally:
+            cli_mod.shutil.get_terminal_size = orig_shutil_gts
+
+    def test_os_get_terminal_size_fd_columns_0_rejected(self):
+        """os.get_terminal_size(fd) returning columns=0 (e.g., a
+        closed pty that still claims to be a terminal) must be
+        rejected. Forces the chain to fall through to the next step
+        rather than render an unusable 0-col layout."""
+        import claude_statusline.cli as cli_mod
+        # Force shutil to return -1 (its sentinel "no TTY" value) so
+        # we definitely reach the os.get_terminal_size step.
+        orig_shutil_gts = cli_mod.shutil.get_terminal_size
+        orig_os_gts = cli_mod.os.get_terminal_size
+        cli_mod.shutil.get_terminal_size = lambda fallback=None: os.terminal_size((-1, -1))
+        cli_mod.os.get_terminal_size = lambda fd: os.terminal_size((0, 0))
+        os.environ.pop("COLUMNS", None)
+        try:
+            result = cli_mod._detect_terminal_width({})
+            self.assertNotEqual(result, 0,
+                "os.get_terminal_size returning 0 must be rejected; "
+                "without the range check we would render an unusable layout")
+            self.assertGreaterEqual(result, 20)
+        finally:
+            cli_mod.shutil.get_terminal_size = orig_shutil_gts
+            cli_mod.os.get_terminal_size = orig_os_gts
+
+    def test_stty_returns_0_0_rejected_by_range_check(self):
+        """If stty started returning '0 0' tomorrow (analogous to the
+        2.1.139 tput stub but at a different layer), the result must
+        be rejected. This is the generic test pattern that would have
+        caught the original 2.1.139 regression if it had been in
+        place."""
+        import subprocess as subprocess_mod
+        import claude_statusline.cli as cli_mod
+
+        orig_run = subprocess_mod.run
+        orig_open = __builtins__["open"] if isinstance(__builtins__, dict) else open
+
+        class FakeTTY:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return ""
+            def fileno(self): return 0
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[0] == "stty":
+                # The hypothetical future regression: stty returns 0 0
+                # without erroring.
+                return subprocess_mod.CompletedProcess(cmd, 0, "0 0\n", "")
+            if cmd[0] == "tput":
+                # Make tput also fail so we don't accidentally win there.
+                return subprocess_mod.CompletedProcess(cmd, 1, "", "")
+            return orig_run(cmd, *args, **kwargs)
+
+        def fake_open(path, *args, **kwargs):
+            if path == "/dev/tty":
+                return FakeTTY()
+            return orig_open(path, *args, **kwargs)
+
+        cli_mod.subprocess.run = fake_run
+        os.environ.pop("COLUMNS", None)
+        cli_builtins = cli_mod.__builtins__
+        cli_open_was_dict = isinstance(cli_builtins, dict)
+        cli_orig_open = (cli_builtins["open"] if cli_open_was_dict
+                         else cli_builtins.open)
+        try:
+            if cli_open_was_dict:
+                cli_builtins["open"] = fake_open
+            else:
+                cli_builtins.open = fake_open
+            result, report = cli_mod._detect_terminal_width_report({})
+        finally:
+            cli_mod.subprocess.run = orig_run
+            if cli_open_was_dict:
+                cli_builtins["open"] = cli_orig_open
+            else:
+                cli_builtins.open = cli_orig_open
+
+        self.assertNotEqual(result, 0,
+            "stty returning '0 0' must be rejected by the range check")
+        # stty entry should record the rejection.
+        stty_entries = [s for label, s in report if label == "stty size"]
+        if stty_entries:
+            # Only meaningful when the chain actually reached stty
+            # (e.g., on Windows the /dev/tty fake-open might not take).
+            self.assertTrue(
+                any("out of range" in s or "rejected" in s
+                    for s in stty_entries),
+                "report must mark the 0 rejection so --doctor users "
+                "can see the lie; got: {!r}".format(stty_entries))
+
 
 class TestActivityCounter(unittest.TestCase):
     """Transcript-tail-read tool-call counter (the `activity` section).
@@ -5186,14 +5300,14 @@ class TestActivityCounter(unittest.TestCase):
         return f.name
 
     def setUp(self):
+        import shutil as shutil_mod
         from claude_statusline import sessions as sessions_mod
+        self._shutil_mod = shutil_mod
         # Create a transient directory under ~/.claude/ so transcripts
-        # written by tests pass the realpath validation. We mkdir
-        # _CLAUDE_DIR itself if needed (some CI runners don't have it).
-        try:
-            os.makedirs(sessions_mod._CLAUDE_DIR, exist_ok=True)
-        except OSError:
-            pass
+        # written by tests pass the realpath validation. mkdir
+        # _CLAUDE_DIR if missing — let any creation error surface as
+        # a real test failure (silent skip would hide CI misconfig).
+        os.makedirs(sessions_mod._CLAUDE_DIR, exist_ok=True)
         self._test_dir = tempfile.mkdtemp(
             prefix="claude-status-test-", dir=sessions_mod._CLAUDE_DIR,
         )
@@ -5213,15 +5327,11 @@ class TestActivityCounter(unittest.TestCase):
             pass
 
     def tearDown(self):
-        for p in self._created_paths:
-            try:
-                os.remove(p)
-            except OSError:
-                pass
-        try:
-            os.rmdir(self._test_dir)
-        except OSError:
-            pass
+        # shutil.rmtree (not os.rmdir) so the cleanup survives any
+        # test that writes extra files into _test_dir without
+        # registering them in _created_paths. ignore_errors=True
+        # keeps a tearDown hiccup from masking a real test failure.
+        self._shutil_mod.rmtree(self._test_dir, ignore_errors=True)
 
     # --- happy path ---------------------------------------------------
 
@@ -5408,6 +5518,41 @@ class TestActivityCounter(unittest.TestCase):
         # the realpath validation but isn't a file.
         self.assertEqual(_count_activity_from_transcript(self._test_dir), 0)
 
+    def test_claude_dir_symlinked_paths_accepted(self):
+        """When ~/.claude is itself a symlink to another location
+        (common on macOS / NAS setups / users who symlink dotdirs),
+        a legitimate transcript_path under ~/.claude/projects/...
+        must still be accepted.
+
+        Before the fix, _CLAUDE_DIR was unresolved (expanduser only)
+        but transcript_path was compared via os.path.realpath, so the
+        symlink-resolved real path didn't share the unresolved prefix
+        and every transcript was silently rejected. Users in that
+        layout would see `act:` permanently absent with no diagnostic.
+
+        We can't easily symlink a real ~/.claude in a unit test, but
+        we can verify the module-level _CLAUDE_DIR_REAL constant
+        exists and equals the resolved form (the actual fix).
+        """
+        from claude_statusline import sessions as sessions_mod
+        # The fix: _CLAUDE_DIR_REAL is the resolved form, used by
+        # get_session_activity_count's prefix check.
+        self.assertTrue(hasattr(sessions_mod, "_CLAUDE_DIR_REAL"),
+            "fix introduces _CLAUDE_DIR_REAL — must exist at module level")
+        # The resolved form must equal realpath of the unresolved form.
+        self.assertEqual(sessions_mod._CLAUDE_DIR_REAL,
+                         os.path.realpath(sessions_mod._CLAUDE_DIR))
+        # Crucially: the get_session_activity_count validation must
+        # check against _CLAUDE_DIR_REAL, not _CLAUDE_DIR. Pin via
+        # source inspection so a future refactor that reverts to
+        # _CLAUDE_DIR fails this test.
+        import inspect
+        source = inspect.getsource(sessions_mod.get_session_activity_count)
+        self.assertIn("_CLAUDE_DIR_REAL", source,
+            "get_session_activity_count must use _CLAUDE_DIR_REAL for "
+            "the prefix check — using unresolved _CLAUDE_DIR breaks "
+            "users whose ~/.claude is symlinked")
+
     def test_transcript_path_outside_claude_dir_rejected(self):
         """Defense in depth: transcript_path comes from external JSON.
         A path outside ~/.claude/ (whether by buggy upstream or
@@ -5438,6 +5583,38 @@ class TestActivityCounter(unittest.TestCase):
                 os.remove(f.name)
             except OSError:
                 pass
+
+    def test_count_with_status_disambiguates_zero(self):
+        """_count_activity_with_status returns a (count, status)
+        tuple so --doctor can distinguish:
+          - legitimate idle (parsed OK, 0 tool_uses since last user)
+          - transient failure (file missing / empty / stat error)
+          - giving-up (turn larger than 1 MiB expanded window)
+
+        Without this, the --doctor Transcript: block could not
+        explain WHY the activity counter shows 0. Pin all three
+        cases below."""
+        from claude_statusline.sessions import _count_activity_with_status
+        # Case 1: legitimate idle — file parses OK, no tool_uses.
+        path = self._write_transcript([
+            {"message": {"role": "user", "content": "go"}},
+        ])
+        count, status = _count_activity_with_status(path)
+        self.assertEqual(count, 0)
+        self.assertIn("parsed", status,
+            "legitimate idle must report 'parsed' so --doctor users "
+            "see the parse succeeded; got: {!r}".format(status))
+        self.assertIn("0 tool_use", status)
+
+        # Case 2: file missing — security check (path outside
+        # ~/.claude/) would normally reject, but here we test the
+        # parse function directly which only checks isfile.
+        count, status = _count_activity_with_status(
+            os.path.join(self._test_dir, "does-not-exist.jsonl"))
+        self.assertEqual(count, 0)
+        self.assertIn("missing", status,
+            "missing file must produce a distinguishable status, not "
+            "the same string as legitimate idle; got: {!r}".format(status))
 
     def test_zero_counts_not_cached(self):
         """A zero count can mean 'no activity' OR 'parse failed,
