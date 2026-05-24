@@ -87,10 +87,22 @@ def _osc8_link(url, text):
 
     Returns plain text unless: url is present, NO_COLOR is not set,
     and the user has explicitly opted in.
+
+    Sanitization: any URL containing a control byte (BEL, ESC, OSC
+    terminator, newline, CR) that would break OUT of the OSC 8 link
+    envelope is rejected — wrapping it could allow an attacker-
+    controlled JSON field (e.g. stdin github.pr_url) to inject
+    arbitrary terminal escape sequences. Falls back to plain text.
     """
     if not url or _colors_mod._NO_COLOR:
         return text
     if not get_clickable_links_enabled():
+        return text
+    # Reject URLs containing control bytes that would corrupt the
+    # OSC 8 envelope. \x07 (BEL), \x1b (ESC), \x9c (ST) can break out
+    # of the escape sequence; \n and \r split the rendered line.
+    # We reject all C0 and the C1 ST byte rather than enumerate.
+    if any(ord(c) < 0x20 or ord(c) == 0x7f or ord(c) == 0x9c for c in url):
         return text
     return "\033]8;;{}\033\\{}\033]8;;\033\\".format(url, text)
 
@@ -171,9 +183,15 @@ def _normalize(data):
     raw_pr_url = github_obj.get("pr_url")
     out["github_pr_url"] = raw_pr_url if isinstance(raw_pr_url, str) and raw_pr_url else None
     # pr_number may arrive as int OR string in JSON depending on the
-    # serializer; _safe_num accepts both and rejects garbage.
+    # serializer; _safe_num accepts both and rejects garbage. Cap at
+    # 1_000_000 — implausible PR numbers (>= 7 digits) would dominate
+    # Line 2 width and probably indicate corrupted upstream data.
+    # GitHub's largest known PR numbers as of 2026 are in the 200k
+    # range; 1M is comfortably above any real value.
     pr_num = _safe_num(github_obj.get("pr_number"))
-    out["github_pr_number"] = int(pr_num) if pr_num is not None and pr_num > 0 else None
+    out["github_pr_number"] = (
+        int(pr_num) if pr_num is not None and 0 < pr_num < 1_000_000 else None
+    )
 
     # Vim (nested or flat)
     vim_obj = data.get("vim") or {}
@@ -184,13 +202,20 @@ def _normalize(data):
     # from crashing _normalize with AttributeError on .get(). Same
     # defensive pattern as `rate_limits` below. The flat
     # `agent_name` fallback handles demo mode and older schemas.
+    #
+    # Both branches require non-EMPTY strings to consider a value
+    # "real." Empty string from nested must NOT block the flat
+    # fallback — otherwise a buggy upstream emitting `agent.name=""`
+    # would silently lose a user who has flat `agent_name` set.
     agent_obj = data.get("agent")
     agent_obj = agent_obj if isinstance(agent_obj, dict) else {}
     nested_name = agent_obj.get("name")
     flat_name = data.get("agent_name")
-    # Only keep strings; ignore non-string values (None, list, int).
-    candidate = nested_name if isinstance(nested_name, str) else flat_name
-    out["agent_name"] = candidate if isinstance(candidate, str) and candidate else None
+
+    def _real_str(v):
+        return v if isinstance(v, str) and v else None
+
+    out["agent_name"] = _real_str(nested_name) or _real_str(flat_name)
 
     # Worktree (nested or flat) — same isinstance guard.
     wt_obj = data.get("worktree")
@@ -428,20 +453,39 @@ def _render_sections_named(n, order, theme):
             sections.append(colorize(fmt_cost(cost), tc["cost"]))
 
         elif section == "cost_breakdown":
-            # Largest non-base cost category from `cost.by_category`
-            # (Claude Code v2.1.150+). Renders as `mcp:$0.18` or
-            # `subagents:$0.42`. Hidden when no category data is
-            # present (older Claude Code, no extra costs incurred yet)
-            # or when the top category is below a small threshold —
-            # showing `skills:$0.001c` is noise, not signal.
+            # Cost-category breakdown from `cost.by_category`
+            # (Claude Code v2.1.150+). Three render paths:
+            #
+            # 1. Largest single category >= $0.01 — render its name
+            #    and value (e.g., `mcp:$0.18`). Most useful when one
+            #    category dominates spend.
+            # 2. All categories below $0.01 but sum >= $0.01 —
+            #    render `other:$SUM` (e.g., 10 MCP servers each at
+            #    half a cent = $0.05 total). Prevents the silent
+            #    "your money is being spent but we hide every line
+            #    item" failure mode.
+            # 3. No data present OR sum below threshold — section
+            #    hides entirely. A noise-suppression contract: we
+            #    surface $0.001 nowhere.
             top_name = n.get("cost_top_category_name")
             top_value = n.get("cost_top_category_value")
+            cb_color = tc.get("cost_breakdown", tc.get("cost", YELLOW))
             if top_name and top_value is not None and top_value >= 0.01:
-                cb_color = tc.get("cost_breakdown", tc.get("cost", YELLOW))
                 sections.append(
                     colorize("{}:".format(top_name), tc["label"])
                     + colorize(fmt_cost(top_value), cb_color)
                 )
+            else:
+                # Sum-fallback: even if no single category meets the
+                # threshold, the cumulative spend can. Hide if sum
+                # also below threshold (signal:noise contract).
+                by_cat = n.get("cost_by_category") or {}
+                total = sum(v for v in by_cat.values() if isinstance(v, (int, float)))
+                if total >= 0.01:
+                    sections.append(
+                        colorize("other:", tc["label"])
+                        + colorize(fmt_cost(total), cb_color)
+                    )
 
         elif section == "pr":
             # GitHub PR context (Claude Code v2.1.148+). Renders the
@@ -927,9 +971,16 @@ def _detect_terminal_width_report(data=None):
     # Highest priority — when the user sets this, they have decided
     # detection is unreliable or want to force a specific width.
     # Out-of-range / non-numeric values fall through to auto-detection.
+    # Empty string is treated as "unset" rather than "garbage" because
+    # `export CLAUDE_STATUSLINE_WIDTH=` is how users disable the
+    # override in their shell, and reporting it as "not an int" would
+    # confuse the debugging trail.
     override = os.environ.get("CLAUDE_STATUSLINE_WIDTH")
-    if override is None:
-        report.append(("CLAUDE_STATUSLINE_WIDTH env", "unset"))
+    if override is None or override == "":
+        report.append((
+            "CLAUDE_STATUSLINE_WIDTH env",
+            "unset" if override is None else "empty — treating as unset",
+        ))
     else:
         try:
             cols = int(override)
@@ -961,7 +1012,7 @@ def _detect_terminal_width_report(data=None):
     else:
         report.append(("stdin.terminal.columns", "no stdin data"))
 
-    # 2. COLUMNS env var.
+    # 3. COLUMNS env var.
     cols_env = os.environ.get("COLUMNS")
     if cols_env is None:
         report.append(("COLUMNS env", "unset"))
@@ -979,7 +1030,7 @@ def _detect_terminal_width_report(data=None):
         except (ValueError, TypeError):
             report.append(("COLUMNS env", f"{cols_env!r} not an int — rejected"))
 
-    # 3. shutil.get_terminal_size — checks COLUMNS again then any
+    # 4. shutil.get_terminal_size — checks COLUMNS again then any
     # stdout TTY. Cheap; no external process. Skip its fallback
     # path (which would just return our compact default early) by
     # passing a sentinel and only trusting non-sentinel results.
@@ -996,7 +1047,7 @@ def _detect_terminal_width_report(data=None):
     except (OSError, ValueError) as exc:
         report.append(("shutil.get_terminal_size", f"error: {exc}"))
 
-    # 4. os.get_terminal_size on each std fd — Claude Code closes
+    # 5. os.get_terminal_size on each std fd — Claude Code closes
     # stdin (it's our JSON pipe) but stderr is often inherited from
     # the parent TTY.
     fd_winner = None
@@ -1019,7 +1070,7 @@ def _detect_terminal_width_report(data=None):
         return fd_winner[1], report
     report.append(("os.get_terminal_size(fd)", "; ".join(fd_status) or "no fds"))
 
-    # 5. Process-tree walk — try the stderr fd of each ancestor process.
+    # 6. Process-tree walk — try the stderr fd of each ancestor process.
     # Linux/macOS only (Windows has no /proc and process ancestry of
     # subprocess hooks is structured differently). When Claude Code
     # 2.1.139+ strips terminal access from the immediate hook process,
@@ -1032,7 +1083,7 @@ def _detect_terminal_width_report(data=None):
         return walk_result, report
     report.append(("process-tree walk", walk_status))
 
-    # 6+7. stty size / tput cols against /dev/tty — the most reliable
+    # 7+8. stty size / tput cols against /dev/tty — the most reliable
     # POSIX path historically. Captures the controlling terminal's
     # real width even when stdin/stdout are pipes. /dev/tty doesn't
     # exist on Windows, where stty/tput are also typically absent —
@@ -1085,7 +1136,7 @@ def _detect_terminal_width_report(data=None):
     except (OSError, FileNotFoundError) as exc:
         report.append(("/dev/tty", f"unreachable: {type(exc).__name__}"))
 
-    # 8. Last-resort fallback — _COMPACT_LAYOUT_MIN_COLS keeps Line 2
+    # 9. Last-resort fallback — _COMPACT_LAYOUT_MIN_COLS keeps Line 2
     # readable when no signal is trustworthy.
     report.append(("fallback", f"{_COMPACT_LAYOUT_MIN_COLS} (no signal trusted)"))
     return _COMPACT_LAYOUT_MIN_COLS, report
