@@ -5888,5 +5888,721 @@ class TestActivityCounter(unittest.TestCase):
             cli_mod.get_branch = orig_branch
 
 
+class TestClaudeStatuslineWidthOverride(unittest.TestCase):
+    """CLAUDE_STATUSLINE_WIDTH env var as the explicit user override.
+
+    Tracked at issue #89. Highest priority in the width-detection
+    chain — when a user sets this, they have decided detection is
+    unreliable or want to force a specific width. Out-of-range and
+    non-numeric values must fall through (silent ignore) to keep
+    backward compatibility.
+    """
+
+    def setUp(self):
+        self._old_override = os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+        self._old_cols = os.environ.pop("COLUMNS", None)
+
+    def tearDown(self):
+        if self._old_override is not None:
+            os.environ["CLAUDE_STATUSLINE_WIDTH"] = self._old_override
+        else:
+            os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+        if self._old_cols is not None:
+            os.environ["COLUMNS"] = self._old_cols
+
+    def test_override_wins_over_stdin_terminal_columns(self):
+        """Explicit user override beats stdin.terminal.columns (which
+        is itself the top-priority auto-detection signal). Users
+        setting this env var have decided they know better than every
+        other source — honor that."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "165"
+        # Even with stdin terminal.columns present, override wins.
+        result = _detect_terminal_width({"terminal": {"columns": 300}})
+        self.assertEqual(result, 165)
+
+    def test_override_wins_over_columns_env(self):
+        """When both CLAUDE_STATUSLINE_WIDTH and COLUMNS are set,
+        the dedicated override wins. Avoids ambiguity about which
+        env var was intended."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "200"
+        os.environ["COLUMNS"] = "100"
+        result = _detect_terminal_width({})
+        self.assertEqual(result, 200)
+
+    def test_garbage_override_falls_through(self):
+        """Non-numeric override must not crash and must not block
+        auto-detection — fall through to existing chain. Otherwise
+        a typo (`CLAUDE_STATUSLINE_WIDTH=wide`) would silently force
+        the safe-default layout."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "wide"
+        os.environ["COLUMNS"] = "150"  # auto-detection should win
+        result = _detect_terminal_width({})
+        self.assertEqual(result, 150,
+            "garbage override must fall through to COLUMNS, not be honored")
+
+    def test_out_of_range_override_falls_through(self):
+        """Override outside [_TERM_WIDTH_MIN, _TERM_WIDTH_MAX] is
+        rejected — same as other steps in the chain. Otherwise a
+        finger-fumble like `CLAUDE_STATUSLINE_WIDTH=99999` would
+        force a layout that overflows every screen."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["COLUMNS"] = "120"
+        for bad in ("0", "10", "5000"):
+            os.environ["CLAUDE_STATUSLINE_WIDTH"] = bad
+            result = _detect_terminal_width({})
+            self.assertEqual(result, 120,
+                "out-of-range override {!r} must fall through".format(bad))
+
+    def test_override_reported_distinctly_in_report(self):
+        """--doctor must show the override prominently when set so
+        users debugging width can see whether their env var is the
+        active source."""
+        from claude_statusline.cli import _detect_terminal_width_report
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "200"
+        _result, report = _detect_terminal_width_report({})
+        # The override step must appear first in the report so users
+        # scanning --doctor output see it before the auto-detection
+        # noise.
+        self.assertEqual(report[0][0], "CLAUDE_STATUSLINE_WIDTH env",
+            "override step must be first in the report")
+        self.assertIn("winner", report[0][1])
+        self.assertIn("explicit override", report[0][1],
+            "report must label the override as explicit so users "
+            "understand it's not auto-detection")
+
+    def test_override_unset_reports_unset(self):
+        """When the override is unset (the normal case), the report
+        must say 'unset' rather than silently omit the step. Keeps
+        --doctor output predictable across versions."""
+        from claude_statusline.cli import _detect_terminal_width_report
+        os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+        _result, report = _detect_terminal_width_report({})
+        override_entries = [s for label, s in report if label == "CLAUDE_STATUSLINE_WIDTH env"]
+        self.assertEqual(override_entries, ["unset"])
+
+    def test_override_empty_string_reports_distinctly_from_unset(self):
+        """`export CLAUDE_STATUSLINE_WIDTH=` (empty string) is the
+        standard way users clear an override in their shell. Reporting
+        it as 'not an int — rejected' would confuse debugging. Report
+        as 'empty — treating as unset' to keep the trail clean."""
+        from claude_statusline.cli import _detect_terminal_width_report
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = ""
+        _result, report = _detect_terminal_width_report({})
+        override_entries = [s for label, s in report if label == "CLAUDE_STATUSLINE_WIDTH env"]
+        self.assertEqual(len(override_entries), 1)
+        self.assertIn("empty", override_entries[0],
+            "empty string must report distinctly so users see what's happening")
+        self.assertIn("unset", override_entries[0],
+            "must indicate the behavior is the same as if unset")
+
+    def test_override_beats_tput_stub_heuristic(self):
+        """Explicit user intent (CLAUDE_STATUSLINE_WIDTH=80) must
+        beat the v0.6.0 tput-stub-80 rejection heuristic. A user on
+        a real 80-col terminal who manually sets the override is
+        explicitly telling us "yes, 80 is correct" — we must not
+        silently reject their choice via the auto-detection heuristic.
+
+        Without this test, a future refactor that adds "reject 80
+        everywhere" would silently break the documented override
+        contract for real 80-col users."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "80"
+        # Even if every other signal in the chain would be rejected
+        # as a stub, the explicit override wins at step 1.
+        self.assertEqual(_detect_terminal_width({}), 80,
+            "explicit CLAUDE_STATUSLINE_WIDTH=80 must beat the tput stub "
+            "heuristic — user intent overrides auto-detection guards")
+
+
+class TestAgentNameNormalization(unittest.TestCase):
+    """The `agent` section reads stdin `agent.name` to display the
+    current subagent identity. Tracked at issue #88.
+
+    Previously the normalization used `data.get("agent") or {}` which
+    crashed silently when upstream sent `agent` as a non-dict (string,
+    list, int) — the resulting AttributeError on .get() was caught by
+    the outer try/except but the section never rendered. These tests
+    pin the isinstance-guarded shape.
+    """
+
+    def test_nested_agent_name_extracted(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent": {"name": "Explore"}, "session_id": "x"})
+        self.assertEqual(n["agent_name"], "Explore")
+
+    def test_flat_agent_name_fallback(self):
+        """Demo mode and older schemas use flat agent_name."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent_name": "CodeReviewer", "session_id": "x"})
+        self.assertEqual(n["agent_name"], "CodeReviewer")
+
+    def test_nested_wins_over_flat(self):
+        """Real stdin schema is nested. If both are present, prefer it."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "agent": {"name": "Nested"},
+            "agent_name": "Flat",
+            "session_id": "x",
+        })
+        self.assertEqual(n["agent_name"], "Nested")
+
+    def test_agent_as_string_does_not_crash(self):
+        """Pre-fix: this raised AttributeError on .get(). The outer
+        try/except masked it as 'section just didn't render.' Now
+        the isinstance guard catches it cleanly."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent": "Explore", "session_id": "x"})
+        # String at the outer key isn't a recognized shape — section absent.
+        self.assertIsNone(n["agent_name"])
+
+    def test_agent_as_list_does_not_crash(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent": ["Explore"], "session_id": "x"})
+        self.assertIsNone(n["agent_name"])
+
+    def test_agent_name_as_non_string_rejected(self):
+        """If nested agent.name arrives as a non-string (int, list),
+        reject it rather than render the wrong type."""
+        from claude_statusline.cli import _normalize
+        for bad in (42, ["Explore"], {"nested": "deep"}, True):
+            n = _normalize({"agent": {"name": bad}, "session_id": "x"})
+            self.assertIsNone(n["agent_name"],
+                "agent.name={!r} must be rejected as non-string".format(bad))
+
+    def test_empty_agent_name_rejected(self):
+        """Empty string is not a useful chip — hide the section."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent": {"name": ""}, "session_id": "x"})
+        self.assertIsNone(n["agent_name"])
+
+    def test_agent_absent_returns_none(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"session_id": "x"})
+        self.assertIsNone(n["agent_name"])
+
+    def test_empty_nested_string_falls_back_to_flat(self):
+        """Regression test: a buggy upstream emitting an empty
+        `agent.name = ""` must NOT block the flat `agent_name`
+        fallback. The first attempt at #88 had this bug — empty
+        string is a string, so the isinstance check accepted it
+        and `flat_name` was dropped. Real users with flat
+        `agent_name` set would have silently lost their chip."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "agent": {"name": ""},
+            "agent_name": "Explorer",
+            "session_id": "x",
+        })
+        self.assertEqual(n["agent_name"], "Explorer",
+            "empty nested string must fall through to flat agent_name; "
+            "blocking the fallback would be a regression from the original "
+            "`agent_obj.get('name') or data.get('agent_name')` behavior")
+
+    def test_agent_explicit_none_safe(self):
+        """data['agent'] = None (explicit None vs absent) must not crash."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent": None, "session_id": "x"})
+        self.assertIsNone(n["agent_name"])
+
+    def test_agent_explicit_empty_dict_safe(self):
+        """data['agent'] = {} (explicit empty dict) must not crash."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent": {}, "session_id": "x"})
+        self.assertIsNone(n["agent_name"])
+
+    def test_vim_as_non_dict_does_not_crash(self):
+        """Same isinstance-guard regression test for vim as for
+        agent/worktree/cost. Flagged by Gemini on PR #90 as
+        pre-existing exposure of the same bug pattern. An upstream
+        sending `vim: "NORMAL"` as a string (or any non-dict) must
+        not crash _normalize."""
+        from claude_statusline.cli import _normalize
+        for bad in ("NORMAL", ["NORMAL"], 42, True):
+            n = _normalize({"vim": bad, "session_id": "x"})
+            # vim_mode falls back to the flat `data.get("vim_mode")`,
+            # which is None — section absent.
+            self.assertIsNone(n["vim_mode"],
+                "vim={!r} must be rejected as non-dict without crashing".format(bad))
+
+    def test_vim_nested_dict_still_works(self):
+        """The isinstance fix must not have broken the legitimate
+        nested-dict path."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"vim": {"mode": "INSERT"}, "session_id": "x"})
+        self.assertEqual(n["vim_mode"], "INSERT")
+
+    def test_agent_section_renders_with_nested_name(self):
+        """End-to-end: when stdin contains nested agent.name, the
+        chip renders correctly. The default theme already includes
+        the `agent` section in line2."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["agent", "branch"]
+            data = {"agent": {"name": "Explore"}, "git_branch": "main"}
+            output = cli_mod.render(data, "default")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            self.assertIn("[Explore]", plain,
+                "agent section must render '[Name]' when stdin has agent.name")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+
+class TestGitHubPRSection(unittest.TestCase):
+    """Claude Code v2.1.148+ adds `github.{repo, pr_number, pr_url}`
+    to stdin. Tracked at issue #87. The `pr` section renders the PR
+    number as a clickable link to pr_url when available."""
+
+    def test_pr_number_extracted_from_nested_github(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "github": {"pr_number": 1234, "pr_url": "https://github.com/x/y/pull/1234"},
+            "session_id": "x",
+        })
+        self.assertEqual(n["github_pr_number"], 1234)
+        self.assertEqual(n["github_pr_url"], "https://github.com/x/y/pull/1234")
+
+    def test_pr_number_as_string_coerced(self):
+        """JSON serializers sometimes stringify integers; accept that."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"github": {"pr_number": "42"}, "session_id": "x"})
+        self.assertEqual(n["github_pr_number"], 42)
+
+    def test_pr_number_garbage_rejected(self):
+        from claude_statusline.cli import _normalize
+        for bad in ("not a number", -1, 0, [42], {"nested": 1}):
+            n = _normalize({"github": {"pr_number": bad}, "session_id": "x"})
+            self.assertIsNone(n["github_pr_number"],
+                "pr_number={!r} must be rejected".format(bad))
+
+    def test_github_field_absent(self):
+        """Older Claude Code clients don't send `github` — fields stay None."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"session_id": "x"})
+        self.assertIsNone(n["github_pr_number"])
+        self.assertIsNone(n["github_pr_url"])
+        self.assertIsNone(n["github_repo"])
+
+    def test_github_as_non_dict_does_not_crash(self):
+        from claude_statusline.cli import _normalize
+        for bad in ("repo-name", 42, ["pr1234"], True):
+            n = _normalize({"github": bad, "session_id": "x"})
+            self.assertIsNone(n["github_pr_number"],
+                "github={!r} must be rejected without crashing".format(bad))
+
+    def test_pr_url_must_be_string(self):
+        """A non-string pr_url must not become a malformed OSC 8 link."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"github": {"pr_url": 42}, "session_id": "x"})
+        self.assertIsNone(n["github_pr_url"])
+
+    def test_pr_section_renders(self):
+        """End-to-end: opt-in `pr` section renders PR#NN when stdin
+        has github.pr_number."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["pr", "branch"]
+            data = {
+                "github": {"pr_number": 86, "pr_url": "https://github.com/x/y/pull/86"},
+                "git_branch": "main",
+            }
+            output = cli_mod.render(data, "default")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            # OSC 8 links inject hyperlink escapes too; strip those.
+            plain = re.sub(r"\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)", "", plain)
+            self.assertIn("PR#86", plain,
+                "pr section must render 'PR#NN' when github.pr_number is present")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_pr_url_with_control_bytes_rejected_in_osc8(self):
+        """`_osc8_link` must reject any URL containing C0 control
+        bytes — they would break OUT of the OSC 8 escape envelope
+        and inject arbitrary terminal sequences. Defense against an
+        attacker-controlled stdin field corrupting the terminal.
+
+        Tests the sanitization in _osc8_link directly. The wrapped
+        text MUST equal the input text (no escape sequences added)
+        when the URL contains malicious bytes."""
+        from claude_statusline.cli import _osc8_link
+        from claude_statusline import sessions as sessions_mod
+
+        # Force clickable_links enabled so we exercise the wrap path.
+        orig_get = sessions_mod.get_clickable_links_enabled
+        sessions_mod.get_clickable_links_enabled = lambda: True
+        # Also patch the import in cli module
+        import claude_statusline.cli as cli_mod
+        orig_cli_get = cli_mod.get_clickable_links_enabled
+        cli_mod.get_clickable_links_enabled = lambda: True
+        try:
+            # Each of these bytes can break the OSC 8 envelope.
+            malicious_urls = [
+                "https://example.com/\x07evil",   # BEL terminates OSC
+                "https://example.com/\x1b]evil",  # ESC starts new escape
+                "https://example.com/\x9cevil",   # ST (C1 string terminator)
+                "https://example.com/\x00evil",   # NUL
+                "https://example.com/\n",         # newline splits line
+                "https://example.com/\r",         # CR
+            ]
+            for url in malicious_urls:
+                result = _osc8_link(url, "PR#86")
+                # If sanitization works, result is the plain text —
+                # no escape bytes were added.
+                self.assertEqual(result, "PR#86",
+                    "URL with control byte must NOT be wrapped in OSC 8; "
+                    "got: {!r}".format(result))
+                self.assertNotIn("\x1b]8", result,
+                    "no OSC 8 sequence should be emitted for malicious URL")
+
+            # Sanity check: a clean URL DOES get wrapped.
+            clean = _osc8_link("https://example.com/pr/86", "PR#86")
+            self.assertIn("\x1b]8;;https://example.com/pr/86", clean,
+                "clean URL must still be wrapped — sanitizer must not "
+                "reject legitimate inputs")
+        finally:
+            sessions_mod.get_clickable_links_enabled = orig_get
+            cli_mod.get_clickable_links_enabled = orig_cli_get
+
+    def test_pr_number_implausibly_large_rejected(self):
+        """An implausibly large pr_number (7+ digits) would dominate
+        Line 2 width and probably indicates corrupted upstream data.
+        Reject in normalization so the section silently hides."""
+        from claude_statusline.cli import _normalize
+        for huge in (1_000_000, 99_999_999, 10**18):
+            n = _normalize({"github": {"pr_number": huge}, "session_id": "x"})
+            self.assertIsNone(n["github_pr_number"],
+                "pr_number={} must be rejected as implausible".format(huge))
+
+        # Just below the cap is accepted.
+        n = _normalize({"github": {"pr_number": 999_999}, "session_id": "x"})
+        self.assertEqual(n["github_pr_number"], 999_999)
+
+    def test_pr_section_hidden_without_pr(self):
+        """No PR number → section absent, no leftover label."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["pr", "branch"]
+            output = cli_mod.render({"git_branch": "main"}, "default")
+            self.assertNotIn("PR#", output)
+            self.assertNotIn("PR:", output)
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+
+class TestCostBreakdownSection(unittest.TestCase):
+    """Claude Code v2.1.150+ adds `cost.by_category` with per-category
+    breakdown (skills, subagents, plugins, per-MCP). Tracked at issue
+    #87. The `cost_breakdown` section renders the largest non-base
+    category."""
+
+    def test_largest_category_extracted(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "cost": {
+                "total_cost_usd": 1.50,
+                "by_category": {"skills": 0.10, "mcp": 0.80, "subagents": 0.25},
+            },
+            "session_id": "x",
+        })
+        self.assertEqual(n["cost_top_category_name"], "mcp")
+        self.assertEqual(n["cost_top_category_value"], 0.80)
+
+    def test_category_dict_absent(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"cost": {"total_cost_usd": 1.0}, "session_id": "x"})
+        self.assertEqual(n["cost_by_category"], {})
+        self.assertIsNone(n["cost_top_category_name"])
+
+    def test_non_numeric_categories_filtered(self):
+        """A category with a non-numeric or zero value is excluded
+        from the 'largest' calculation."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "cost": {"by_category": {
+                "valid": 0.50,
+                "string": "not a number",
+                "zero": 0,
+                "negative": -0.10,
+                "null": None,
+            }},
+            "session_id": "x",
+        })
+        self.assertEqual(n["cost_top_category_name"], "valid")
+        self.assertIn("valid", n["cost_by_category"])
+        self.assertNotIn("string", n["cost_by_category"])
+        self.assertNotIn("zero", n["cost_by_category"])
+        self.assertNotIn("negative", n["cost_by_category"])
+        self.assertNotIn("null", n["cost_by_category"])
+
+    def test_by_category_as_non_dict_does_not_crash(self):
+        from claude_statusline.cli import _normalize
+        for bad in ("string", [1, 2], 42, True):
+            n = _normalize({
+                "cost": {"by_category": bad},
+                "session_id": "x",
+            })
+            self.assertEqual(n["cost_by_category"], {},
+                "by_category={!r} must be treated as empty".format(bad))
+
+    def test_cost_as_non_dict_does_not_crash(self):
+        """Upstream sending cost as a number (older schemas) must not
+        crash the new by_category extraction."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"cost": 1.50, "session_id": "x"})
+        self.assertEqual(n["cost_by_category"], {})
+        self.assertIsNone(n["cost"])  # bare number isn't extracted as total_cost_usd
+
+    def test_breakdown_section_renders_largest(self):
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["cost_breakdown", "branch"]
+            data = {
+                "cost": {
+                    "total_cost_usd": 1.50,
+                    "by_category": {"mcp": 0.80, "skills": 0.10},
+                },
+                "git_branch": "main",
+            }
+            output = cli_mod.render(data, "default")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            self.assertIn("mcp:", plain,
+                "cost_breakdown must render the largest category name")
+            self.assertIn("$0.8", plain,
+                "cost_breakdown must render the category value via fmt_cost")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_breakdown_hidden_below_threshold(self):
+        """Tiny category values (< $0.01) are noise, not signal.
+        Section must hide rather than render $0.001c chrome —
+        unless the SUM across categories meets threshold (see
+        test_breakdown_sum_fallback_when_many_small_categories)."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["cost_breakdown", "branch"]
+            # Single tiny category, no sum-fallback opportunity.
+            data = {
+                "cost": {"by_category": {"skills": 0.003}},
+                "git_branch": "main",
+            }
+            output = cli_mod.render(data, "default")
+            self.assertNotIn("skills:", output,
+                "tiny single category must hide rather than render noise")
+            self.assertNotIn("other:", output,
+                "sum below threshold must NOT trigger other: render")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_breakdown_sum_fallback_with_stringified_numerics(self):
+        """Regression test for the back-door of the ghost-cost
+        suppression. Some JSON serializers stringify numeric values
+        (`"0.005"` instead of `0.005`). The renderer's defense-in-
+        depth `isinstance(v, (int, float))` filter would drop strings
+        — but `_normalize` is supposed to coerce stringified numerics
+        to floats BEFORE storing, so the renderer never sees them.
+
+        Without coercion at the normalization boundary, a stringified
+        payload would silently sum to 0 and the section would hide,
+        re-opening the exact ghost-cost suppression the sum fallback
+        was meant to close.
+
+        Probe: 10 categories, each stringified at $0.005. Sum must
+        be $0.05, section must render `other:$0.05`.
+        """
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["cost_breakdown", "branch"]
+            data = {
+                "cost": {"by_category": {
+                    # All stringified — most serializer-quirk shape
+                    # we have to defend against.
+                    "mcp-a": "0.005", "mcp-b": "0.005", "mcp-c": "0.005",
+                    "mcp-d": "0.005", "mcp-e": "0.005", "mcp-f": "0.005",
+                    "mcp-g": "0.005", "mcp-h": "0.005", "mcp-i": "0.005",
+                    "mcp-j": "0.005",
+                }},
+                "git_branch": "main",
+            }
+            output = cli_mod.render(data, "default")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            self.assertIn("other:", plain,
+                "stringified numerics must be coerced at _normalize so "
+                "the sum-fallback rendering still fires")
+            self.assertRegex(plain, r"other:.*0\.05",
+                "sum must equal 10 * 0.005 = 0.05, not 0 from filter rejection")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_normalize_rejects_non_finite_category_values(self):
+        """Coerce-on-store widened the accepted-value space vs. the
+        pre-v0.6.1 isinstance filter. A stringified `"inf"` would
+        coerce via _safe_num to math.inf, pass `num > 0`, and the
+        sum-fallback path would render an infinite total. The
+        math.isfinite() guard at _normalize closes that hole at the
+        contract boundary.
+
+        Also covers `nan` (which is the textbook silent-failure
+        pattern: nan > 0 is False so nan would be filtered out by
+        the > 0 check, but defense-in-depth is cheap and pins the
+        contract for any future change to the inequality)."""
+        from claude_statusline.cli import _normalize
+        # Stringified inf and nan must be rejected.
+        for bad in ("inf", "-inf", "nan", "Infinity", "NaN"):
+            n = _normalize({
+                "cost": {"by_category": {"bad": bad, "good": 0.50}},
+                "session_id": "x",
+            })
+            self.assertNotIn("bad", n["cost_by_category"],
+                "stringified {!r} must be rejected as non-finite".format(bad))
+            self.assertEqual(n["cost_top_category_name"], "good",
+                "good category must remain after non-finite is rejected")
+
+        # Direct float inf/nan also rejected (defense-in-depth for
+        # the case where upstream emits real non-finite floats).
+        n = _normalize({
+            "cost": {"by_category": {"bad": float("inf"), "good": 0.50}},
+            "session_id": "x",
+        })
+        self.assertNotIn("bad", n["cost_by_category"])
+
+    def test_normalize_coerces_stringified_category_values(self):
+        """Pin the coercion contract directly at _normalize: any
+        stringified numeric value must be stored as a float, not the
+        original string. Downstream code can rely on the type."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "cost": {"by_category": {
+                "string_val": "0.50",
+                "int_val": 1,
+                "float_val": 2.5,
+            }},
+            "session_id": "x",
+        })
+        # All three values should be present as floats.
+        cats = n["cost_by_category"]
+        self.assertEqual(set(cats.keys()), {"string_val", "int_val", "float_val"})
+        for k, v in cats.items():
+            self.assertIsInstance(v, float,
+                "{!r} stored as {!r} (type {}) — _normalize must coerce "
+                "to float so downstream isinstance(float) checks work".format(
+                    k, v, type(v).__name__))
+        # Top category: float_val = 2.5 > 1.0 > 0.5
+        self.assertEqual(n["cost_top_category_name"], "float_val")
+        self.assertEqual(n["cost_top_category_value"], 2.5)
+
+    def test_breakdown_sum_fallback_when_many_small_categories(self):
+        """Ghost-cost regression: 10 categories each at $0.005 sum
+        to $0.05 of real spend. Without the sum fallback the user
+        sees nothing rendered — silent suppression of real money.
+        With the fallback, render `other:$0.05`."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["cost_breakdown", "branch"]
+            # 10 small categories, each below $0.01, sum well above.
+            data = {
+                "cost": {"by_category": {
+                    "mcp-a": 0.005, "mcp-b": 0.005, "mcp-c": 0.005,
+                    "mcp-d": 0.005, "mcp-e": 0.005, "mcp-f": 0.005,
+                    "mcp-g": 0.005, "mcp-h": 0.005, "mcp-i": 0.005,
+                    "mcp-j": 0.005,
+                }},
+                "git_branch": "main",
+            }
+            output = cli_mod.render(data, "default")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            self.assertIn("other:", plain,
+                "many small categories with sum above threshold must "
+                "render as `other:$N` so users see the real cost")
+            # 10 * 0.005 = 0.05. fmt_cost renders as $0.05 (cents format).
+            self.assertRegex(plain, r"other:.*0\.05",
+                "sum must be the cumulative total, not zero")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_breakdown_non_string_keys_filtered(self):
+        """A category dict with non-string keys (None, int) must be
+        filtered cleanly — not picked up by max()."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "cost": {"by_category": {
+                "valid": 0.50,
+                None: 0.99,  # non-string key, must be excluded
+                42: 1.00,    # non-string key, must be excluded
+            }},
+            "session_id": "x",
+        })
+        self.assertEqual(n["cost_top_category_name"], "valid",
+            "non-string keys must NOT win the max() selection — "
+            "only string-keyed entries survive the filter")
+
+    def test_breakdown_tie_breaking_deterministic(self):
+        """When two categories have equal values, `max()` returns
+        the first inserted key (Python dict insertion order since
+        3.7). Pin the behavior so a future refactor that switches
+        to a different data structure can't silently change the
+        winner."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "cost": {"by_category": {"alpha": 0.50, "beta": 0.50}},
+            "session_id": "x",
+        })
+        self.assertEqual(n["cost_top_category_name"], "alpha",
+            "tied values must resolve to the first-inserted key "
+            "(Python 3.7+ dict insertion-order guarantee)")
+
+    def test_breakdown_with_only_by_category_no_total(self):
+        """Upstream may emit cost.by_category WITHOUT cost.total_cost_usd
+        (e.g., spending only on plugins, no base API cost yet).
+        cost_top_category must still be extracted; cost itself stays
+        None and the bar/cost sections gracefully hide."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "cost": {"by_category": {"mcp": 0.80}},
+            "session_id": "x",
+        })
+        self.assertEqual(n["cost_top_category_name"], "mcp")
+        self.assertEqual(n["cost_top_category_value"], 0.80)
+        self.assertIsNone(n["cost"],
+            "total_cost_usd absent must result in cost=None (existing "
+            "contract — cost sections hide cleanly)")
+
+
 if __name__ == "__main__":
     unittest.main()
