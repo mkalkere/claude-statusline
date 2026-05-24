@@ -6444,6 +6444,38 @@ class TestCostBreakdownSection(unittest.TestCase):
             THEMES["default"]["line2"] = orig_line2
             cli_mod.get_branch = orig_branch
 
+    def test_normalize_rejects_non_finite_category_values(self):
+        """Coerce-on-store widened the accepted-value space vs. the
+        pre-v0.6.1 isinstance filter. A stringified `"inf"` would
+        coerce via _safe_num to math.inf, pass `num > 0`, and the
+        sum-fallback path would render an infinite total. The
+        math.isfinite() guard at _normalize closes that hole at the
+        contract boundary.
+
+        Also covers `nan` (which is the textbook silent-failure
+        pattern: nan > 0 is False so nan would be filtered out by
+        the > 0 check, but defense-in-depth is cheap and pins the
+        contract for any future change to the inequality)."""
+        from claude_statusline.cli import _normalize
+        # Stringified inf and nan must be rejected.
+        for bad in ("inf", "-inf", "nan", "Infinity", "NaN"):
+            n = _normalize({
+                "cost": {"by_category": {"bad": bad, "good": 0.50}},
+                "session_id": "x",
+            })
+            self.assertNotIn("bad", n["cost_by_category"],
+                "stringified {!r} must be rejected as non-finite".format(bad))
+            self.assertEqual(n["cost_top_category_name"], "good",
+                "good category must remain after non-finite is rejected")
+
+        # Direct float inf/nan also rejected (defense-in-depth for
+        # the case where upstream emits real non-finite floats).
+        n = _normalize({
+            "cost": {"by_category": {"bad": float("inf"), "good": 0.50}},
+            "session_id": "x",
+        })
+        self.assertNotIn("bad", n["cost_by_category"])
+
     def test_normalize_coerces_stringified_category_values(self):
         """Pin the coercion contract directly at _normalize: any
         stringified numeric value must be stored as a float, not the

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import os
 import platform
 import re
@@ -167,7 +168,15 @@ def _normalize(data):
             if not isinstance(k, str):
                 continue
             num = _safe_num(v)
-            if num is None or num <= 0:
+            # math.isfinite() rejects nan and ±inf. Without it,
+            # a stringified `"inf"` upstream would coerce via
+            # _safe_num to float('inf'), pass `num > 0`, and the
+            # sum-fallback path would then render an infinite total.
+            # Pre-v0.6.1 the renderer's isinstance filter would have
+            # rejected the string `"inf"` before coercion; the new
+            # coerce-on-store contract makes the explicit isfinite
+            # guard load-bearing here at the boundary.
+            if num is None or not math.isfinite(num) or num <= 0:
                 continue
             sane_categories[k] = float(num)
         out["cost_by_category"] = sane_categories
