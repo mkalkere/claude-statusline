@@ -154,16 +154,27 @@ def _normalize(data):
     # dict is preserved on `n` for callers that want richer rendering.
     by_category = cost_obj.get("by_category")
     if isinstance(by_category, dict):
-        # Filter to numeric, positive entries only.
-        sane_categories = {
-            k: v for k, v in by_category.items()
-            if isinstance(k, str) and _safe_num(v) is not None and _safe_num(v) > 0
-        }
+        # Filter to numeric, positive entries only. Coerce on store
+        # via _safe_num so downstream consumers always see Python
+        # floats — never the original mixed types (some JSON
+        # serializers stringify numeric values, e.g. `{"mcp": "0.5"}`).
+        # Without coercion, a renderer-side `isinstance(v, (int, float))`
+        # filter would silently drop stringified entries and re-open
+        # the ghost-cost suppression failure mode the v0.6.1 sum
+        # fallback was meant to close.
+        sane_categories = {}
+        for k, v in by_category.items():
+            if not isinstance(k, str):
+                continue
+            num = _safe_num(v)
+            if num is None or num <= 0:
+                continue
+            sane_categories[k] = float(num)
         out["cost_by_category"] = sane_categories
         if sane_categories:
-            top_name, top_value = max(sane_categories.items(), key=lambda kv: _safe_num(kv[1]))
+            top_name, top_value = max(sane_categories.items(), key=lambda kv: kv[1])
             out["cost_top_category_name"] = top_name
-            out["cost_top_category_value"] = _safe_num(top_value)
+            out["cost_top_category_value"] = top_value
         else:
             out["cost_top_category_name"] = None
             out["cost_top_category_value"] = None
@@ -479,6 +490,15 @@ def _render_sections_named(n, order, theme):
                 # Sum-fallback: even if no single category meets the
                 # threshold, the cumulative spend can. Hide if sum
                 # also below threshold (signal:noise contract).
+                #
+                # `_normalize` guarantees every value in
+                # `cost_by_category` is already a coerced float
+                # (stringified upstream values are converted at
+                # normalization time, not filtered out here). The
+                # isinstance check is kept as defense-in-depth: if a
+                # future caller bypasses _normalize and pushes a
+                # non-numeric value into `cost_by_category`, sum()
+                # would raise TypeError without it.
                 by_cat = n.get("cost_by_category") or {}
                 total = sum(v for v in by_cat.values() if isinstance(v, (int, float)))
                 if total >= 0.01:

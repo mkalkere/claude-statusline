@@ -6399,6 +6399,76 @@ class TestCostBreakdownSection(unittest.TestCase):
             THEMES["default"]["line2"] = orig_line2
             cli_mod.get_branch = orig_branch
 
+    def test_breakdown_sum_fallback_with_stringified_numerics(self):
+        """Regression test for the back-door of the ghost-cost
+        suppression. Some JSON serializers stringify numeric values
+        (`"0.005"` instead of `0.005`). The renderer's defense-in-
+        depth `isinstance(v, (int, float))` filter would drop strings
+        — but `_normalize` is supposed to coerce stringified numerics
+        to floats BEFORE storing, so the renderer never sees them.
+
+        Without coercion at the normalization boundary, a stringified
+        payload would silently sum to 0 and the section would hide,
+        re-opening the exact ghost-cost suppression the sum fallback
+        was meant to close.
+
+        Probe: 10 categories, each stringified at $0.005. Sum must
+        be $0.05, section must render `other:$0.05`.
+        """
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["cost_breakdown", "branch"]
+            data = {
+                "cost": {"by_category": {
+                    # All stringified — most serializer-quirk shape
+                    # we have to defend against.
+                    "mcp-a": "0.005", "mcp-b": "0.005", "mcp-c": "0.005",
+                    "mcp-d": "0.005", "mcp-e": "0.005", "mcp-f": "0.005",
+                    "mcp-g": "0.005", "mcp-h": "0.005", "mcp-i": "0.005",
+                    "mcp-j": "0.005",
+                }},
+                "git_branch": "main",
+            }
+            output = cli_mod.render(data, "default")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            self.assertIn("other:", plain,
+                "stringified numerics must be coerced at _normalize so "
+                "the sum-fallback rendering still fires")
+            self.assertRegex(plain, r"other:.*0\.05",
+                "sum must equal 10 * 0.005 = 0.05, not 0 from filter rejection")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_normalize_coerces_stringified_category_values(self):
+        """Pin the coercion contract directly at _normalize: any
+        stringified numeric value must be stored as a float, not the
+        original string. Downstream code can rely on the type."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "cost": {"by_category": {
+                "string_val": "0.50",
+                "int_val": 1,
+                "float_val": 2.5,
+            }},
+            "session_id": "x",
+        })
+        # All three values should be present as floats.
+        cats = n["cost_by_category"]
+        self.assertEqual(set(cats.keys()), {"string_val", "int_val", "float_val"})
+        for k, v in cats.items():
+            self.assertIsInstance(v, float,
+                "{!r} stored as {!r} (type {}) — _normalize must coerce "
+                "to float so downstream isinstance(float) checks work".format(
+                    k, v, type(v).__name__))
+        # Top category: float_val = 2.5 > 1.0 > 0.5
+        self.assertEqual(n["cost_top_category_name"], "float_val")
+        self.assertEqual(n["cost_top_category_value"], 2.5)
+
     def test_breakdown_sum_fallback_when_many_small_categories(self):
         """Ghost-cost regression: 10 categories each at $0.005 sum
         to $0.05 of real spend. Without the sum fallback the user

@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Notes
 - **Backward compatible** — every existing theme/section keeps working unchanged. The three new sections (`pr`, `cost_breakdown`, env override behavior) are opt-in. Users on Claude Code releases before v2.1.148 / v2.1.150 see no change; users on newer releases get the new fields surfaced when they opt in via custom theme.
 - **2.1.141 upstream Line-2 fix investigated** — Claude Code 2.1.141 shipped a fix for the per-line statusline truncation behavior ([anthropics/claude-code#58028](https://github.com/anthropics/claude-code/issues/58028) closed COMPLETED 2026-05-12). Investigation concluded the fix is PARTIAL: per-line truncation is fixed, but the underlying terminal-width detection problem ([#22115](https://github.com/anthropics/claude-code/issues/22115), still open as of this release) is unchanged. **Layout thresholds remain at `_FULL_LAYOUT_MIN_COLS = 150` and `_COMPACT_LAYOUT_MIN_COLS = 100`** — relaxing them would push Line 2 over the cliff on the still-common misdetection path. A future release may gate threshold relaxation on `version >= 2.1.141 AND high-confidence width detection`. Documented in `docs/RELEASE.md` failure-mode catalog.
-- All 450 tests pass (was 409, +41 new). Pure stdlib, no dependency changes.
+- All 452 tests pass (was 409, +43 new). Pure stdlib, no dependency changes.
 - Closes [#87](https://github.com/mkalkere/claude-statusline/issues/87), [#88](https://github.com/mkalkere/claude-statusline/issues/88), [#89](https://github.com/mkalkere/claude-statusline/issues/89).
 
 ## [0.6.0] - 2026-05-16
