@@ -78,6 +78,9 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Output Style | `style:explanatory` | Active output style when set |
 | Added Dirs | `dirs:+2` | Extra directories added via `/add-dir` |
 | Effort Level | `effort:high` | Thinking effort: `low`, `high`, `xhigh`, or `max` (Opus 4.7). Shown when non-default. Read from stdin JSON `effort.level` (Claude Code v2.1.119+) for instant updates; falls back to `~/.claude/settings.json` for older versions. |
+| Pull Request | `PR#86` | Current GitHub PR number when detected, clickable to the PR page via OSC 8 (Claude Code v2.1.148+). Opt-in via custom theme. |
+| Cost Breakdown | `mcp:$0.80` | Largest non-base cost category (skills, subagents, plugins, per-MCP) from `cost.by_category` (Claude Code v2.1.150+). Hides categories under $0.01. Opt-in via custom theme. |
+| Activity | `act:3` | Live tool-call counter for the current assistant turn, read from the session transcript JSONL tail. Hidden when zero. Opt-in via custom theme. |
 | Version | `v0.5.0` | claude-status version |
 | CC Version | `CC:2.1.92` | Claude Code application version |
 | Clock | `15:30` | Current time |
@@ -233,7 +236,9 @@ Claude Code spawns the statusLine command as a subprocess with stdin piped — t
 
 **Claude Code 2.1.139+ regression handling.** 2.1.139 (2026-05-11) shipped "hooks now run without terminal access," which closed the `/dev/tty` escape hatch and — more dangerously — caused `tput cols` to confidently return its terminfo default (80 for most `TERM` values) instead of failing. v0.6.0 added two specific defenses: a stub-detection heuristic that rejects `tput cols == 80` when no earlier TTY probe succeeded (the 2.1.139 fingerprint), and a process-tree walk that reads the controlling terminal of an ancestor process on Linux. Without these, users on 2.1.139 with a 220-col terminal were silently rendering an 80-col layout.
 
-This design exists because Claude Code's TUI uses Ink `<Text wrap="truncate">` on the statusline (anthropics/claude-code#28750, still unaddressed upstream): if Line 1 overflows the terminal, Line 2 is silently dropped. Measuring our actual rendered width and dropping low-priority sections one at a time prevents this without sacrificing useful information on wider terminals.
+**Override when detection still gets it wrong.** Set `CLAUDE_STATUSLINE_WIDTH=N` to force a specific layout width regardless of detection. Useful for headless CI, nested multiplexers where every probe lies, or when you want a narrower layout than your terminal actually offers (e.g. `CLAUDE_STATUSLINE_WIDTH=120` on a 200-col terminal). Out-of-range or non-numeric values fall through silently — set it back to empty or unset it to restore auto-detection.
+
+This design exists because Claude Code's TUI uses Ink `<Text wrap="truncate">` on the statusline ([anthropics/claude-code#28750](https://github.com/anthropics/claude-code/issues/28750), the per-line truncation case was fixed in 2.1.141 via [#58028](https://github.com/anthropics/claude-code/issues/58028), but the underlying terminal-width detection problem is still unfixed): if Line 1 overflows the terminal, Line 2 may be silently dropped on older Claude Code releases. Measuring our actual rendered width and dropping low-priority sections one at a time prevents this without sacrificing useful information on wider terminals.
 
 ## Manual Configuration
 

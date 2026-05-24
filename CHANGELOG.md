@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-05-24
+
+### Added
+- **`CLAUDE_STATUSLINE_WIDTH` env var override** ([#89](https://github.com/mkalkere/claude-statusline/issues/89)) — explicit user override for terminal width detection. Highest priority in the chain: set to an integer in `[20, 4000]` to force a specific layout width regardless of auto-detection. Useful for headless CI, nested multiplexers where every probe lies, or cosmetic preference. Out-of-range / non-numeric values fall through silently to the existing 8-step chain (backward compatible). `--doctor` reports the override state first in the Width detection chain block so users debugging width can see whether their env var is the active source.
+- **`pr` section** ([#87](https://github.com/mkalkere/claude-statusline/issues/87)) — renders the current GitHub PR number (`PR#86`) when Claude Code v2.1.148+ supplies `github.pr_number` in the stdin JSON. When `github.pr_url` is also present, the section is wrapped in an OSC 8 hyperlink to the PR page (terminals that support OSC 8 make it clickable; others render the text unchanged). Hidden when no PR context is detected. Opt-in via custom theme. Normalized fields also include `github_repo` and `github_pr_url` for callers that want richer rendering.
+- **`cost_breakdown` section** ([#87](https://github.com/mkalkere/claude-statusline/issues/87)) — renders the largest non-base cost category (`mcp:$0.80`, `subagents:$0.25`, etc) when Claude Code v2.1.150+ supplies `cost.by_category` in the stdin JSON. Filters out non-numeric, zero, and negative values; hides when no category exceeds $0.01 to avoid surfacing noise. Opt-in via custom theme.
+
+### Fixed
+- **`agent` section now activates reliably** ([#88](https://github.com/mkalkere/claude-statusline/issues/88)) — the previous `data.get("agent") or {}` normalization crashed silently with AttributeError when upstream sent `agent` as a non-dict (string, list, int). The outer try/except masked it as "section just didn't render," leaving users wondering why `[Explore]` never appeared. Now uses the project-standard isinstance guard, accepts both nested (`agent.name`) and flat (`agent_name`) schemas, validates the result is a non-empty string. The `worktree` section was rewritten with the same guard since it had the identical bug shape.
+- **`cost` normalization now isinstance-guarded** — same defensive pattern as the above. An upstream sending `cost: 1.50` (bare number) instead of `cost: {"total_cost_usd": 1.50}` (dict) would have crashed the new `cost.by_category` extraction; now it falls through cleanly with an empty breakdown.
+
+### Notes
+- **Backward compatible** — every existing theme/section keeps working unchanged. The three new sections (`pr`, `cost_breakdown`, env override behavior) are opt-in. Users on Claude Code releases before v2.1.148 / v2.1.150 see no change; users on newer releases get the new fields surfaced when they opt in via custom theme.
+- **2.1.141 upstream Line-2 fix investigated** — Claude Code 2.1.141 shipped a fix for the per-line statusline truncation behavior ([anthropics/claude-code#58028](https://github.com/anthropics/claude-code/issues/58028) closed COMPLETED 2026-05-13). Investigation concluded the fix is PARTIAL: per-line truncation is fixed, but the underlying terminal-width detection problem ([#22115](https://github.com/anthropics/claude-code/issues/22115), still open; re-filed at [#60335](https://github.com/anthropics/claude-code/issues/60335) post-fix) is unchanged. **Layout thresholds remain at `_FULL_LAYOUT_MIN_COLS = 150` and `_COMPACT_LAYOUT_MIN_COLS = 100`** — relaxing them would push Line 2 over the cliff on the still-common misdetection path. A future release may gate threshold relaxation on `version >= 2.1.141 AND high-confidence width detection`. Documented in `docs/RELEASE.md` failure-mode catalog.
+- All 439 tests pass (was 409, +30 new). Pure stdlib, no dependency changes.
+- Closes [#87](https://github.com/mkalkere/claude-statusline/issues/87), [#88](https://github.com/mkalkere/claude-statusline/issues/88), [#89](https://github.com/mkalkere/claude-statusline/issues/89).
+
 ## [0.6.0] - 2026-05-16
 
 ### Fixed
