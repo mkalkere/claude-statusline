@@ -124,24 +124,77 @@ def _normalize(data):
         flat_usage.get("context_size"),
     )
 
-    # Cost (nested or flat)
-    cost_obj = data.get("cost") or {}
+    # Cost (nested or flat). The isinstance guard handles upstreams
+    # that send `cost` as a number (older schemas) or string instead
+    # of a dict.
+    cost_obj = data.get("cost")
+    cost_obj = cost_obj if isinstance(cost_obj, dict) else {}
     out["cost"] = _first(cost_obj.get("total_cost_usd"), data.get("cost_usd"))
     out["duration"] = _first(cost_obj.get("total_duration_ms"), data.get("session_duration_ms"))
     out["api_duration"] = _first(cost_obj.get("total_api_duration_ms"), data.get("api_duration_ms"))
     out["lines_added"] = _first(cost_obj.get("total_lines_added"), data.get("lines_added"))
     out["lines_removed"] = _first(cost_obj.get("total_lines_removed"), data.get("lines_removed"))
 
+    # Per-category cost breakdown (Claude Code v2.1.150+ exposes
+    # `cost.by_category` with keys like "skills", "subagents",
+    # "plugins", per-MCP-server costs). We extract the largest
+    # non-base category for the `cost_breakdown` section. The whole
+    # dict is preserved on `n` for callers that want richer rendering.
+    by_category = cost_obj.get("by_category")
+    if isinstance(by_category, dict):
+        # Filter to numeric, positive entries only.
+        sane_categories = {
+            k: v for k, v in by_category.items()
+            if isinstance(k, str) and _safe_num(v) is not None and _safe_num(v) > 0
+        }
+        out["cost_by_category"] = sane_categories
+        if sane_categories:
+            top_name, top_value = max(sane_categories.items(), key=lambda kv: _safe_num(kv[1]))
+            out["cost_top_category_name"] = top_name
+            out["cost_top_category_value"] = _safe_num(top_value)
+        else:
+            out["cost_top_category_name"] = None
+            out["cost_top_category_value"] = None
+    else:
+        out["cost_by_category"] = {}
+        out["cost_top_category_name"] = None
+        out["cost_top_category_value"] = None
+
+    # GitHub repo and PR info (Claude Code v2.1.148+ adds
+    # `github.{repo, pr_number, pr_url, branch}` when working inside
+    # a recognized repo). Each field is independent — repo can be
+    # present without pr_number, etc.
+    github_obj = data.get("github")
+    github_obj = github_obj if isinstance(github_obj, dict) else {}
+    raw_repo = github_obj.get("repo")
+    out["github_repo"] = raw_repo if isinstance(raw_repo, str) and raw_repo else None
+    raw_pr_url = github_obj.get("pr_url")
+    out["github_pr_url"] = raw_pr_url if isinstance(raw_pr_url, str) and raw_pr_url else None
+    # pr_number may arrive as int OR string in JSON depending on the
+    # serializer; _safe_num accepts both and rejects garbage.
+    pr_num = _safe_num(github_obj.get("pr_number"))
+    out["github_pr_number"] = int(pr_num) if pr_num is not None and pr_num > 0 else None
+
     # Vim (nested or flat)
     vim_obj = data.get("vim") or {}
     out["vim_mode"] = vim_obj.get("mode") or data.get("vim_mode")
 
-    # Agent (nested or flat)
-    agent_obj = data.get("agent") or {}
-    out["agent_name"] = agent_obj.get("name") or data.get("agent_name")
+    # Agent (nested or flat). The isinstance guard prevents an
+    # upstream sending `agent: "Explore"` as a string (or list/int)
+    # from crashing _normalize with AttributeError on .get(). Same
+    # defensive pattern as `rate_limits` below. The flat
+    # `agent_name` fallback handles demo mode and older schemas.
+    agent_obj = data.get("agent")
+    agent_obj = agent_obj if isinstance(agent_obj, dict) else {}
+    nested_name = agent_obj.get("name")
+    flat_name = data.get("agent_name")
+    # Only keep strings; ignore non-string values (None, list, int).
+    candidate = nested_name if isinstance(nested_name, str) else flat_name
+    out["agent_name"] = candidate if isinstance(candidate, str) and candidate else None
 
-    # Worktree (nested or flat)
-    wt_obj = data.get("worktree") or {}
+    # Worktree (nested or flat) — same isinstance guard.
+    wt_obj = data.get("worktree")
+    wt_obj = wt_obj if isinstance(wt_obj, dict) else {}
     out["worktree_branch"] = wt_obj.get("branch") or data.get("worktree_branch")
     out["worktree_name"] = wt_obj.get("name")
 
@@ -373,6 +426,35 @@ def _render_sections_named(n, order, theme):
 
         elif section == "cost" and cost is not None:
             sections.append(colorize(fmt_cost(cost), tc["cost"]))
+
+        elif section == "cost_breakdown":
+            # Largest non-base cost category from `cost.by_category`
+            # (Claude Code v2.1.150+). Renders as `mcp:$0.18` or
+            # `subagents:$0.42`. Hidden when no category data is
+            # present (older Claude Code, no extra costs incurred yet)
+            # or when the top category is below a small threshold —
+            # showing `skills:$0.001c` is noise, not signal.
+            top_name = n.get("cost_top_category_name")
+            top_value = n.get("cost_top_category_value")
+            if top_name and top_value is not None and top_value >= 0.01:
+                cb_color = tc.get("cost_breakdown", tc.get("cost", YELLOW))
+                sections.append(
+                    colorize("{}:".format(top_name), tc["label"])
+                    + colorize(fmt_cost(top_value), cb_color)
+                )
+
+        elif section == "pr":
+            # GitHub PR context (Claude Code v2.1.148+). Renders the
+            # PR number as a clickable link to pr_url when available;
+            # falls back to plain text. Hidden when no PR is detected.
+            pr_number = n.get("github_pr_number")
+            pr_url = n.get("github_pr_url")
+            if pr_number:
+                pr_color = tc.get("pr", CYAN)
+                pr_text = colorize("PR#{}".format(pr_number), pr_color)
+                if pr_url:
+                    pr_text = _osc8_link(pr_url, pr_text)
+                sections.append(pr_text)
 
         elif section == "burn" and total_tokens and duration:
             rate = fmt_burn_rate(total_tokens, duration)
@@ -693,7 +775,7 @@ _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
     "sessions", "tools", "activity", "latency", "context_size", "session_name",
     "rate_limits", "output_style", "added_dirs", "effort", "git_worktree",
-    "speed", "git_state", "commit_age",
+    "speed", "git_state", "commit_age", "cost_breakdown", "pr",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",
@@ -789,35 +871,42 @@ def _detect_terminal_width_report(data=None):
 
     Order (each step caught and ignored on any error):
 
-    1. ``data["terminal"]["columns"]`` from stdin JSON — defensive
+    1. ``CLAUDE_STATUSLINE_WIDTH`` env var — explicit user override.
+       Highest priority: when a user sets this, they are telling us
+       to skip detection entirely. Useful for headless CI, nested
+       multiplexers where every other probe lies, or when the user
+       wants to force a specific layout width regardless of what
+       the terminal reports.
+    2. ``data["terminal"]["columns"]`` from stdin JSON — defensive
        forward-compat for whenever Anthropic adds it.
-    2. ``COLUMNS`` env var — some shell wrappers / users export it.
+    3. ``COLUMNS`` env var — some shell wrappers / users export it.
        ``COLUMNS=0`` is rejected and reported distinctly from unset:
        observed in no-TTY hook subprocesses on 2.1.139+, where the
        presence-of-zero is itself a signal (not a missing variable).
-    3. ``shutil.get_terminal_size()`` honoring ``COLUMNS`` and any
+    4. ``shutil.get_terminal_size()`` honoring ``COLUMNS`` and any
        stdout TTY (rarely TTY in our context but cheap to check).
-    4. ``os.get_terminal_size(N)`` against a TTY file descriptor
+    5. ``os.get_terminal_size(N)`` against a TTY file descriptor
        (stderr/stdout in case one of them is unexpectedly a TTY).
-    5. Process-tree walk: try ``os.get_terminal_size`` on the stderr
+    6. Process-tree walk: try ``os.get_terminal_size`` on the stderr
        fd of each ancestor process. Works on Linux when an ancestor
        still owns the controlling terminal even though we don't.
        macOS lacks an equivalent `/proc/<pid>/fd` exposure and
        degrades to "checked PPID then bailed."
-    6. ``stty size < /dev/tty`` — works on Linux/macOS/WSL when
+    7. ``stty size < /dev/tty`` — works on Linux/macOS/WSL when
        ``/dev/tty`` is reachable. Often unreachable on 2.1.139+.
-    7. ``tput cols 2>/dev/tty`` — alternate POSIX path. Subject to
+    8. ``tput cols 2>/dev/tty`` — alternate POSIX path. Subject to
        stub-value rejection: if `tput` returns a known terminfo
        default AND every prior TTY probe failed, the result is
        treated as a lie and rejected.
-    8. Fallback ``_COMPACT_LAYOUT_MIN_COLS`` — safe default that keeps
+    9. Fallback ``_COMPACT_LAYOUT_MIN_COLS`` — safe default that keeps
        Line 2 readable when no signal is trustworthy.
 
     Args:
         data: Optional parsed stdin JSON dict. If present and contains
             a numeric ``terminal.columns`` value (int, float, or
             numeric string — accepted via ``_safe_num``), that is
-            preferred over all other signals.
+            preferred over auto-detection signals (but NOT over the
+            explicit ``CLAUDE_STATUSLINE_WIDTH`` env override).
 
     Returns:
         Tuple of ``(winner_int, report_list)`` where ``winner_int`` is
@@ -834,7 +923,27 @@ def _detect_terminal_width_report(data=None):
     # default tput return is treated as the stub, not a real reading.
     any_tty_probe_succeeded = False
 
-    # 1. Stdin JSON terminal.columns (forward-compat).
+    # 1. Explicit CLAUDE_STATUSLINE_WIDTH env override.
+    # Highest priority — when the user sets this, they have decided
+    # detection is unreliable or want to force a specific width.
+    # Out-of-range / non-numeric values fall through to auto-detection.
+    override = os.environ.get("CLAUDE_STATUSLINE_WIDTH")
+    if override is None:
+        report.append(("CLAUDE_STATUSLINE_WIDTH env", "unset"))
+    else:
+        try:
+            cols = int(override)
+            if _TERM_WIDTH_MIN <= cols <= _TERM_WIDTH_MAX:
+                report.append(("CLAUDE_STATUSLINE_WIDTH env", f"{cols} (winner — explicit override)"))
+                return cols, report
+            report.append((
+                "CLAUDE_STATUSLINE_WIDTH env",
+                f"{cols} out of range [{_TERM_WIDTH_MIN}, {_TERM_WIDTH_MAX}] — rejected",
+            ))
+        except (ValueError, TypeError):
+            report.append(("CLAUDE_STATUSLINE_WIDTH env", f"{override!r} not an int — rejected"))
+
+    # 2. Stdin JSON terminal.columns (forward-compat).
     if isinstance(data, dict):
         term_obj = data.get("terminal")
         if isinstance(term_obj, dict):

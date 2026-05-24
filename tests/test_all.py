@@ -5888,5 +5888,387 @@ class TestActivityCounter(unittest.TestCase):
             cli_mod.get_branch = orig_branch
 
 
+class TestClaudeStatuslineWidthOverride(unittest.TestCase):
+    """CLAUDE_STATUSLINE_WIDTH env var as the explicit user override.
+
+    Tracked at issue #89. Highest priority in the width-detection
+    chain — when a user sets this, they have decided detection is
+    unreliable or want to force a specific width. Out-of-range and
+    non-numeric values must fall through (silent ignore) to keep
+    backward compatibility.
+    """
+
+    def setUp(self):
+        self._old_override = os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+        self._old_cols = os.environ.pop("COLUMNS", None)
+
+    def tearDown(self):
+        if self._old_override is not None:
+            os.environ["CLAUDE_STATUSLINE_WIDTH"] = self._old_override
+        else:
+            os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+        if self._old_cols is not None:
+            os.environ["COLUMNS"] = self._old_cols
+
+    def test_override_wins_over_stdin_terminal_columns(self):
+        """Explicit user override beats stdin.terminal.columns (which
+        is itself the top-priority auto-detection signal). Users
+        setting this env var have decided they know better than every
+        other source — honor that."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "165"
+        # Even with stdin terminal.columns present, override wins.
+        result = _detect_terminal_width({"terminal": {"columns": 300}})
+        self.assertEqual(result, 165)
+
+    def test_override_wins_over_columns_env(self):
+        """When both CLAUDE_STATUSLINE_WIDTH and COLUMNS are set,
+        the dedicated override wins. Avoids ambiguity about which
+        env var was intended."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "200"
+        os.environ["COLUMNS"] = "100"
+        result = _detect_terminal_width({})
+        self.assertEqual(result, 200)
+
+    def test_garbage_override_falls_through(self):
+        """Non-numeric override must not crash and must not block
+        auto-detection — fall through to existing chain. Otherwise
+        a typo (`CLAUDE_STATUSLINE_WIDTH=wide`) would silently force
+        the safe-default layout."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "wide"
+        os.environ["COLUMNS"] = "150"  # auto-detection should win
+        result = _detect_terminal_width({})
+        self.assertEqual(result, 150,
+            "garbage override must fall through to COLUMNS, not be honored")
+
+    def test_out_of_range_override_falls_through(self):
+        """Override outside [_TERM_WIDTH_MIN, _TERM_WIDTH_MAX] is
+        rejected — same as other steps in the chain. Otherwise a
+        finger-fumble like `CLAUDE_STATUSLINE_WIDTH=99999` would
+        force a layout that overflows every screen."""
+        from claude_statusline.cli import _detect_terminal_width
+        os.environ["COLUMNS"] = "120"
+        for bad in ("0", "10", "5000"):
+            os.environ["CLAUDE_STATUSLINE_WIDTH"] = bad
+            result = _detect_terminal_width({})
+            self.assertEqual(result, 120,
+                "out-of-range override {!r} must fall through".format(bad))
+
+    def test_override_reported_distinctly_in_report(self):
+        """--doctor must show the override prominently when set so
+        users debugging width can see whether their env var is the
+        active source."""
+        from claude_statusline.cli import _detect_terminal_width_report
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "200"
+        _result, report = _detect_terminal_width_report({})
+        # The override step must appear first in the report so users
+        # scanning --doctor output see it before the auto-detection
+        # noise.
+        self.assertEqual(report[0][0], "CLAUDE_STATUSLINE_WIDTH env",
+            "override step must be first in the report")
+        self.assertIn("winner", report[0][1])
+        self.assertIn("explicit override", report[0][1],
+            "report must label the override as explicit so users "
+            "understand it's not auto-detection")
+
+    def test_override_unset_reports_unset(self):
+        """When the override is unset (the normal case), the report
+        must say 'unset' rather than silently omit the step. Keeps
+        --doctor output predictable across versions."""
+        from claude_statusline.cli import _detect_terminal_width_report
+        os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+        _result, report = _detect_terminal_width_report({})
+        override_entries = [s for label, s in report if label == "CLAUDE_STATUSLINE_WIDTH env"]
+        self.assertEqual(override_entries, ["unset"])
+
+
+class TestAgentNameNormalization(unittest.TestCase):
+    """The `agent` section reads stdin `agent.name` to display the
+    current subagent identity. Tracked at issue #88.
+
+    Previously the normalization used `data.get("agent") or {}` which
+    crashed silently when upstream sent `agent` as a non-dict (string,
+    list, int) — the resulting AttributeError on .get() was caught by
+    the outer try/except but the section never rendered. These tests
+    pin the isinstance-guarded shape.
+    """
+
+    def test_nested_agent_name_extracted(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent": {"name": "Explore"}, "session_id": "x"})
+        self.assertEqual(n["agent_name"], "Explore")
+
+    def test_flat_agent_name_fallback(self):
+        """Demo mode and older schemas use flat agent_name."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent_name": "CodeReviewer", "session_id": "x"})
+        self.assertEqual(n["agent_name"], "CodeReviewer")
+
+    def test_nested_wins_over_flat(self):
+        """Real stdin schema is nested. If both are present, prefer it."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "agent": {"name": "Nested"},
+            "agent_name": "Flat",
+            "session_id": "x",
+        })
+        self.assertEqual(n["agent_name"], "Nested")
+
+    def test_agent_as_string_does_not_crash(self):
+        """Pre-fix: this raised AttributeError on .get(). The outer
+        try/except masked it as 'section just didn't render.' Now
+        the isinstance guard catches it cleanly."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent": "Explore", "session_id": "x"})
+        # String at the outer key isn't a recognized shape — section absent.
+        self.assertIsNone(n["agent_name"])
+
+    def test_agent_as_list_does_not_crash(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent": ["Explore"], "session_id": "x"})
+        self.assertIsNone(n["agent_name"])
+
+    def test_agent_name_as_non_string_rejected(self):
+        """If nested agent.name arrives as a non-string (int, list),
+        reject it rather than render the wrong type."""
+        from claude_statusline.cli import _normalize
+        for bad in (42, ["Explore"], {"nested": "deep"}, True):
+            n = _normalize({"agent": {"name": bad}, "session_id": "x"})
+            self.assertIsNone(n["agent_name"],
+                "agent.name={!r} must be rejected as non-string".format(bad))
+
+    def test_empty_agent_name_rejected(self):
+        """Empty string is not a useful chip — hide the section."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"agent": {"name": ""}, "session_id": "x"})
+        self.assertIsNone(n["agent_name"])
+
+    def test_agent_absent_returns_none(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"session_id": "x"})
+        self.assertIsNone(n["agent_name"])
+
+    def test_agent_section_renders_with_nested_name(self):
+        """End-to-end: when stdin contains nested agent.name, the
+        chip renders correctly. The default theme already includes
+        the `agent` section in line2."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["agent", "branch"]
+            data = {"agent": {"name": "Explore"}, "git_branch": "main"}
+            output = cli_mod.render(data, "default")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            self.assertIn("[Explore]", plain,
+                "agent section must render '[Name]' when stdin has agent.name")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+
+class TestGitHubPRSection(unittest.TestCase):
+    """Claude Code v2.1.148+ adds `github.{repo, pr_number, pr_url}`
+    to stdin. Tracked at issue #87. The `pr` section renders the PR
+    number as a clickable link to pr_url when available."""
+
+    def test_pr_number_extracted_from_nested_github(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "github": {"pr_number": 1234, "pr_url": "https://github.com/x/y/pull/1234"},
+            "session_id": "x",
+        })
+        self.assertEqual(n["github_pr_number"], 1234)
+        self.assertEqual(n["github_pr_url"], "https://github.com/x/y/pull/1234")
+
+    def test_pr_number_as_string_coerced(self):
+        """JSON serializers sometimes stringify integers; accept that."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"github": {"pr_number": "42"}, "session_id": "x"})
+        self.assertEqual(n["github_pr_number"], 42)
+
+    def test_pr_number_garbage_rejected(self):
+        from claude_statusline.cli import _normalize
+        for bad in ("not a number", -1, 0, [42], {"nested": 1}):
+            n = _normalize({"github": {"pr_number": bad}, "session_id": "x"})
+            self.assertIsNone(n["github_pr_number"],
+                "pr_number={!r} must be rejected".format(bad))
+
+    def test_github_field_absent(self):
+        """Older Claude Code clients don't send `github` — fields stay None."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"session_id": "x"})
+        self.assertIsNone(n["github_pr_number"])
+        self.assertIsNone(n["github_pr_url"])
+        self.assertIsNone(n["github_repo"])
+
+    def test_github_as_non_dict_does_not_crash(self):
+        from claude_statusline.cli import _normalize
+        for bad in ("repo-name", 42, ["pr1234"], True):
+            n = _normalize({"github": bad, "session_id": "x"})
+            self.assertIsNone(n["github_pr_number"],
+                "github={!r} must be rejected without crashing".format(bad))
+
+    def test_pr_url_must_be_string(self):
+        """A non-string pr_url must not become a malformed OSC 8 link."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"github": {"pr_url": 42}, "session_id": "x"})
+        self.assertIsNone(n["github_pr_url"])
+
+    def test_pr_section_renders(self):
+        """End-to-end: opt-in `pr` section renders PR#NN when stdin
+        has github.pr_number."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["pr", "branch"]
+            data = {
+                "github": {"pr_number": 86, "pr_url": "https://github.com/x/y/pull/86"},
+                "git_branch": "main",
+            }
+            output = cli_mod.render(data, "default")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            # OSC 8 links inject hyperlink escapes too; strip those.
+            plain = re.sub(r"\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)", "", plain)
+            self.assertIn("PR#86", plain,
+                "pr section must render 'PR#NN' when github.pr_number is present")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_pr_section_hidden_without_pr(self):
+        """No PR number → section absent, no leftover label."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["pr", "branch"]
+            output = cli_mod.render({"git_branch": "main"}, "default")
+            self.assertNotIn("PR#", output)
+            self.assertNotIn("PR:", output)
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+
+class TestCostBreakdownSection(unittest.TestCase):
+    """Claude Code v2.1.150+ adds `cost.by_category` with per-category
+    breakdown (skills, subagents, plugins, per-MCP). Tracked at issue
+    #87. The `cost_breakdown` section renders the largest non-base
+    category."""
+
+    def test_largest_category_extracted(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "cost": {
+                "total_cost_usd": 1.50,
+                "by_category": {"skills": 0.10, "mcp": 0.80, "subagents": 0.25},
+            },
+            "session_id": "x",
+        })
+        self.assertEqual(n["cost_top_category_name"], "mcp")
+        self.assertEqual(n["cost_top_category_value"], 0.80)
+
+    def test_category_dict_absent(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"cost": {"total_cost_usd": 1.0}, "session_id": "x"})
+        self.assertEqual(n["cost_by_category"], {})
+        self.assertIsNone(n["cost_top_category_name"])
+
+    def test_non_numeric_categories_filtered(self):
+        """A category with a non-numeric or zero value is excluded
+        from the 'largest' calculation."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "cost": {"by_category": {
+                "valid": 0.50,
+                "string": "not a number",
+                "zero": 0,
+                "negative": -0.10,
+                "null": None,
+            }},
+            "session_id": "x",
+        })
+        self.assertEqual(n["cost_top_category_name"], "valid")
+        self.assertIn("valid", n["cost_by_category"])
+        self.assertNotIn("string", n["cost_by_category"])
+        self.assertNotIn("zero", n["cost_by_category"])
+        self.assertNotIn("negative", n["cost_by_category"])
+        self.assertNotIn("null", n["cost_by_category"])
+
+    def test_by_category_as_non_dict_does_not_crash(self):
+        from claude_statusline.cli import _normalize
+        for bad in ("string", [1, 2], 42, True):
+            n = _normalize({
+                "cost": {"by_category": bad},
+                "session_id": "x",
+            })
+            self.assertEqual(n["cost_by_category"], {},
+                "by_category={!r} must be treated as empty".format(bad))
+
+    def test_cost_as_non_dict_does_not_crash(self):
+        """Upstream sending cost as a number (older schemas) must not
+        crash the new by_category extraction."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"cost": 1.50, "session_id": "x"})
+        self.assertEqual(n["cost_by_category"], {})
+        self.assertIsNone(n["cost"])  # bare number isn't extracted as total_cost_usd
+
+    def test_breakdown_section_renders_largest(self):
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["cost_breakdown", "branch"]
+            data = {
+                "cost": {
+                    "total_cost_usd": 1.50,
+                    "by_category": {"mcp": 0.80, "skills": 0.10},
+                },
+                "git_branch": "main",
+            }
+            output = cli_mod.render(data, "default")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            self.assertIn("mcp:", plain,
+                "cost_breakdown must render the largest category name")
+            self.assertIn("$0.8", plain,
+                "cost_breakdown must render the category value via fmt_cost")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_breakdown_hidden_below_threshold(self):
+        """Tiny category values (< $0.01) are noise, not signal.
+        Section must hide rather than render $0.001c chrome."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["cost_breakdown", "branch"]
+            data = {
+                "cost": {"by_category": {"skills": 0.003}},
+                "git_branch": "main",
+            }
+            output = cli_mod.render(data, "default")
+            self.assertNotIn("skills:", output,
+                "tiny categories must hide rather than render noise")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+
 if __name__ == "__main__":
     unittest.main()
