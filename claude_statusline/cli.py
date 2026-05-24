@@ -213,8 +213,14 @@ def _normalize(data):
         int(pr_num) if pr_num is not None and 0 < pr_num < 1_000_000 else None
     )
 
-    # Vim (nested or flat)
-    vim_obj = data.get("vim") or {}
+    # Vim (nested or flat). Same isinstance guard as agent / worktree
+    # / cost below — without it, an upstream sending `vim: "NORMAL"`
+    # as a string (or any non-dict) would crash _normalize with
+    # AttributeError on .get(). Flagged by Gemini on PR #90 as the
+    # same bug pattern fixed for the other three sections; adopting
+    # here for consistency.
+    vim_obj = data.get("vim")
+    vim_obj = vim_obj if isinstance(vim_obj, dict) else {}
     out["vim_mode"] = vim_obj.get("mode") or data.get("vim_mode")
 
     # Agent (nested or flat). The isinstance guard prevents an
@@ -489,7 +495,12 @@ def _render_sections_named(n, order, theme):
             #    surface $0.001 nowhere.
             top_name = n.get("cost_top_category_name")
             top_value = n.get("cost_top_category_value")
-            cb_color = tc.get("cost_breakdown", tc.get("cost", YELLOW))
+            # _first() rather than chained .get() defaults so that a
+            # custom theme explicitly setting `cost_breakdown: null`
+            # falls through to `cost` then to YELLOW, rather than
+            # passing None to colorize(). (str(None) is the string
+            # "None" — would render visibly broken output.)
+            cb_color = _first(tc.get("cost_breakdown"), tc.get("cost"), YELLOW)
             if top_name and top_value is not None and top_value >= 0.01:
                 sections.append(
                     colorize("{}:".format(top_name), tc["label"])
@@ -523,7 +534,10 @@ def _render_sections_named(n, order, theme):
             pr_number = n.get("github_pr_number")
             pr_url = n.get("github_pr_url")
             if pr_number:
-                pr_color = tc.get("pr", CYAN)
+                # _first() rather than .get() default so a custom
+                # theme that explicitly sets `pr: null` falls through
+                # to CYAN rather than passing None to colorize().
+                pr_color = _first(tc.get("pr"), CYAN)
                 pr_text = colorize("PR#{}".format(pr_number), pr_color)
                 if pr_url:
                     pr_text = _osc8_link(pr_url, pr_text)

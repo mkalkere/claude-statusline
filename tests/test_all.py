@@ -6113,6 +6113,27 @@ class TestAgentNameNormalization(unittest.TestCase):
         n = _normalize({"agent": {}, "session_id": "x"})
         self.assertIsNone(n["agent_name"])
 
+    def test_vim_as_non_dict_does_not_crash(self):
+        """Same isinstance-guard regression test for vim as for
+        agent/worktree/cost. Flagged by Gemini on PR #90 as
+        pre-existing exposure of the same bug pattern. An upstream
+        sending `vim: "NORMAL"` as a string (or any non-dict) must
+        not crash _normalize."""
+        from claude_statusline.cli import _normalize
+        for bad in ("NORMAL", ["NORMAL"], 42, True):
+            n = _normalize({"vim": bad, "session_id": "x"})
+            # vim_mode falls back to the flat `data.get("vim_mode")`,
+            # which is None — section absent.
+            self.assertIsNone(n["vim_mode"],
+                "vim={!r} must be rejected as non-dict without crashing".format(bad))
+
+    def test_vim_nested_dict_still_works(self):
+        """The isinstance fix must not have broken the legitimate
+        nested-dict path."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"vim": {"mode": "INSERT"}, "session_id": "x"})
+        self.assertEqual(n["vim_mode"], "INSERT")
+
     def test_agent_section_renders_with_nested_name(self):
         """End-to-end: when stdin contains nested agent.name, the
         chip renders correctly. The default theme already includes
