@@ -24,6 +24,8 @@
 - Close related GitHub issues after release
 - Install from PyPI and verify the release works
 
+For the step-by-step release runbook (review-cycle pattern, agent briefing, post-merge sequence, failure-mode catalog), see [docs/RELEASE.md](docs/RELEASE.md).
+
 ## Code patterns
 
 - Use `_first()` helper for numeric fields (not `or` which drops zeros)

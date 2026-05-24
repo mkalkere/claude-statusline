@@ -40,6 +40,10 @@ python -m unittest discover tests/
 3. Run `python -m unittest discover tests/` — all tests must pass
 4. Open a pull request with a clear description
 
+## Releasing
+
+Maintainers cutting a release follow the [Release Playbook](docs/RELEASE.md). It covers branching, the review cycle with the 4 PR-review agents, CHANGELOG conventions, the GitHub release → PyPI publish flow, post-release verification, and a catalog of upstream pitfalls the project has hit and how to investigate them.
+
 ## Reporting Bugs
 
 Open an issue with:
