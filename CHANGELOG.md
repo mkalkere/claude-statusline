@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-05-29
+
+### Added
+- **`ultra` effort level** — Claude Code emits `effort.level: "ultra"` on stdin, the stored value for `/effort ultracode` introduced alongside Opus 4.8 (2026-05-28). Valid `effort.level` values are now `low, medium, high, xhigh, max, ultra`. Previously claude-status hardcoded the valid set without `ultra`, so a real `effort.level: "ultra"` was silently rejected and the `effort:` indicator disappeared for ultracode users — the same class of bug fixed for `xhigh`/`max` in v0.5.6. Now `ultra` is accepted in both the stdin path and the settings.json fallback path, renders as the new top tier (color falls through `effort_ultra → effort_max → effort_xhigh → effort_high → BRIGHT_MAGENTA` via `_first()`), and all 8 built-in themes carry the `effort_ultra` color key (mirroring `effort_max`). The stored value `ultra` is rendered verbatim, not the `ultracode` display label — consistent with how every other tier renders its stored `effort.level` value.
+
+### Changed
+- Demo data (`--demo`), README, and a test fixture now reference **Opus 4.8 (1M context)** instead of Opus 4.7, reflecting Anthropic's current top model (released 2026-05-28).
+
+### Notes
+- **Backward compatible** — users on Claude Code releases before Opus 4.8 / ultracode see no change. The `ultracode` display label is still correctly rejected as invalid (only the stored value `ultra` is accepted), so validation is not weakened.
+- **Verified non-issues for Opus 4.8**: model `display_name` renders verbatim (no hardcoded model IDs), context window unchanged (1M, same as Opus 4.7), pricing is supplied by Claude Code (`cost.total_cost_usd`; no hardcoded rates), and no new statusline stdin fields shipped in the Claude Code releases bundling Opus 4.8.
+- New tests live in `tests/test_ultra_effort.py` (17 tests): stdin path, settings.json path, case-insensitivity, stdin precedence over settings.json, all-themes render, top-tier color, custom-theme fallthrough (missing key and explicit None), structural parity (every theme has `effort_ultra` mirroring `effort_max`), and `ultracode`-label / non-string / bogus-level rejection.
+- All 472 tests pass (was 455, +17 new). Pure stdlib, no dependency changes.
+
 ## [0.6.1] - 2026-05-24
 
 ### Added

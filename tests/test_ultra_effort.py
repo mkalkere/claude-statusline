@@ -1,0 +1,226 @@
+"""Tests for the `ultra` effort level (Opus 4.8 / /effort ultracode).
+
+Separate module from test_all.py — claude-status uses stdlib unittest
+discovery (`python -m unittest discover tests/`), which picks up every
+test_*.py in tests/, so these run alongside the rest.
+
+`ultra` is the stored value Claude Code emits on stdin for
+`/effort ultracode` (Opus 4.8, 2026-05). It is xhigh plus standing
+permission to launch dynamic workflows; the statusline field reports
+the stored value `ultra`, not the `ultracode` display label.
+"""
+
+import json
+import os
+import re
+import shutil
+import tempfile
+import unittest
+
+
+def _strip_ansi(s):
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+
+class TestUltraEffortStdin(unittest.TestCase):
+    """ultra supplied via stdin effort.level."""
+
+    def test_ultra_via_stdin_renders(self):
+        from claude_statusline.cli import render
+        data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+        result = _strip_ansi(render(data, "default"))
+        self.assertIn("effort:ultra", result)
+
+    def test_ultra_via_stdin_case_insensitive(self):
+        from claude_statusline.cli import render
+        data = {"effort": {"level": "ULTRA"}, "git_branch": "main"}
+        result = _strip_ansi(render(data, "default"))
+        self.assertIn("effort:ultra", result)
+
+    def test_ultra_renders_in_all_themes(self):
+        """Every built-in theme must render ultra without crashing."""
+        from claude_statusline.cli import render
+        from claude_statusline.themes import THEMES
+        for theme_name in THEMES:
+            data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+            result = _strip_ansi(render(data, theme_name))
+            self.assertIsInstance(result, str)
+
+    def test_ultra_uses_top_tier_color(self):
+        """ultra is a TOP tier — its VALUE must render in the top-tier
+        color (BRIGHT_MAGENTA in the default theme), not the dim
+        BRIGHT_BLACK used for the label or the low tier."""
+        from claude_statusline.cli import render
+        from claude_statusline import colors
+        data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+        raw = render(data, "default")
+        self.assertIn("effort:ultra", _strip_ansi(raw))
+        self.assertIn(colors.BRIGHT_MAGENTA + "ultra", raw,
+            "ultra value must render in the top-tier color")
+        self.assertNotIn(colors.BRIGHT_BLACK + "ultra", raw,
+            "ultra value must not be dimmed (low-tier color)")
+
+    def test_stdin_takes_precedence_over_settings(self):
+        """When stdin supplies ultra, it must win over any
+        settings.json value — matching existing effort precedence."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: "high"
+        try:
+            data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+            result = _strip_ansi(cli_mod.render(data, "default"))
+            self.assertIn("effort:ultra", result)
+            self.assertNotIn("effort:high", result)
+        finally:
+            cli_mod.get_effort_level = orig
+
+
+class TestUltraEffortValidSet(unittest.TestCase):
+    """ultra accepted in _VALID_EFFORT_LEVELS (gates both paths)."""
+
+    def test_ultra_in_valid_set(self):
+        from claude_statusline.sessions import _VALID_EFFORT_LEVELS
+        self.assertIn("ultra", _VALID_EFFORT_LEVELS)
+
+    def test_ultra_normalized_from_stdin(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"effort": {"level": "ultra"}, "session_id": "x"})
+        self.assertEqual(n["effort_level"], "ultra")
+
+    def test_ultra_uppercase_normalized(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"effort": {"level": "ULTRA"}, "session_id": "x"})
+        self.assertEqual(n["effort_level"], "ultra")
+
+    def test_ultracode_label_rejected(self):
+        """"ultracode" is the DISPLAY label, not the stored value.
+        Claude Code emits "ultra" on stdin, so "ultracode" itself is
+        not a valid stored value and must be rejected."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"effort": {"level": "ultracode"}, "session_id": "x"})
+        self.assertIsNone(n["effort_level"])
+
+    def test_bogus_still_rejected(self):
+        """Adding ultra must not weaken rejection of invalid levels."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"effort": {"level": "ludicrous"}, "session_id": "x"})
+        self.assertIsNone(n["effort_level"])
+
+    def test_non_string_ultra_rejected(self):
+        """Non-string effort.level (e.g. 42) must not crash and must
+        be rejected — parity with existing _normalize robustness."""
+        from claude_statusline.cli import _normalize
+        for bad in (42, ["ultra"], {"level": "ultra"}, None):
+            n = _normalize({"effort": {"level": bad}, "session_id": "x"})
+            self.assertIsNone(n["effort_level"])
+
+
+class TestUltraEffortSettingsJson(unittest.TestCase):
+    """ultra accepted via the settings.json fallback path
+    (get_effort_level), for older Claude Code without stdin effort.
+    Uses a temp _CLAUDE_DIR so the real ~/.claude is never touched
+    (see issue #96)."""
+
+    def setUp(self):
+        from claude_statusline import sessions as sessions_mod
+        self._sessions = sessions_mod
+        self._tmp = tempfile.mkdtemp(prefix="claude-ultra-test-")
+        self._orig_dir = sessions_mod._CLAUDE_DIR
+        sessions_mod._CLAUDE_DIR = self._tmp
+        self._clear_effort_cache()
+
+    def tearDown(self):
+        self._sessions._CLAUDE_DIR = self._orig_dir
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        self._clear_effort_cache()
+
+    def _clear_effort_cache(self):
+        try:
+            cache_dir = self._sessions._cache_dir()
+            if os.path.isdir(cache_dir):
+                for name in os.listdir(cache_dir):
+                    if name.startswith("effort_level"):
+                        try:
+                            os.remove(os.path.join(cache_dir, name))
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+
+    def _write_settings(self, effort):
+        path = os.path.join(self._tmp, "settings.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"effortLevel": effort}, f)
+
+    def test_ultra_from_settings_json(self):
+        self._write_settings("ultra")
+        self.assertEqual(self._sessions.get_effort_level(), "ultra")
+
+    def test_ultra_uppercase_from_settings_json(self):
+        self._write_settings("ULTRA")
+        self.assertEqual(self._sessions.get_effort_level(), "ultra")
+
+    def test_ultracode_label_rejected_from_settings(self):
+        self._write_settings("ultracode")
+        self.assertIsNone(self._sessions.get_effort_level())
+
+
+class TestUltraEffortCustomThemeFallthrough(unittest.TestCase):
+    """A custom theme that lacks effort_ultra must still render ultra
+    via the _first() fallthrough chain, never crashing."""
+
+    def test_theme_without_effort_ultra_falls_through(self):
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        import copy
+        base = copy.deepcopy(THEMES["default"])
+        base["colors"].pop("effort_ultra", None)
+        THEMES["_ultra_test"] = base
+        try:
+            data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+            result = _strip_ansi(cli_mod.render(data, "_ultra_test"))
+            self.assertIn("effort:ultra", result)
+        finally:
+            THEMES.pop("_ultra_test", None)
+
+    def test_theme_with_effort_ultra_none_falls_through(self):
+        """effort_ultra explicitly None must not pass None to
+        colorize() — _first() skips it."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        import copy
+        base = copy.deepcopy(THEMES["default"])
+        base["colors"]["effort_ultra"] = None
+        THEMES["_ultra_none_test"] = base
+        try:
+            data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+            result = _strip_ansi(cli_mod.render(data, "_ultra_none_test"))
+            self.assertIn("effort:ultra", result)
+        finally:
+            THEMES.pop("_ultra_none_test", None)
+
+
+class TestAllThemesHaveEffortUltra(unittest.TestCase):
+    """Structural parity: every built-in theme carries effort_ultra,
+    mirroring effort_max."""
+
+    def test_every_theme_has_effort_ultra(self):
+        from claude_statusline.themes import THEMES
+        missing = [
+            name for name, t in THEMES.items()
+            if "effort_ultra" not in t.get("colors", {})
+        ]
+        self.assertEqual(missing, [],
+            "themes missing effort_ultra: {}".format(missing))
+
+    def test_effort_ultra_mirrors_effort_max(self):
+        from claude_statusline.themes import THEMES
+        for name, t in THEMES.items():
+            colors = t.get("colors", {})
+            self.assertEqual(
+                colors.get("effort_ultra"), colors.get("effort_max"),
+                "theme {}: effort_ultra should mirror effort_max".format(name))
+
+
+if __name__ == "__main__":
+    unittest.main()
