@@ -37,6 +37,32 @@ class TestUltraEffortStdin(unittest.TestCase):
     # Wide enough to guarantee the full layout keeps the effort section.
     _WIDE = {"columns": 200}
 
+    def setUp(self):
+        # _normalize() mirrors stdin effort.level to a user-scoped
+        # on-disk cache (cli.py), which get_effort_level() later reads.
+        # Without clearing it, these stdin tests pollute the shared
+        # effort_level cache and leak a value into other tests in the
+        # suite (e.g. test_all's xhigh render test) — and into each
+        # other. Clear before and after every test for isolation.
+        self._clear_effort_cache()
+
+    def tearDown(self):
+        self._clear_effort_cache()
+
+    def _clear_effort_cache(self):
+        from claude_statusline import sessions as sessions_mod
+        try:
+            cache_dir = sessions_mod._cache_dir()
+            if os.path.isdir(cache_dir):
+                for name in os.listdir(cache_dir):
+                    if name.startswith("effort_level"):
+                        try:
+                            os.remove(os.path.join(cache_dir, name))
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+
     def test_ultra_via_stdin_renders(self):
         from claude_statusline.cli import render
         data = {"effort": {"level": "ultra"}, "git_branch": "main",
@@ -62,19 +88,26 @@ class TestUltraEffortStdin(unittest.TestCase):
             self.assertIsInstance(result, str)
 
     def test_ultra_uses_top_tier_color(self):
-        """ultra is a TOP tier — its VALUE must render in the top-tier
-        color (BRIGHT_MAGENTA in the default theme), not the dim
-        BRIGHT_BLACK used for the label or the low tier."""
+        """ultra is a TOP tier — the effort section must render in the
+        top-tier color (BRIGHT_MAGENTA in the default theme), not the
+        dim BRIGHT_BLACK used for the low tier.
+
+        colorize("effort:ultra", BRIGHT_MAGENTA, BOLD) emits the color
+        and BOLD codes ONCE at the front of the whole string —
+        `\\x1b[95m\\x1b[1meffort:ultra\\x1b[0m` — so the color code is
+        followed by `effort:`, never by `ultra`. We assert on the
+        actual emitted sequence (color + BOLD + the full segment), the
+        same way the existing xhigh/max tests do."""
         from claude_statusline.cli import render
         from claude_statusline import colors
         data = {"effort": {"level": "ultra"}, "git_branch": "main",
                 "terminal": self._WIDE}
         raw = render(data, "default")
         self.assertIn("effort:ultra", _strip_ansi(raw))
-        self.assertIn(colors.BRIGHT_MAGENTA + "ultra", raw,
-            "ultra value must render in the top-tier color")
-        self.assertNotIn(colors.BRIGHT_BLACK + "ultra", raw,
-            "ultra value must not be dimmed (low-tier color)")
+        self.assertIn(colors.BRIGHT_MAGENTA + colors.BOLD + "effort:ultra", raw,
+            "ultra effort section must render in the top-tier color + BOLD")
+        self.assertNotIn(colors.BRIGHT_BLACK + colors.BOLD + "effort:ultra", raw,
+            "ultra must not be dimmed (low-tier color)")
 
     def test_stdin_takes_precedence_over_settings(self):
         """When stdin supplies ultra, it must win over any
@@ -95,21 +128,37 @@ class TestUltraEffortStdin(unittest.TestCase):
         """Section-hiding contract: stdin effort.level 'medium' (the
         default) must NOT render any effort section. Guards against a
         regression in the top-tier if/elif chain that always emitted
-        a level."""
-        from claude_statusline.cli import render
-        data = {"effort": {"level": "medium"}, "git_branch": "main",
-                "terminal": self._WIDE}
-        result = _strip_ansi(render(data, "default"))
-        self.assertNotIn("effort:", result)
+        a level.
+
+        get_effort_level() is patched to None so the real machine's
+        ~/.claude/settings.json (and its user-scoped cache, which is
+        NOT under _CLAUDE_DIR) cannot leak a non-medium level into the
+        render and mask the contract."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: None
+        try:
+            data = {"effort": {"level": "medium"}, "git_branch": "main",
+                    "terminal": self._WIDE}
+            result = _strip_ansi(cli_mod.render(data, "default"))
+            self.assertNotIn("effort:", result)
+        finally:
+            cli_mod.get_effort_level = orig
 
     def test_no_effort_section_when_absent(self):
-        """No effort key at all → no effort section. We assert on the
-        'effort:' label specifically (not the bare substring 'ultra',
-        which can appear inside unrelated rendered text)."""
-        from claude_statusline.cli import render
-        data = {"git_branch": "main", "terminal": self._WIDE}
-        result = _strip_ansi(render(data, "default"))
-        self.assertNotIn("effort:", result)
+        """No effort key at all → no effort section. get_effort_level()
+        is patched to None so the real settings.json fallback can't
+        inject a level (the user-scoped effort cache lives outside
+        _CLAUDE_DIR, so just repointing the dir is insufficient)."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_effort_level
+        cli_mod.get_effort_level = lambda: None
+        try:
+            data = {"git_branch": "main", "terminal": self._WIDE}
+            result = _strip_ansi(cli_mod.render(data, "default"))
+            self.assertNotIn("effort:", result)
+        finally:
+            cli_mod.get_effort_level = orig
 
 
 class TestUltraEffortValidSet(unittest.TestCase):
