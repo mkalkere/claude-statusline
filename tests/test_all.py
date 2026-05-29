@@ -4375,7 +4375,7 @@ class TestRenderUsesDetectedWidth(unittest.TestCase):
                 "cost": {"total_cost_usd": 879, "total_duration_ms": 196_080_000,
                          "total_lines_added": 18683, "total_lines_removed": 1628},
                 "git_branch": "main",
-                "model": {"display_name": "Opus 4.7 (1M context)"},
+                "model": {"display_name": "Opus 4.8 (1M context)"},
                 "terminal": {"columns": 165},
             }
             out = render(data)

@@ -786,12 +786,24 @@ def _render_sections_named(n, order, theme):
             stdin_effort = n.get("effort_level")
             effort = stdin_effort if stdin_effort is not None else get_effort_level()
             if effort:
-                # xhigh and max are Opus 4.7 / top-tier (Claude Code
-                # v2.1.111+). Fall back to effort_high when a custom
-                # theme hasn't defined the dedicated key — using
-                # _first() (not nested .get) so themes that explicitly
-                # set the key to None don't crash colorize().
-                if effort == "max":
+                # xhigh / max / ultra are Opus 4.7+ top tiers. Fall
+                # back through the lower tiers to effort_high when a
+                # custom theme hasn't defined the dedicated key —
+                # using _first() (not nested .get) so themes that
+                # explicitly set the key to None don't crash
+                # colorize(). `ultra` is the stored value for
+                # `/effort ultracode` (Opus 4.8); rendered verbatim
+                # as "ultra" to match how every other tier renders
+                # its stored effort.level value (the statusline field
+                # reports the stored value, not the `ultracode`
+                # display label).
+                if effort == "ultra":
+                    ec = _first(tc.get("effort_ultra"),
+                                tc.get("effort_max"),
+                                tc.get("effort_xhigh"),
+                                tc.get("effort_high"),
+                                BRIGHT_MAGENTA)
+                elif effort == "max":
                     ec = _first(tc.get("effort_max"),
                                 tc.get("effort_xhigh"),
                                 tc.get("effort_high"),
@@ -1499,7 +1511,7 @@ def _demo_data():
             "git_worktree": False,
         },
         "model": {
-            "display_name": "Opus 4.7 (1M context)",
+            "display_name": "Opus 4.8 (1M context)",
         },
         "session_id": "demo-session",
         "session_name": "refactor auth",
