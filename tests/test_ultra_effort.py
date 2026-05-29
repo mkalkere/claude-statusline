@@ -261,5 +261,20 @@ class TestAllThemesHaveEffortUltra(unittest.TestCase):
                 "theme {}: effort_ultra should mirror effort_max".format(name))
 
 
+class TestDemoModelVersion(unittest.TestCase):
+    """The --demo / _demo_data model display_name was bumped to
+    Opus 4.8. Guard against it silently reverting."""
+
+    def test_demo_data_shows_opus_4_8(self):
+        from claude_statusline.cli import _demo_data
+        d = _demo_data()
+        self.assertEqual(d["model"]["display_name"], "Opus 4.8 (1M context)")
+
+    def test_demo_renders_opus_4_8(self):
+        from claude_statusline.cli import _demo_data, render
+        result = _strip_ansi(render(_demo_data(), "default"))
+        self.assertIn("Opus 4.8", result)
+
+
 if __name__ == "__main__":
     unittest.main()
