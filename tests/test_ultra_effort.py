@@ -23,17 +23,31 @@ def _strip_ansi(s):
 
 
 class TestUltraEffortStdin(unittest.TestCase):
-    """ultra supplied via stdin effort.level."""
+    """ultra supplied via stdin effort.level.
+
+    All render-based tests pass `terminal.columns: 200` so the
+    `effort` section is eligible for the full layout — the default
+    theme drops `effort` from line 2 below the 150-col full-layout
+    threshold, so a minimal payload without an explicit wide width
+    would render nothing and falsely fail. (The width-detection
+    behavior is itself tested elsewhere; here we only care that
+    ultra renders when there IS room.)
+    """
+
+    # Wide enough to guarantee the full layout keeps the effort section.
+    _WIDE = {"columns": 200}
 
     def test_ultra_via_stdin_renders(self):
         from claude_statusline.cli import render
-        data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+        data = {"effort": {"level": "ultra"}, "git_branch": "main",
+                "terminal": self._WIDE}
         result = _strip_ansi(render(data, "default"))
         self.assertIn("effort:ultra", result)
 
     def test_ultra_via_stdin_case_insensitive(self):
         from claude_statusline.cli import render
-        data = {"effort": {"level": "ULTRA"}, "git_branch": "main"}
+        data = {"effort": {"level": "ULTRA"}, "git_branch": "main",
+                "terminal": self._WIDE}
         result = _strip_ansi(render(data, "default"))
         self.assertIn("effort:ultra", result)
 
@@ -42,7 +56,8 @@ class TestUltraEffortStdin(unittest.TestCase):
         from claude_statusline.cli import render
         from claude_statusline.themes import THEMES
         for theme_name in THEMES:
-            data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+            data = {"effort": {"level": "ultra"}, "git_branch": "main",
+                    "terminal": self._WIDE}
             result = _strip_ansi(render(data, theme_name))
             self.assertIsInstance(result, str)
 
@@ -52,7 +67,8 @@ class TestUltraEffortStdin(unittest.TestCase):
         BRIGHT_BLACK used for the label or the low tier."""
         from claude_statusline.cli import render
         from claude_statusline import colors
-        data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+        data = {"effort": {"level": "ultra"}, "git_branch": "main",
+                "terminal": self._WIDE}
         raw = render(data, "default")
         self.assertIn("effort:ultra", _strip_ansi(raw))
         self.assertIn(colors.BRIGHT_MAGENTA + "ultra", raw,
@@ -67,12 +83,33 @@ class TestUltraEffortStdin(unittest.TestCase):
         orig = cli_mod.get_effort_level
         cli_mod.get_effort_level = lambda: "high"
         try:
-            data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+            data = {"effort": {"level": "ultra"}, "git_branch": "main",
+                    "terminal": self._WIDE}
             result = _strip_ansi(cli_mod.render(data, "default"))
             self.assertIn("effort:ultra", result)
             self.assertNotIn("effort:high", result)
         finally:
             cli_mod.get_effort_level = orig
+
+    def test_ultra_hidden_when_stdin_medium(self):
+        """Section-hiding contract: stdin effort.level 'medium' (the
+        default) must NOT render any effort section. Guards against a
+        regression in the top-tier if/elif chain that always emitted
+        a level."""
+        from claude_statusline.cli import render
+        data = {"effort": {"level": "medium"}, "git_branch": "main",
+                "terminal": self._WIDE}
+        result = _strip_ansi(render(data, "default"))
+        self.assertNotIn("effort:", result)
+
+    def test_no_effort_section_when_absent(self):
+        """No effort key at all → no effort section. We assert on the
+        'effort:' label specifically (not the bare substring 'ultra',
+        which can appear inside unrelated rendered text)."""
+        from claude_statusline.cli import render
+        data = {"git_branch": "main", "terminal": self._WIDE}
+        result = _strip_ansi(render(data, "default"))
+        self.assertNotIn("effort:", result)
 
 
 class TestUltraEffortValidSet(unittest.TestCase):
@@ -177,7 +214,8 @@ class TestUltraEffortCustomThemeFallthrough(unittest.TestCase):
         base["colors"].pop("effort_ultra", None)
         THEMES["_ultra_test"] = base
         try:
-            data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+            data = {"effort": {"level": "ultra"}, "git_branch": "main",
+                    "terminal": {"columns": 200}}
             result = _strip_ansi(cli_mod.render(data, "_ultra_test"))
             self.assertIn("effort:ultra", result)
         finally:
@@ -193,7 +231,8 @@ class TestUltraEffortCustomThemeFallthrough(unittest.TestCase):
         base["colors"]["effort_ultra"] = None
         THEMES["_ultra_none_test"] = base
         try:
-            data = {"effort": {"level": "ultra"}, "git_branch": "main"}
+            data = {"effort": {"level": "ultra"}, "git_branch": "main",
+                    "terminal": {"columns": 200}}
             result = _strip_ansi(cli_mod.render(data, "_ultra_none_test"))
             self.assertIn("effort:ultra", result)
         finally:

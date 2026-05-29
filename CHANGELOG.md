@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Notes
 - **Backward compatible** — users on Claude Code releases before Opus 4.8 / ultracode see no change. The `ultracode` display label is still correctly rejected as invalid (only the stored value `ultra` is accepted), so validation is not weakened.
 - **Verified non-issues for Opus 4.8**: model `display_name` renders verbatim (no hardcoded model IDs), context window unchanged (1M, same as Opus 4.7), pricing is supplied by Claude Code (`cost.total_cost_usd`; no hardcoded rates), and no new statusline stdin fields shipped in the Claude Code releases bundling Opus 4.8.
-- New tests live in `tests/test_ultra_effort.py` (17 tests): stdin path, settings.json path, case-insensitivity, stdin precedence over settings.json, all-themes render, top-tier color, custom-theme fallthrough (missing key and explicit None), structural parity (every theme has `effort_ultra` mirroring `effort_max`), and `ultracode`-label / non-string / bogus-level rejection.
-- All 472 tests pass (was 455, +17 new). Pure stdlib, no dependency changes.
+- New tests live in `tests/test_ultra_effort.py` (20 tests): stdin path, settings.json path, case-insensitivity, stdin precedence over settings.json, all-themes render, top-tier color, section-hiding when medium/absent, custom-theme fallthrough (missing key and explicit None), structural parity (every theme has `effort_ultra` mirroring `effort_max`), and `ultracode`-label / non-string / bogus-level rejection. Render-based tests pass an explicit wide `terminal.columns` so the `effort` section is eligible for the full layout (the default theme drops it below the 150-col threshold).
+- All 475 tests pass (was 455, +20 new). Pure stdlib, no dependency changes.
 
 ## [0.6.1] - 2026-05-24
 
