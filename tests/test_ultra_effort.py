@@ -208,30 +208,26 @@ class TestUltraEffortSettingsJson(unittest.TestCase):
     (see issue #96)."""
 
     def setUp(self):
+        # Sandbox BOTH the settings dir (_CLAUDE_DIR, where
+        # settings.json is read) AND the cache dir (_cache_dir, the
+        # user-scoped effort cache). Patching both means this test
+        # neither reads the real settings.json nor mutates the real
+        # effort cache — full isolation, no side-effects on the
+        # contributor's environment (cf. #96).
         from claude_statusline import sessions as sessions_mod
         self._sessions = sessions_mod
         self._tmp = tempfile.mkdtemp(prefix="claude-ultra-test-")
+        self._tmp_cache = tempfile.mkdtemp(prefix="claude-ultra-cache-")
         self._orig_dir = sessions_mod._CLAUDE_DIR
+        self._orig_cache_dir = sessions_mod._cache_dir
         sessions_mod._CLAUDE_DIR = self._tmp
-        self._clear_effort_cache()
+        sessions_mod._cache_dir = lambda: self._tmp_cache
 
     def tearDown(self):
         self._sessions._CLAUDE_DIR = self._orig_dir
+        self._sessions._cache_dir = self._orig_cache_dir
         shutil.rmtree(self._tmp, ignore_errors=True)
-        self._clear_effort_cache()
-
-    def _clear_effort_cache(self):
-        try:
-            cache_dir = self._sessions._cache_dir()
-            if os.path.isdir(cache_dir):
-                for name in os.listdir(cache_dir):
-                    if name.startswith("effort_level"):
-                        try:
-                            os.remove(os.path.join(cache_dir, name))
-                        except OSError:
-                            pass
-        except OSError:
-            pass
+        shutil.rmtree(self._tmp_cache, ignore_errors=True)
 
     def _write_settings(self, effort):
         path = os.path.join(self._tmp, "settings.json")
