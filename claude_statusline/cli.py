@@ -30,7 +30,7 @@ from .git import (
 )
 from .sessions import (
     _CLAUDE_DIR, _CLAUDE_DIR_REAL, _VALID_EFFORT_LEVELS,
-    _count_activity_with_status,
+    _canonical_effort, _count_activity_with_status,
     _read_cache, _write_cache,
     get_budget_config, get_clickable_links_enabled, get_compaction_threshold,
     get_disabled_sections, get_effort_level, get_session_activity_count,
@@ -40,6 +40,16 @@ from .themes import THEMES, get_theme
 
 # Percentage of context window usage that triggers the !CTX warning.
 CTX_WARNING_THRESHOLD_PCT = 85
+
+# Documented review states for pr.review_state (statusline doc enum
+# as of 2026-06-04). Used by _normalize to membership-check the
+# captured value so a malformed upstream value never reaches
+# downstream consumers. Module-private — not part of the public API
+# surface; rendering of review state is tracked separately and may
+# change shape before it ships.
+_PR_REVIEW_STATES = frozenset({
+    "approved", "pending", "changes_requested", "draft",
+})
 
 
 def _force_utf8():
@@ -192,25 +202,98 @@ def _normalize(data):
         out["cost_top_category_name"] = None
         out["cost_top_category_value"] = None
 
-    # GitHub repo and PR info (Claude Code v2.1.148+ adds
-    # `github.{repo, pr_number, pr_url, branch}` when working inside
-    # a recognized repo). Each field is independent — repo can be
-    # present without pr_number, etc.
+    # Repository identity and current-PR info from stdin.
+    #
+    # Two stdin payload shapes are accepted, with truthy-value
+    # precedence (the newer shape wins ONLY when populated, so an
+    # empty `pr: {}` falls through to the older shape):
+    #
+    #   - pr.{number, url, review_state} + workspace.repo.{host, owner,
+    #     name}: observed as the shape the live statusline docs at
+    #     code.claude.com describe as of 2026-06-04. Populated PR data
+    #     here wins.
+    #   - github.{pr_number, pr_url, repo}: observed in Claude Code
+    #     2.1.148+ payloads as of 2026-05-24 (when v0.6.1's `pr`
+    #     section was added). Read as a fallback so users on Claude
+    #     Code releases still emitting this shape don't lose the PR
+    #     badge mid-migration.
+    #
+    # The normalized output keys (`github_repo`, `github_pr_url`,
+    # `github_pr_number`) are intentionally kept stable from v0.6.1 so
+    # any custom-theme consumer or downstream caller depending on
+    # those names continues to work. The keys describe what claude-
+    # status STORES, not which upstream namespace they came from.
+    #
+    # pr.review_state is captured internally but NOT rendered in this
+    # release; tracked separately. Capturing now lets the rendering
+    # land in a follow-up without re-touching _normalize.
+    pr_obj = data.get("pr")
+    pr_obj = pr_obj if isinstance(pr_obj, dict) else {}
     github_obj = data.get("github")
     github_obj = github_obj if isinstance(github_obj, dict) else {}
-    raw_repo = github_obj.get("repo")
-    out["github_repo"] = raw_repo if isinstance(raw_repo, str) and raw_repo else None
-    raw_pr_url = github_obj.get("pr_url")
-    out["github_pr_url"] = raw_pr_url if isinstance(raw_pr_url, str) and raw_pr_url else None
-    # pr_number may arrive as int OR string in JSON depending on the
-    # serializer; _safe_num accepts both and rejects garbage. Cap at
-    # 1_000_000 — implausible PR numbers (>= 7 digits) would dominate
-    # Line 2 width and probably indicate corrupted upstream data.
-    # GitHub's largest known PR numbers as of 2026 are in the 200k
-    # range; 1M is comfortably above any real value.
-    pr_num = _safe_num(github_obj.get("pr_number"))
-    out["github_pr_number"] = (
-        int(pr_num) if pr_num is not None and 0 < pr_num < 1_000_000 else None
+
+    # PR number: same int/string coercion and implausibly-large cap
+    # (>=7 digits would dominate Line 2 width and probably indicate
+    # corrupted upstream data; GitHub's largest known PR numbers as
+    # of 2026 are in the 200k range). Applied uniformly to both
+    # namespaces via this small helper so the cap can't drift.
+    def _clean_pr_number(raw):
+        num = _safe_num(raw)
+        if num is None or not (0 < num < 1_000_000):
+            return None
+        return int(num)
+
+    pr_num = _clean_pr_number(pr_obj.get("number"))
+    if pr_num is None:
+        pr_num = _clean_pr_number(github_obj.get("pr_number"))
+    out["github_pr_number"] = pr_num
+
+    # PR URL: must be a non-empty string in either namespace.
+    def _clean_pr_url(raw):
+        return raw if isinstance(raw, str) and raw else None
+
+    out["github_pr_url"] = (
+        _clean_pr_url(pr_obj.get("url"))
+        or _clean_pr_url(github_obj.get("pr_url"))
+    )
+
+    # Review state: captured but not rendered in this release.
+    # Membership-checked against the documented enum so a malformed
+    # value never reaches downstream. Module-private to keep the
+    # public-API surface unchanged.
+    raw_review = pr_obj.get("review_state")
+    out["pr_review_state"] = (
+        raw_review if isinstance(raw_review, str)
+        and raw_review in _PR_REVIEW_STATES
+        else None
+    )
+
+    # Repo identity: the workspace.repo shape composes host/owner/name
+    # explicitly; the github.repo shape is a single "owner/name"
+    # string. Both reduce to the `github_repo` field (kept stable
+    # from v0.6.1) as `owner/name`. Host is captured separately for
+    # future rendering but not currently surfaced.
+    # isinstance guard handles non-dict `workspace` (the same shape
+    # of bug the dedicated workspace block below now also defends
+    # against). Without it, `workspace: "/path"` (string) would
+    # crash here on .get("repo").
+    _ws_obj = data.get("workspace")
+    _ws_obj = _ws_obj if isinstance(_ws_obj, dict) else {}
+    workspace_repo = _ws_obj.get("repo")
+    workspace_repo = workspace_repo if isinstance(workspace_repo, dict) else {}
+    ws_owner = workspace_repo.get("owner")
+    ws_name = workspace_repo.get("name")
+    if (isinstance(ws_owner, str) and ws_owner
+            and isinstance(ws_name, str) and ws_name):
+        out["github_repo"] = "{}/{}".format(ws_owner, ws_name)
+    else:
+        raw_repo = github_obj.get("repo")
+        out["github_repo"] = (
+            raw_repo if isinstance(raw_repo, str) and raw_repo else None
+        )
+    raw_host = workspace_repo.get("host")
+    out["github_repo_host"] = (
+        raw_host if isinstance(raw_host, str) and raw_host else None
     )
 
     # Vim (nested or flat). Same isinstance guard as agent / worktree
@@ -254,7 +337,13 @@ def _normalize(data):
 
     # Project name: prefer workspace.project_dir (explicit project root),
     # fall back to last folder of current_dir / cwd
-    workspace = data.get("workspace") or {}
+    # isinstance guard for the same reason agent/cost/vim/github get
+    # one in v0.6.1: an upstream sending `workspace` as a non-dict
+    # (string, list, int) would crash the subsequent .get() calls
+    # with AttributeError. v0.6.1 missed this site; v0.6.3 completes
+    # the pattern across _normalize.
+    workspace = data.get("workspace")
+    workspace = workspace if isinstance(workspace, dict) else {}
     project_dir = workspace.get("project_dir") or ""
     cwd = workspace.get("current_dir") or data.get("cwd") or ""
     best_path = project_dir or cwd
@@ -344,12 +433,20 @@ def _normalize(data):
     # stdin payloads (e.g. effort.level: 42 or "ultrathink") so the
     # renderer never sees garbage. "medium" is dropped here because
     # it's the default and we hide that section by contract.
+    #
+    # _canonical_effort() applies the silent alias `ultra` -> `xhigh`
+    # at this layer too: even if a future Claude Code build emits
+    # `effort.level: "ultra"` on stdin, we render `effort:xhigh` to
+    # match the documented enum. Mirror to disk uses the canonical
+    # value so we never WRITE `ultra` into the cache again — over
+    # time the alias becomes a read-only legacy path.
     effort_obj = data.get("effort")
     effort_obj = effort_obj if isinstance(effort_obj, dict) else {}
     raw_effort = effort_obj.get("level")
     if isinstance(raw_effort, str):
         normalized = raw_effort.lower()
         if normalized in _VALID_EFFORT_LEVELS:
+            canonical = _canonical_effort(normalized)
             # Stdin is the authoritative source — even "medium" is an
             # explicit user choice we must honor. We use the empty
             # string as a sentinel for "explicitly medium / hide
@@ -360,10 +457,10 @@ def _normalize(data):
             # to the 30s settings.json cache and the user could see
             # a stale non-medium value for up to 30s after running
             # `/effort medium`.
-            if normalized == "medium":
+            if canonical == "medium":
                 out["effort_level"] = ""
             else:
-                out["effort_level"] = normalized
+                out["effort_level"] = canonical
             # Mirror to the on-disk cache so a later render that lacks
             # stdin effort (older Claude Code, mid-session client
             # switch, demo) sees the most recent authoritative value
@@ -375,8 +472,8 @@ def _normalize(data):
             # failures must never break render.
             try:
                 cached = _read_cache("effort_level")
-                if cached is None or cached.get("effort") != normalized:
-                    _write_cache("effort_level", {"effort": normalized})
+                if cached is None or cached.get("effort") != canonical:
+                    _write_cache("effort_level", {"effort": canonical})
             except Exception:
                 pass
         else:

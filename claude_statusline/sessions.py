@@ -580,35 +580,72 @@ def get_compaction_threshold():
     return float(val) if val is not None else None
 
 
-_VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+# Accepted effort levels in stdin and settings.json.
+#
+# Live statusline docs (observed at code.claude.com as of 2026-06-04)
+# document the enum as low/medium/high/xhigh/max with an explicit note
+# that "ultracode" is not a distinct level — it reports as `xhigh`.
+#
+# `ultra` is retained in the accepted set as a silent alias for
+# `xhigh`. Background: v0.6.2 (2026-05-29) added `ultra` as a 6th
+# level on the strength of a docs snapshot taken the same day that
+# described `effort.level: "ultra"` as the stored value Claude Code
+# emits for `/effort ultracode`. Live docs since then describe the
+# enum as 5 values with ultracode collapsed into xhigh. Two real
+# users could be affected by removing `ultra` outright:
+#   1. anyone whose `~/.claude/settings.json` has `effortLevel: "ultra"`
+#      because v0.6.2 told them it was valid
+#   2. anyone whose claude-status disk cache (`effort_level`) was
+#      written by v0.6.2 with the value `"ultra"`
+# Keeping `ultra` accepted but aliased lets both groups upgrade
+# cleanly to v0.6.3 and see `effort:xhigh` (the documented label),
+# without losing the section. The alias is applied at every place
+# the set is checked — see `_canonical_effort()` below.
+_VALID_EFFORT_LEVELS = frozenset({
+    "low", "medium", "high", "xhigh", "max", "ultra",
+})
+
+# Map of accepted-but-not-canonical input values to the canonical
+# value claude-status renders. Today only `ultra` -> `xhigh`. Kept
+# as a module-private constant so future aliases land in one place.
+_EFFORT_ALIASES = {"ultra": "xhigh"}
+
+
+def _canonical_effort(level):
+    """Return the canonical (post-alias) effort level for `level`.
+
+    Pass-through for values already canonical (low/medium/high/
+    xhigh/max). For `ultra`, returns `xhigh`. For unknown values,
+    returns the input unchanged — callers must membership-check
+    against `_VALID_EFFORT_LEVELS` before or after calling.
+    """
+    return _EFFORT_ALIASES.get(level, level)
 
 
 def get_effort_level():
     """Read thinking effort level from ~/.claude/settings.json.
 
-    Valid values: "low", "medium", "high", "xhigh", "max", "ultra".
-    Returns None if not configured, invalid, or set to the default
-    "medium". Uses 30s cache to avoid hitting disk on every render.
+    Valid values: "low", "medium", "high", "xhigh", "max". `ultra`
+    is accepted as a silent alias for `xhigh` (see the comment block
+    above `_VALID_EFFORT_LEVELS`). Returns None if not configured,
+    invalid, or set to the default "medium". Uses a 30s cache to
+    avoid hitting disk on every render.
 
-    `xhigh` was introduced in Claude Code v2.1.111 (2026-04) for
-    Opus 4.7, sitting between `high` and `max`. `max` is the top
-    tier (visible in `/effort max` and Auto Mode references).
-    `ultra` is the stored value for `/effort ultracode` (Opus 4.8,
-    2026-05) — xhigh plus standing permission to launch dynamic
-    workflows; the statusline field reports the stored value
-    `ultra`, not the `ultracode` display label. Other models fall
-    back to `high` per Anthropic's docs, so this set is the union
-    of valid levels across all models.
+    The alias is applied at all three layers `ultra` could enter
+    through:
+      - cached-read return (catches v0.6.2's stale on-disk cache)
+      - settings.json fresh-read normalization
+      - the stdin path in cli._normalize (see the comment there)
 
     Returns:
-        Effort level string ("low", "high", "xhigh", "max", or
-        "ultra"), or None if medium/absent.
+        Canonical effort level string ("low", "high", "xhigh",
+        or "max"), or None if medium/absent.
     """
     cached = _read_cache("effort_level")
     if cached is not None:
         val = cached.get("effort")
         if val in _VALID_EFFORT_LEVELS and val != "medium":
-            return val
+            return _canonical_effort(val)
         return None
 
     settings_path = os.path.join(_CLAUDE_DIR, "settings.json")
@@ -620,7 +657,7 @@ def get_effort_level():
             data = {}
         raw = data.get("effortLevel", "")
         if isinstance(raw, str) and raw.lower() in _VALID_EFFORT_LEVELS:
-            effort = raw.lower()
+            effort = _canonical_effort(raw.lower())
     except (OSError, IOError, json.JSONDecodeError, ValueError,
             TypeError, AttributeError):
         # Don't cache failure — retry next cycle

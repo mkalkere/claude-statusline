@@ -77,8 +77,8 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Model | `Opus` | Active model name |
 | Output Style | `style:explanatory` | Active output style when set |
 | Added Dirs | `dirs:+2` | Extra directories added via `/add-dir` |
-| Effort Level | `effort:high` | Thinking effort: `low`, `high`, `xhigh`, `max`, or `ultra` (`ultra` is the stored value for `/effort ultracode` on Opus 4.8). Shown when non-default. Read from stdin JSON `effort.level` (Claude Code v2.1.119+) for instant updates; falls back to `~/.claude/settings.json` for older versions. |
-| Pull Request | `PR#86` | Current GitHub PR number when detected, clickable to the PR page via OSC 8. Reads `github.pr_number` / `github.pr_url` from stdin (newer Claude Code releases). Opt-in via custom theme. |
+| Effort Level | `effort:high` | Thinking effort: `low`, `high`, `xhigh`, or `max`. Shown when non-default. Read from stdin JSON `effort.level` (Claude Code v2.1.119+) for instant updates; falls back to `~/.claude/settings.json` for older versions. (The `/effort ultracode` setting reports as `xhigh` per Claude Code's documented enum; a legacy `ultra` value from earlier installs is accepted as a silent alias.) |
+| Pull Request | `PR#86` | Current GitHub PR number when detected, clickable to the PR page via OSC 8. Reads `pr.number` / `pr.url` from stdin (newer Claude Code releases) with `github.pr_number` / `github.pr_url` as a fallback for older releases. Opt-in via custom theme. |
 | Cost Breakdown | `mcp:$0.80` | Largest non-base cost category from `cost.by_category` (newer Claude Code releases). Falls back to `other:$N` (sum) when no single category exceeds $0.01 but multiple together do. Opt-in via custom theme. |
 | Version | `v0.5.0` | claude-status version |
 | CC Version | `CC:2.1.92` | Claude Code application version |
