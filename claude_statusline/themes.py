@@ -1,4 +1,18 @@
-"""Theme definitions for statusline rendering."""
+"""Theme definitions for statusline rendering.
+
+Note on the `effort_ultra` color key in every built-in theme below:
+this key is RETAINED DEAD SURFACE. v0.6.2 added it alongside `ultra`
+as a 6th effort level; v0.6.3 collapsed `ultra` into a silent alias
+for `xhigh` (see sessions.py `_canonical_effort()` and the
+corresponding renderer branch in cli.py), so the `effort_ultra`
+key is no longer reached during normal rendering. Kept across all
+8 themes for two reasons: (1) parity — custom themes that copy a
+built-in as a starting point shouldn't need to know about a missing
+key; (2) reactivation — a hypothetical future Claude Code release
+that re-introduces a distinct `ultra` stored value would resurrect
+the renderer branch automatically. Do not delete in a routine
+cleanup; see CHANGELOG v0.6.3 for context.
+"""
 
 import copy
 import json

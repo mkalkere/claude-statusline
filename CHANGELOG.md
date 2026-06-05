@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-06-04
+
+### Changed
+
+- **Schema realignment** ([#99](https://github.com/mkalkere/claude-statusline/issues/99)) — the stdin schema described in the live Claude Code statusline docs has shifted since v0.6.1 and v0.6.2 shipped. v0.6.3 reconciles claude-status against that schema while keeping every prior shape working as a fallback so no user upgrading from v0.6.1 or v0.6.2 loses a section mid-migration.
+
+  - **PR / repo namespace.** v0.6.1's `pr` section read `github.{pr_number, pr_url}` and `github.repo`. The live docs schema now lists these under `pr.{number, url, review_state}` and `workspace.repo.{host, owner, name}` with no `github.*` namespace at all. v0.6.3 reads BOTH with truthy-value precedence: the new shape wins when populated, the older shape is the fallback. The normalized output keys (`github_repo`, `github_pr_url`, `github_pr_number`) are kept unchanged from v0.6.1 so any custom-theme consumer depending on those names continues to work; the keys describe what claude-status STORES, not which upstream namespace they came from. PR numbers are validated through a single `_clean_pr_number()` helper so the implausibly-large cap stays uniform across both branches. `pr.review_state` is captured internally but not rendered in this release (rendering tracked separately for a follow-up).
+
+  - **`effort.level` enum: `ultra` is now a silent alias for `xhigh`.** v0.6.2 added `ultra` as a 6th accepted level documenting it as the stored value Claude Code emits for `/effort ultracode`. The live effort doc and statusline doc list valid `effort.level` values as `low, medium, high, xhigh, max` only, with an explicit note that ultracode is not a distinct level — it reports as `xhigh`. v0.6.3 keeps `ultra` accepted in the validation set so two real user groups continue to render an effort section after upgrade: (a) anyone whose `~/.claude/settings.json` still has `effortLevel: "ultra"` because v0.6.2 told them it was valid, and (b) anyone whose claude-status disk cache was written by v0.6.2 with that value. The alias is applied at three layers — stdin normalize, settings.json fresh read, and cache-read return — so a stale on-disk cache from a v0.6.2 install renders correctly from the very first render after upgrade with no 30-second window where the user still sees `effort:ultra`. **Visible change: users who previously saw `effort:ultra` will see `effort:xhigh` after upgrading.** Both labels describe the same setting; only the label changes to match the documented enum.
+
+- **`workspace` isinstance guard at `_normalize`** — v0.6.1 added isinstance guards across `agent`, `cost`, `vim`, `github`, and `worktree` (#88, #87, Gemini PR #90 review) but missed `workspace`. A non-dict `workspace` value from an upstream variant would crash `_normalize` with AttributeError on the subsequent `.get()` calls, caught only by `main()`'s outer try/except. v0.6.3 closes the gap so the same defensive pattern is uniform across `_normalize`.
+
+### Notes
+
+- **Prior CHANGELOG entries are not edited.** v0.6.1 and v0.6.2 published the schema and enum claims that the live docs have since contradicted. The release-history rule on this project is that already-shipped CHANGELOG blocks are frozen; later entries reference earlier ones by version name and supersede the factual claims rather than rewriting them. The v0.6.1 #87 entry continues to describe what v0.6.1 read (`github.pr_number`); the v0.6.2 #97 entry continues to describe what v0.6.2 added (the `ultra` level). v0.6.3 reconciles both.
+
+- **Backward compatibility.** A user on Claude Code releases still emitting `github.*` keeps seeing the PR badge unchanged. A user whose `effortLevel` is `"ultra"` in settings.json keeps seeing an effort section (now `effort:xhigh`). No section silently disappears across the v0.6.2 → v0.6.3 upgrade.
+
+- **`effort_ultra` theme keys retained as documented dead surface.** The silent alias means the `if effort == "ultra"` branch in `cli.py` and the `effort_ultra` color keys in all 8 themes are no longer reachable in practice (alias rewrites to `xhigh` before render). They are retained with explicit source comments rather than removed so a future cleanup PR doesn't delete them without context, and so a hypothetical future Claude Code release that did re-introduce a distinct `ultra` stored value would reactivate them rather than require reintroduction.
+
+- All 507 tests pass (was 477, +30 net new in `tests/test_ultra_effort.py`: alias-map strict equality with explanatory docstring, ultra at all three layers, stale-cache rehydration scenario, stdin-overrides-stale-cache convergence, dual-namespace precedence including the both-populated and per-field empty cases, shared PR-number cap on both branches with boundary cases at 0 / negative / 999_999 / fractional-truncated, `workspace.repo` composition with empty-string and partial-fallthrough variants, `pr.review_state` capture + rejection + case-normalization, and the workspace isinstance guard at both `_normalize` sites). Pure stdlib, no dependency changes.
+
+- Closes [#99](https://github.com/mkalkere/claude-statusline/issues/99).
+
 ## [0.6.2] - 2026-05-29
 
 ### Added
