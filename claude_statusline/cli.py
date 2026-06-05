@@ -209,9 +209,8 @@ def _normalize(data):
     # empty `pr: {}` falls through to the older shape):
     #
     #   - pr.{number, url, review_state} + workspace.repo.{host, owner,
-    #     name}: observed as the shape the live statusline docs at
-    #     code.claude.com describe as of 2026-06-04. Populated PR data
-    #     here wins.
+    #     name}: shape observed in live statusline payloads as of
+    #     2026-06-04. Populated PR data here wins.
     #   - github.{pr_number, pr_url, repo}: observed in Claude Code
     #     2.1.148+ payloads as of 2026-05-24 (when v0.6.1's `pr`
     #     section was added). Read as a fallback so users on Claude
@@ -439,7 +438,8 @@ def _normalize(data):
     # `effort.level: "ultra"` on stdin, we render `effort:xhigh` to
     # match the documented enum. Mirror to disk uses the canonical
     # value so we never WRITE `ultra` into the cache again — over
-    # time the alias becomes a read-only legacy path.
+    # time the alias becomes a read-only compatibility path for
+    # older on-disk caches.
     effort_obj = data.get("effort")
     effort_obj = effort_obj if isinstance(effort_obj, dict) else {}
     raw_effort = effort_obj.get("level")
@@ -883,17 +883,21 @@ def _render_sections_named(n, order, theme):
             stdin_effort = n.get("effort_level")
             effort = stdin_effort if stdin_effort is not None else get_effort_level()
             if effort:
-                # xhigh / max / ultra are Opus 4.7+ top tiers. Fall
-                # back through the lower tiers to effort_high when a
-                # custom theme hasn't defined the dedicated key —
-                # using _first() (not nested .get) so themes that
-                # explicitly set the key to None don't crash
-                # colorize(). `ultra` is the stored value for
-                # `/effort ultracode` (Opus 4.8); rendered verbatim
-                # as "ultra" to match how every other tier renders
-                # its stored effort.level value (the statusline field
-                # reports the stored value, not the `ultracode`
-                # display label).
+                # xhigh / max are the top tiers. The `ultra` branch
+                # below is RETAINED DEAD SURFACE — `_canonical_effort()`
+                # in sessions.py rewrites `ultra` to `xhigh` at every
+                # _normalize / get_effort_level entry point, so this
+                # branch (and the `effort_ultra` color keys in all 8
+                # themes) is unreachable in practice. Kept so a
+                # hypothetical future Claude Code release that did
+                # re-introduce a distinct `ultra` stored value would
+                # reactivate it rather than require reintroduction.
+                # Do not delete in a routine cleanup; see CHANGELOG
+                # v0.6.3 for context.
+                #
+                # Color fall-through uses _first() (not nested .get)
+                # so themes that explicitly set the key to None don't
+                # crash colorize().
                 if effort == "ultra":
                     ec = _first(tc.get("effort_ultra"),
                                 tc.get("effort_max"),

@@ -169,6 +169,31 @@ class TestUltraStdinAlias(unittest.TestCase):
             n = _normalize({"effort": {"level": bad}, "session_id": "x"})
             self.assertIsNone(n["effort_level"])
 
+    def test_stdin_overrides_stale_ultra_cache(self):
+        """When the disk cache holds a stale `ultra` (from a v0.6.2
+        install) AND stdin sends a different valid value, stdin must
+        win AND the mirror must overwrite the stale entry. Together
+        these prevent any window where the stale `ultra` survives
+        an upgrade — the cache converges to the canonical value
+        within one render."""
+        from claude_statusline.cli import _normalize
+        from claude_statusline.sessions import _cache_path, _read_cache
+
+        # Seed cache with the stale value (mirrors what v0.6.2 wrote).
+        with open(_cache_path("effort_level"), "w", encoding="utf-8") as f:
+            json.dump({"effort": "ultra"}, f)
+
+        # Stdin says high — explicit, distinct, non-aliased.
+        n = _normalize({"effort": {"level": "high"}, "session_id": "x"})
+        self.assertEqual(n["effort_level"], "high",
+            "stdin must override cached ultra")
+
+        # Mirror must have overwritten the stale "ultra" with "high".
+        cached = _read_cache("effort_level")
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached.get("effort"), "high",
+            "mirror must convert the stale cache on first render")
+
 
 class TestUltraSettingsJsonAlias(unittest.TestCase):
     """Settings.json fresh-read path: a user whose
@@ -230,14 +255,25 @@ class TestUltraCachedReadAlias(unittest.TestCase):
     """
 
     def setUp(self):
+        # Sandbox _cache_dir (where the seeded cache file lives) AND
+        # _CLAUDE_DIR (where settings.json would be read from on a
+        # cache miss). The cache-hit path tested here doesn't reach
+        # settings.json today, but sandboxing both is cheap insurance
+        # against a future code change that does — same pattern as
+        # TestUltraSettingsJsonAlias.
         from claude_statusline import sessions as sessions_mod
         self._sessions = sessions_mod
+        self._tmp = tempfile.mkdtemp(prefix="claude-v063-settings-")
         self._tmp_cache = tempfile.mkdtemp(prefix="claude-v063-cache-")
+        self._orig_dir = sessions_mod._CLAUDE_DIR
         self._orig_cache_dir = sessions_mod._cache_dir
+        sessions_mod._CLAUDE_DIR = self._tmp
         sessions_mod._cache_dir = lambda: self._tmp_cache
 
     def tearDown(self):
+        self._sessions._CLAUDE_DIR = self._orig_dir
         self._sessions._cache_dir = self._orig_cache_dir
+        shutil.rmtree(self._tmp, ignore_errors=True)
         shutil.rmtree(self._tmp_cache, ignore_errors=True)
 
     def _seed_cache(self, value):
@@ -358,6 +394,29 @@ class TestPRDualNamespacePrecedence(unittest.TestCase):
         n = _normalize({"pr": {"number": "42"}, "session_id": "x"})
         self.assertEqual(n["github_pr_number"], 42)
 
+    def test_pr_number_zero_rejected(self):
+        """0 < num bound: zero is not a valid PR number."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"pr": {"number": 0}, "session_id": "x"})
+        self.assertIsNone(n["github_pr_number"])
+        n = _normalize({"github": {"pr_number": 0}, "session_id": "x"})
+        self.assertIsNone(n["github_pr_number"])
+
+    def test_pr_number_negative_rejected(self):
+        """0 < num bound: negative values rejected in both namespaces."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"pr": {"number": -5}, "session_id": "x"})
+        self.assertIsNone(n["github_pr_number"])
+        n = _normalize({"github": {"pr_number": -5}, "session_id": "x"})
+        self.assertIsNone(n["github_pr_number"])
+
+    def test_pr_number_999999_at_upper_boundary_accepted(self):
+        """num < 1_000_000 strict-less-than: 999_999 must be ACCEPTED.
+        Pins the boundary against a future off-by-one drift to <= ."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"pr": {"number": 999_999}, "session_id": "x"})
+        self.assertEqual(n["github_pr_number"], 999_999)
+
 
 class TestWorkspaceRepo(unittest.TestCase):
     """v0.6.3 reads `workspace.repo.{host, owner, name}` from the
@@ -404,6 +463,25 @@ class TestWorkspaceRepo(unittest.TestCase):
         from claude_statusline.cli import _normalize
         n = _normalize({
             "workspace": {"repo": {"name": "foo"}},  # no owner
+            "github": {"repo": "x/y"},
+            "session_id": "x",
+        })
+        self.assertEqual(n["github_repo"], "x/y")
+
+    def test_workspace_repo_empty_string_falls_through(self):
+        """Truthy check (not just isinstance): empty-string owner or
+        name is treated as absent and falls through to github.repo.
+        Pins against a refactor that loosens the check to just
+        isinstance — would silently compose `/foo` or `foo/` strings."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({
+            "workspace": {"repo": {"owner": "", "name": "foo"}},
+            "github": {"repo": "x/y"},
+            "session_id": "x",
+        })
+        self.assertEqual(n["github_repo"], "x/y")
+        n = _normalize({
+            "workspace": {"repo": {"owner": "foo", "name": ""}},
             "github": {"repo": "x/y"},
             "session_id": "x",
         })

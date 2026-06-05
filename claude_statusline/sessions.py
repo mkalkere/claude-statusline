@@ -582,9 +582,9 @@ def get_compaction_threshold():
 
 # Accepted effort levels in stdin and settings.json.
 #
-# Live statusline docs (observed at code.claude.com as of 2026-06-04)
-# document the enum as low/medium/high/xhigh/max with an explicit note
-# that "ultracode" is not a distinct level — it reports as `xhigh`.
+# Live statusline docs (observed 2026-06-04) document the enum as
+# low/medium/high/xhigh/max with an explicit note that "ultracode"
+# is not a distinct level — it reports as `xhigh`.
 #
 # `ultra` is retained in the accepted set as a silent alias for
 # `xhigh`. Background: v0.6.2 (2026-05-29) added `ultra` as a 6th
@@ -618,6 +618,15 @@ def _canonical_effort(level):
     xhigh/max). For `ultra`, returns `xhigh`. For unknown values,
     returns the input unchanged — callers must membership-check
     against `_VALID_EFFORT_LEVELS` before or after calling.
+
+    Invariant for any future alias added to `_EFFORT_ALIASES`:
+    the alias target MUST NOT be `medium`. `medium` is the hidden
+    default — `get_effort_level()` and the renderer both treat it
+    as "no effort section shown". An alias mapping to `medium`
+    would silently hide the section for users who explicitly chose
+    a non-default level, which is exactly the bug we are fixing for
+    `ultra`. Add an explicit test in `tests/test_ultra_effort.py`
+    if a future alias is added.
     """
     return _EFFORT_ALIASES.get(level, level)
 
