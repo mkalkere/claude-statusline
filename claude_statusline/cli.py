@@ -1448,7 +1448,13 @@ def _parse_cc_version(raw):
     """
     if not isinstance(raw, str) or not raw:
         return None
-    s = raw.lstrip("v").strip()
+    # Strip whitespace first, then the optional `v` prefix, then any
+    # whitespace remaining between `v` and the digits. Asymmetric
+    # order (lstrip-v before strip-ws) would silently reject
+    # "  v2.1.141" because the leading whitespace blocks the lstrip.
+    s = raw.strip()
+    if s.startswith("v"):
+        s = s[1:].lstrip()
     parts = s.split(".")
     out = []
     for part in parts[:3]:
@@ -1661,6 +1667,18 @@ def render(data, theme_name="default"):
     # high-confidence width + new-enough Claude Code unlocks the
     # 110/80 thresholds that recover sections on 100-149 col
     # terminals.
+    #
+    # NB: the substring `"(winner"` is a LOAD-BEARING CONTRACT with
+    # _detect_terminal_width_report. Every winning branch in that
+    # function appends a status containing "(winner..." (verified
+    # 2026-06-05 across all 9 chain steps); the fallback path uses
+    # "(no signal trusted)" and rejected probes use "rejected" /
+    # "out of range" — none of those contain "(winner". A future
+    # refactor that renames the marker (e.g., to "selected", "best",
+    # an enum, or restructured tuple field) MUST update this site in
+    # tandem, or relaxed thresholds silently stop firing on every
+    # render with no error. Test coverage:
+    # tests.test_v070_nlines_and_thresholds.TestWidthConfidenceContract.
     term_width, width_report = _detect_terminal_width_report(data)
     width_confidence_high = any(
         "(winner" in status for _, status in width_report
@@ -2416,6 +2434,30 @@ def cmd_doctor():
             _COMPACT_LAYOUT_MIN_COLS, _FULL_LAYOUT_MIN_COLS - 1))
     else:
         print("  Layout:  narrow (< {} cols)".format(_COMPACT_LAYOUT_MIN_COLS))
+
+    # Active layout thresholds (v0.7.0 #94): the conservative pair
+    # (150/100) is the safe default. Relaxed pair (110/80) unlocks
+    # only when BOTH gates pass — Claude Code version >= 2.1.141 AND
+    # high-confidence width detection. Print the gate state so a
+    # user troubleshooting "why don't I see the recovered sections
+    # at 120 cols on 2.1.141?" can see which gate is failing without
+    # reading source.
+    #
+    # `--doctor` runs without stdin, so we can only report the
+    # conservative-default path here. The actual per-render gate
+    # decision in render() depends on the stdin `version` field and
+    # the actual width-detection winner — neither available outside
+    # a live render. We document the gate logic so the user knows
+    # what to check.
+    version_gate_passes = False
+    width_gate_passes = any("(winner" in status for _, status in width_report)
+    relaxed_active = version_gate_passes and width_gate_passes
+    print("  Thresholds: conservative full={} compact={} (relaxed full={} compact={})".format(
+        _FULL_LAYOUT_MIN_COLS, _COMPACT_LAYOUT_MIN_COLS,
+        _FULL_LAYOUT_MIN_COLS_RELAXED, _COMPACT_LAYOUT_MIN_COLS_RELAXED))
+    print("  Relaxed gates (per render): version >= 2.1.141 AND high-confidence width")
+    print("  In --doctor (no stdin): width_gate={} (version_gate is render-time only)".format(
+        width_gate_passes))
     print("  Note:    precise width-aware fit further trims sections to fit")
     print("  Unicode: \u2588\u2591\u2593 \u2387 \ue0b0")
     # Per-step width-detection report. Shows which signal won and

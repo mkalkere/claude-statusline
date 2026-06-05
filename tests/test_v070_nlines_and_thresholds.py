@@ -1,15 +1,17 @@
 """Tests for v0.7.0 features: N-line statusline support (#101) and
 version+confidence-gated layout-threshold relaxation (#94).
 
-Both features are enabled by Anthropic shipping the upstream fix in
-Claude Code 2.1.141 (closes #36417 per-line truncation + #22115
-COLUMNS env handoff). Before that fix, multi-line statusline output
+Both features are enabled by Anthropic shipping the upstream fixes:
+the per-line independent width-limit landed in the 2.1.139 era
+(closes #36417), and 2.1.141 ships the COLUMNS env-var handoff
+(closes #22115). Before those fixes, multi-line statusline output
 could be silently truncated by Ink's wrap:"truncate" and the
-statusline subprocess had no reliable way to learn the real terminal
-width. Both behaviors are documented as fixed today (2026-06-05).
+statusline subprocess had no reliable way to learn the real
+terminal width.
 """
 
 import copy
+import os
 import re
 import unittest
 
@@ -290,7 +292,12 @@ class TestEndToEndRelaxedLayout(unittest.TestCase):
                 "terminal": {"columns": 120},
             }
             out = _strip_ansi(render(data, "_relaxed_120"))
-            self.assertIn("v0.", out,
+            # Assert the exact released version rather than the loose
+            # `v0.` prefix — forces this test to fail (and get updated)
+            # the moment __init__.py is bumped, which is the release
+            # runbook's expectation per docs/RELEASE.md.
+            from claude_statusline import __version__
+            self.assertIn("v" + __version__, out,
                 "version section should be visible at 120 cols when both "
                 "gates pass (2.1.141 + high-confidence width)")
         finally:
@@ -347,6 +354,282 @@ class TestEndToEndRelaxedLayout(unittest.TestCase):
         self.assertEqual(out_new_norm, out_old_norm,
             "at width >= both thresholds (250 cols), version gate "
             "must not change the section structure of the output")
+
+
+class TestWidthConfidenceContract(unittest.TestCase):
+    """Regression pins for the (winner substring contract.
+
+    render() derives width_confidence_high via:
+        any("(winner" in status for _, status in width_report)
+
+    The substring "(winner" is a load-bearing contract with
+    _detect_terminal_width_report. A future refactor that renames the
+    marker (e.g., to "selected" or "best", or restructures the report
+    shape) would silently flip width_confidence_high to False on
+    every render — relaxed thresholds would never fire. These tests
+    pin the contract bidirectionally so such a refactor breaks the
+    test rather than silently regressing the feature.
+    """
+
+    def _run_render_with_report(self, fake_report):
+        """Render once with the width-detection report stubbed to the
+        supplied list of (label, status) tuples. Returns the rendered
+        output AND the actual width passed to _apply_responsive
+        (captured via stubbing) so callers can pin both the
+        confidence-derivation AND the threshold selection."""
+        import copy
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+
+        orig_report = cli_mod._detect_terminal_width_report
+        cli_mod._detect_terminal_width_report = lambda data=None: (120, fake_report)
+
+        base = copy.deepcopy(THEMES["default"])
+        base["line1"] = ["bar", "tokens"]
+        base["line2"] = ["version", "branch"]
+        THEMES["_width_contract"] = base
+        try:
+            data = {
+                "version": "2.1.141",
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {
+                                       "input_tokens": 1000,
+                                       "output_tokens": 500}},
+                "git_branch": "main",
+            }
+            return _strip_ansi(cli_mod.render(data, "_width_contract"))
+        finally:
+            THEMES.pop("_width_contract", None)
+            cli_mod._detect_terminal_width_report = orig_report
+
+    def test_winner_marker_enables_relaxed(self):
+        """A report whose status contains '(winner' must trigger the
+        relaxed-threshold path — section renders at 120 cols."""
+        out = self._run_render_with_report([
+            ("stub_source", "120 (winner)"),
+        ])
+        from claude_statusline import __version__
+        self.assertIn("v" + __version__, out,
+            "report with '(winner' status must enable relaxed thresholds")
+
+    def test_missing_winner_marker_keeps_conservative(self):
+        """A report whose statuses do NOT contain '(winner' (e.g., a
+        future refactor renamed it) must keep the conservative
+        thresholds — section does NOT render at 120 cols. This is
+        the regression-guard for the load-bearing substring."""
+        out = self._run_render_with_report([
+            ("stub_source", "120 selected"),  # no "(winner"
+        ])
+        from claude_statusline import __version__
+        self.assertNotIn("v" + __version__, out,
+            "report without '(winner' status must keep conservative "
+            "thresholds — if this test starts failing, the substring "
+            "contract in render() likely diverged from "
+            "_detect_terminal_width_report's status format")
+
+    def test_real_report_contains_winner_marker(self):
+        """Belt-and-suspenders: call the real
+        _detect_terminal_width_report with a winning stdin value and
+        verify it actually does append '(winner' somewhere. Pins the
+        OTHER side of the contract — if a refactor of
+        _detect_terminal_width_report changes the marker, this test
+        catches it independently of any consumer."""
+        from claude_statusline.cli import _detect_terminal_width_report
+        _result, report = _detect_terminal_width_report(
+            {"terminal": {"columns": 200}})
+        markers = [s for _, s in report if "(winner" in s]
+        self.assertTrue(markers,
+            "real _detect_terminal_width_report must append a status "
+            "containing '(winner' for the winning step")
+
+
+class TestCustomThemeNLineSupport(unittest.TestCase):
+    """v0.7.0 CRITICAL fix: load_custom_theme() must accept lineN
+    for N>=3, not just line1/line2. Without this, a user using
+    `theme: custom` couldn't opt into the N-line feature even
+    though v0.7.0 CHANGELOG advertised it.
+    """
+
+    def _write_custom(self, payload):
+        """Write a custom theme JSON to a temp dir, monkey-patch
+        _custom_theme_path, return the cleanup function."""
+        import json
+        import tempfile
+        from claude_statusline import themes as themes_mod
+        self._tmp = tempfile.mkdtemp(prefix="claude-v070-customtheme-")
+        path = os.path.join(self._tmp, "custom.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        self._orig_path = themes_mod._custom_theme_path
+        themes_mod._custom_theme_path = lambda: path
+
+    def tearDown(self):
+        import shutil
+        from claude_statusline import themes as themes_mod
+        if hasattr(self, "_orig_path"):
+            themes_mod._custom_theme_path = self._orig_path
+        if hasattr(self, "_tmp"):
+            shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_custom_theme_line3_accepted(self):
+        from claude_statusline.themes import load_custom_theme
+        self._write_custom({
+            "base": "default",
+            "line3": ["version", "clock"],
+        })
+        theme = load_custom_theme()
+        self.assertIsNotNone(theme)
+        self.assertEqual(theme["line3"], ["version", "clock"],
+            "custom theme line3 must be loaded (was silently dropped pre-v0.7.0)")
+
+    def test_custom_theme_line5_accepted(self):
+        from claude_statusline.themes import load_custom_theme
+        self._write_custom({
+            "base": "default",
+            "line3": ["x"],
+            "line4": ["y"],
+            "line5": ["z"],
+        })
+        theme = load_custom_theme()
+        self.assertEqual(theme["line3"], ["x"])
+        self.assertEqual(theme["line4"], ["y"])
+        self.assertEqual(theme["line5"], ["z"])
+
+    def test_custom_theme_line1_line2_still_work(self):
+        """The fix replaced a hardcoded line1+line2 path with a
+        generalized loop. Backward compat: existing custom themes
+        with only line1+line2 must still work identically."""
+        from claude_statusline.themes import load_custom_theme
+        self._write_custom({
+            "base": "default",
+            "line1": ["cost"],
+            "line2": ["branch"],
+        })
+        theme = load_custom_theme()
+        self.assertEqual(theme["line1"], ["cost"])
+        self.assertEqual(theme["line2"], ["branch"])
+
+    def test_custom_theme_line_n_must_be_list(self):
+        """A lineN value that isn't a list is rejected silently (the
+        base theme's value is kept). Prevents a user typo like
+        `"line3": "version"` from crashing the renderer."""
+        from claude_statusline.themes import load_custom_theme
+        self._write_custom({
+            "base": "default",
+            "line3": "not a list",
+        })
+        theme = load_custom_theme()
+        # Base default has no line3, so the bad value must not be
+        # stored either.
+        self.assertNotIn("line3", theme,
+            "non-list lineN value must be rejected without setting key")
+
+    def test_custom_theme_lineNN_two_digits(self):
+        """Be sure the lineN matcher accepts double-digit indices —
+        a user with `line10` should work even if it's exotic."""
+        from claude_statusline.themes import load_custom_theme
+        self._write_custom({"base": "default", "line10": ["clock"]})
+        theme = load_custom_theme()
+        self.assertEqual(theme["line10"], ["clock"])
+
+    def test_custom_theme_lineX_garbage_rejected(self):
+        """`linex` / `line` / `line-3` / `lineA` are not valid keys
+        and must NOT be copied into the theme."""
+        from claude_statusline.themes import load_custom_theme
+        self._write_custom({
+            "base": "default",
+            "linex": ["x"],
+            "line": ["y"],
+            "line-3": ["z"],
+            "lineA": ["a"],
+        })
+        theme = load_custom_theme()
+        for bad_key in ("linex", "line", "line-3", "lineA"):
+            self.assertNotIn(bad_key, theme,
+                "garbage key {!r} must not be copied".format(bad_key))
+
+
+class TestNLineAdaptiveInteraction(unittest.TestCase):
+    """Pin that _apply_responsive fires per-row in a multi-line
+    theme. Without this, the loop could accidentally share state
+    across rows or skip the filter entirely for line3+."""
+
+    def test_line3_droppable_section_dropped_at_narrow(self):
+        """At a width below the conservative compact threshold, a
+        droppable section in line3 must be filtered out — same as it
+        would be in line2."""
+        import copy
+        from claude_statusline.cli import render
+        from claude_statusline.themes import THEMES
+        base = copy.deepcopy(THEMES["default"])
+        base["line1"] = ["bar"]
+        base["line2"] = ["branch"]
+        # `version` is in _COMPACT_DROP, so it should be filtered at
+        # narrow widths.
+        base["line3"] = ["version"]
+        THEMES["_nline_adaptive"] = base
+        try:
+            data = {
+                # Old version so the conservative thresholds apply
+                "version": "2.1.140",
+                "context_window": {"used_percentage": 30,
+                                   "current_usage": {
+                                       "input_tokens": 1000,
+                                       "output_tokens": 500}},
+                "git_branch": "main",
+                "terminal": {"columns": 90},  # below 100 = narrow
+            }
+            out = _strip_ansi(render(data, "_nline_adaptive"))
+            self.assertNotIn("v2.1.140", out,
+                "line3 must be subject to _apply_responsive — version "
+                "is in _COMPACT_DROP and should be filtered at 90 cols")
+        finally:
+            THEMES.pop("_nline_adaptive", None)
+
+    def test_disabled_sections_filter_applies_to_line3(self):
+        """The disabled-sections filter runs inside the per-row loop.
+        Confirm it actually filters out a disabled section that lives
+        in line3, not just line1/line2."""
+        import copy
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        base = copy.deepcopy(THEMES["default"])
+        base["line1"] = ["cost"]
+        base["line2"] = ["branch"]
+        base["line3"] = ["clock"]
+        THEMES["_nline_disabled"] = base
+        orig_disabled = cli_mod.get_disabled_sections
+        cli_mod.get_disabled_sections = lambda: ["clock"]
+        try:
+            data = {"cost": {"total_cost_usd": 1.0},
+                    "git_branch": "main",
+                    "terminal": {"columns": 200}}
+            out = cli_mod.render(data, "_nline_disabled")
+            # clock is disabled, so line3 has no sections to render
+            # and is silently skipped — output has 2 lines, not 3.
+            self.assertEqual(out.count("\n"), 1,
+                "disabled section in line3 must be filtered; row "
+                "with no surviving sections is silently skipped")
+        finally:
+            THEMES.pop("_nline_disabled", None)
+            cli_mod.get_disabled_sections = orig_disabled
+
+
+class TestParseCCVersionStripOrder(unittest.TestCase):
+    """Regression for the strip-order fix: leading whitespace before
+    the `v` prefix must work, not just `v` followed by digits."""
+
+    def test_leading_whitespace_before_v(self):
+        from claude_statusline.cli import _parse_cc_version
+        # All of these should parse to (2, 1, 141)
+        self.assertEqual(_parse_cc_version("  v2.1.141"), (2, 1, 141))
+        self.assertEqual(_parse_cc_version("\tv2.1.141"), (2, 1, 141))
+        self.assertEqual(_parse_cc_version(" v2.1.141 "), (2, 1, 141))
+
+    def test_whitespace_after_v(self):
+        """Whitespace between `v` and digits also handled."""
+        from claude_statusline.cli import _parse_cc_version
+        self.assertEqual(_parse_cc_version("v 2.1.141"), (2, 1, 141))
 
 
 if __name__ == "__main__":
