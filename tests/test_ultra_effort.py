@@ -417,6 +417,27 @@ class TestPRDualNamespacePrecedence(unittest.TestCase):
         n = _normalize({"pr": {"number": 999_999}, "session_id": "x"})
         self.assertEqual(n["github_pr_number"], 999_999)
 
+    def test_pr_number_fractional_truncated_then_rejected(self):
+        """Regression-pin for the v0.6.3 Gemini fix: a fractional
+        pr.number (0.5, from a serializer that produced a float
+        instead of an int) must be int-coerced BEFORE the bounds
+        check, so 0.5 -> 0 -> rejected. Previously the check
+        `0 < num < 1_000_000` saw 0.5 (passes), then int(0.5) -> 0
+        was stored as the PR number — an invalid value."""
+        from claude_statusline.cli import _normalize
+        # 0.5 passes the old float bounds but truncates to 0 (invalid)
+        n = _normalize({"pr": {"number": 0.5}, "session_id": "x"})
+        self.assertIsNone(n["github_pr_number"],
+            "fractional 0.5 must truncate to 0 then be rejected, "
+            "not silently stored as 0")
+        # Same for the github.* fallback path
+        n = _normalize({"github": {"pr_number": 0.5}, "session_id": "x"})
+        self.assertIsNone(n["github_pr_number"])
+        # 42.7 truncates to 42 — a VALID PR number, so this should be accepted
+        n = _normalize({"pr": {"number": 42.7}, "session_id": "x"})
+        self.assertEqual(n["github_pr_number"], 42,
+            "fractional 42.7 must int-coerce to 42 and be accepted")
+
 
 class TestWorkspaceRepo(unittest.TestCase):
     """v0.6.3 reads `workspace.repo.{host, owner, name}` from the
@@ -524,6 +545,28 @@ class TestPRReviewStateCapture(unittest.TestCase):
         from claude_statusline.cli import _normalize
         n = _normalize({"session_id": "x"})
         self.assertIsNone(n["pr_review_state"])
+
+    def test_review_state_case_normalized(self):
+        """Regression-pin for the v0.6.3 Gemini fix: review_state
+        was matched against the enum case-sensitively while every
+        other string field in _normalize is `.lower()`'d. Parity
+        fix: an upstream variant sending `"APPROVED"` or
+        `"Approved"` must normalize to `"approved"` rather than
+        being silently dropped."""
+        from claude_statusline.cli import _normalize
+        for variant in ("APPROVED", "Approved", "approved"):
+            n = _normalize({
+                "pr": {"number": 1, "review_state": variant},
+                "session_id": "x",
+            })
+            self.assertEqual(n["pr_review_state"], "approved",
+                "review_state={!r} should normalize to 'approved'".format(variant))
+        # Also for a multi-word enum value
+        n = _normalize({
+            "pr": {"number": 1, "review_state": "CHANGES_REQUESTED"},
+            "session_id": "x",
+        })
+        self.assertEqual(n["pr_review_state"], "changes_requested")
 
 
 # ─── Workspace isinstance guard (v0.6.1 missed this site) ──────────

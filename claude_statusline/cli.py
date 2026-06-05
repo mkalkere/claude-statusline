@@ -237,10 +237,20 @@ def _normalize(data):
     # of 2026 are in the 200k range). Applied uniformly to both
     # namespaces via this small helper so the cap can't drift.
     def _clean_pr_number(raw):
+        # Int-coerce BEFORE bounds-checking — a float like 0.5 would
+        # pass `0 < num < 1_000_000` and then truncate to 0, storing
+        # an invalid PR number. Int the value first so the bound
+        # check sees the final stored value.
         num = _safe_num(raw)
-        if num is None or not (0 < num < 1_000_000):
+        if num is None:
             return None
-        return int(num)
+        try:
+            num_int = int(num)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not (0 < num_int < 1_000_000):
+            return None
+        return num_int
 
     pr_num = _clean_pr_number(pr_obj.get("number"))
     if pr_num is None:
@@ -260,12 +270,19 @@ def _normalize(data):
     # Membership-checked against the documented enum so a malformed
     # value never reaches downstream. Module-private to keep the
     # public-API surface unchanged.
+    #
+    # `.lower()` parity with `effort.level` / `effortLevel`: the
+    # documented values are lowercase (`approved`, `pending`, etc.)
+    # but normalizing before the membership check keeps us robust if
+    # an upstream variant ever sends a different case.
     raw_review = pr_obj.get("review_state")
-    out["pr_review_state"] = (
-        raw_review if isinstance(raw_review, str)
-        and raw_review in _PR_REVIEW_STATES
-        else None
-    )
+    if isinstance(raw_review, str):
+        review_lower = raw_review.lower()
+        out["pr_review_state"] = (
+            review_lower if review_lower in _PR_REVIEW_STATES else None
+        )
+    else:
+        out["pr_review_state"] = None
 
     # Repo identity: the workspace.repo shape composes host/owner/name
     # explicitly; the github.repo shape is a single "owner/name"
