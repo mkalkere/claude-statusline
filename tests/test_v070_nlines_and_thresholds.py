@@ -615,6 +615,98 @@ class TestNLineAdaptiveInteraction(unittest.TestCase):
             cli_mod.get_disabled_sections = orig_disabled
 
 
+class TestLayoutThresholdsNonDictData(unittest.TestCase):
+    """Regression for Gemini PR #102 finding: `_layout_thresholds`
+    used `(data or {}).get("version")` which only protects against
+    FALSY values (None, False, 0, "", []). A truthy non-dict (a
+    non-empty list or a string) would pass through and crash on
+    .get(). isinstance(dict) guard now defends against all shapes."""
+
+    def test_data_is_list(self):
+        from claude_statusline.cli import (
+            _layout_thresholds, _FULL_LAYOUT_MIN_COLS,
+        )
+        # Should not raise; should fall back to conservative.
+        full, _ = _layout_thresholds([1, 2, 3], width_confidence_high=True)
+        self.assertEqual(full, _FULL_LAYOUT_MIN_COLS)
+
+    def test_data_is_string(self):
+        from claude_statusline.cli import (
+            _layout_thresholds, _FULL_LAYOUT_MIN_COLS,
+        )
+        full, _ = _layout_thresholds("not a dict",
+                                     width_confidence_high=True)
+        self.assertEqual(full, _FULL_LAYOUT_MIN_COLS)
+
+    def test_data_is_int(self):
+        from claude_statusline.cli import (
+            _layout_thresholds, _FULL_LAYOUT_MIN_COLS,
+        )
+        full, _ = _layout_thresholds(42, width_confidence_high=True)
+        self.assertEqual(full, _FULL_LAYOUT_MIN_COLS)
+
+
+class TestCustomThemeLeadingZeroNormalized(unittest.TestCase):
+    """Regression for Gemini PR #102 finding: a user key like
+    `"line01"` (leading zero) passed `key[4:].isdigit()` but would
+    never match the renderer's strict `"line1"` iteration, so the
+    user's section list loaded silently without rendering. Now
+    normalized via int(key[4:]) → "line{}".format(...) so the user
+    gets the expected behavior. `line0` is silently skipped because
+    the renderer starts at line1."""
+
+    def _write_custom(self, payload):
+        import json
+        import tempfile
+        from claude_statusline import themes as themes_mod
+        self._tmp = tempfile.mkdtemp(prefix="claude-v070-customzero-")
+        path = os.path.join(self._tmp, "custom.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        self._orig_path = themes_mod._custom_theme_path
+        themes_mod._custom_theme_path = lambda: path
+
+    def tearDown(self):
+        import shutil
+        from claude_statusline import themes as themes_mod
+        if hasattr(self, "_orig_path"):
+            themes_mod._custom_theme_path = self._orig_path
+        if hasattr(self, "_tmp"):
+            shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_line01_normalized_to_line1(self):
+        from claude_statusline.themes import load_custom_theme
+        self._write_custom({"base": "default", "line01": ["cost"]})
+        theme = load_custom_theme()
+        self.assertEqual(theme["line1"], ["cost"],
+            "line01 must normalize to line1 so the renderer can find it")
+        self.assertNotIn("line01", theme,
+            "the raw line01 key must NOT remain in the theme")
+
+    def test_line003_normalized_to_line3(self):
+        from claude_statusline.themes import load_custom_theme
+        self._write_custom({"base": "default", "line003": ["clock"]})
+        theme = load_custom_theme()
+        self.assertEqual(theme["line3"], ["clock"])
+        self.assertNotIn("line003", theme)
+
+    def test_line0_silently_skipped(self):
+        """`line0` is meaningless — the renderer starts at line1.
+        Must not be loaded as either line0 OR line1 (would silently
+        replace the user's actual line1)."""
+        from claude_statusline.themes import load_custom_theme
+        # Combine line0 (garbage) with line1 (real) — line1 must win.
+        self._write_custom({
+            "base": "default",
+            "line0": ["should-not-load"],
+            "line1": ["cost"],
+        })
+        theme = load_custom_theme()
+        self.assertEqual(theme["line1"], ["cost"],
+            "line0 must NOT clobber the legitimate line1")
+        self.assertNotIn("line0", theme)
+
+
 class TestParseCCVersionStripOrder(unittest.TestCase):
     """Regression for the strip-order fix: leading whitespace before
     the `v` prefix must work, not just `v` followed by digits."""

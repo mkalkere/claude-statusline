@@ -555,12 +555,26 @@ def load_custom_theme():
     # has line1+line2 but user wants only line1), they can set
     # `line2: []` to render an empty row — which the renderer then
     # silently skips per the v0.7.0 empty-lineN contract.
+    # Normalize the numeric suffix: a user key like `"line01"` (with
+    # leading zero) would pass `key[4:].isdigit()` but never match the
+    # renderer's strict `"line{}".format(i)` iteration (`"line1"` !=
+    # `"line01"`), so the user's section list would load silently
+    # without ever rendering — a footgun. Re-emit each matching key
+    # with the parsed integer to give the user the expected behavior.
     for key in user:
-        if (isinstance(key, str)
+        if not (isinstance(key, str)
                 and len(key) > 4 and key.startswith("line")
                 and key[4:].isdigit()
                 and isinstance(user[key], list)):
-            theme[key] = user[key]
+            continue
+        idx = int(key[4:])
+        if idx < 1:
+            # `line0` is meaningless — the renderer starts at line1.
+            # Silently skip rather than silently render at the wrong
+            # index.
+            continue
+        canonical = "line{}".format(idx)
+        theme[canonical] = user[key]
 
     # Override / merge colors
     if "colors" in user and isinstance(user["colors"], dict):

@@ -1490,7 +1490,12 @@ def _layout_thresholds(data, width_confidence_high):
     chain — True iff a real probe succeeded (not the safe-default
     fallback path).
     """
-    cc_version = _parse_cc_version((data or {}).get("version"))
+    # Explicit isinstance(dict) guard — `(data or {})` only protects
+    # against falsy values (None / False / 0 / "" / []). A truthy non-
+    # dict (a non-empty list or string) would pass through and crash
+    # on .get(). Same defensive pattern as _normalize uses throughout.
+    cc_version = _parse_cc_version(
+        data.get("version") if isinstance(data, dict) else None)
     if (cc_version is not None
             and cc_version >= _RELAXED_MIN_CC_VERSION
             and width_confidence_high):
