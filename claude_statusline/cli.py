@@ -986,6 +986,32 @@ def _render_sections_named(n, order, theme):
 _FULL_LAYOUT_MIN_COLS = 150
 _COMPACT_LAYOUT_MIN_COLS = 100
 
+# Relaxed thresholds, used only when BOTH gates pass:
+#   (a) Claude Code version >= 2.1.141 (so COLUMNS env is passed to
+#       the subprocess per anthropics/claude-code#22115, and per-line
+#       width-limit calculation is fixed per #36417), AND
+#   (b) the width-detection chain found a high-confidence signal
+#       (not the safe-default fallback path).
+#
+# When both gates pass, the underlying truncation/width-detection
+# risks the conservative thresholds were defending against are gone,
+# so we can recover sections on 100-149 col terminals that the
+# conservative full-layout threshold of 150 was hiding.
+#
+# When either gate fails (older Claude Code, no trustworthy width
+# signal, etc.), we fall back to the conservative thresholds so a
+# user with no reliable width source never has Line 2 silently
+# truncated. See `_layout_thresholds()` for the decision logic.
+_FULL_LAYOUT_MIN_COLS_RELAXED = 110
+_COMPACT_LAYOUT_MIN_COLS_RELAXED = 80
+
+# Minimum Claude Code version that ships per-line truncation fix
+# (#36417, in the 2.1.139 era) AND the COLUMNS env var handoff
+# (#22115, in 2.1.141). Parsed from stdin `version` field as a
+# 3-tuple of ints. Pin 2.1.141 — the COLUMNS env is the load-bearing
+# signal that makes relaxed thresholds safe.
+_RELAXED_MIN_CC_VERSION = (2, 1, 141)
+
 # Sections to drop at each width breakpoint (widest first).
 # Below _FULL_LAYOUT_MIN_COLS: drop least-essential sections progressively.
 _COMPACT_DROP = [
@@ -1411,22 +1437,84 @@ def _detect_width_via_process_tree():
     return None, f"walked {len(checked)} ancestor(s), no TTY found"
 
 
-def _apply_responsive(sections_list, term_width):
+def _parse_cc_version(raw):
+    """Parse a Claude Code version string into a comparable 3-tuple.
+
+    Accepts forms like "2.1.141", "2.1.141-rc.1", "v2.1.141". Returns
+    None for absent / non-string / non-numeric inputs so callers can
+    treat the absence as "version unknown — use conservative
+    thresholds." Only the first three dot-separated numeric components
+    are used; suffixes after a non-digit are ignored.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    s = raw.lstrip("v").strip()
+    parts = s.split(".")
+    out = []
+    for part in parts[:3]:
+        # Trim trailing non-digit suffix ("141-rc.1" → "141")
+        digits = ""
+        for ch in part:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if not digits:
+            return None
+        try:
+            out.append(int(digits))
+        except (TypeError, ValueError):
+            return None
+    if len(out) < 3:
+        return None
+    return tuple(out)
+
+
+def _layout_thresholds(data, width_confidence_high):
+    """Return (full_min, compact_min) — the layout thresholds to use
+    for this render.
+
+    Returns the RELAXED thresholds (110 / 80) only when BOTH gates
+    pass: Claude Code version >= 2.1.141 AND width detection found a
+    high-confidence signal. Otherwise returns the conservative
+    thresholds (150 / 100) — the safe default that protects users
+    on older Claude Code or with no trustworthy width source.
+
+    `width_confidence_high` is set by render() from the width-detection
+    chain — True iff a real probe succeeded (not the safe-default
+    fallback path).
+    """
+    cc_version = _parse_cc_version((data or {}).get("version"))
+    if (cc_version is not None
+            and cc_version >= _RELAXED_MIN_CC_VERSION
+            and width_confidence_high):
+        return _FULL_LAYOUT_MIN_COLS_RELAXED, _COMPACT_LAYOUT_MIN_COLS_RELAXED
+    return _FULL_LAYOUT_MIN_COLS, _COMPACT_LAYOUT_MIN_COLS
+
+
+def _apply_responsive(sections_list, term_width,
+                      full_min=_FULL_LAYOUT_MIN_COLS,
+                      compact_min=_COMPACT_LAYOUT_MIN_COLS):
     """Filter section list based on terminal width.
 
-    >= 150 cols: full layout (no changes)
-    100-149 cols: compact (drop non-essential extras)
-    < 100 cols:  narrow (essentials only)
+    Default thresholds (conservative): 150 full / 100 compact.
+    Relaxed thresholds (110 / 80) passed by render() when both
+    Claude Code version and width-detection confidence support it
+    (see `_layout_thresholds`).
+
+    >= full_min cols:    full layout (no changes)
+    compact_min - full_min cols: compact (drop non-essential extras)
+    < compact_min cols:  narrow (essentials only)
 
     Coarse pre-filter only — the precise fit is performed by
     _fit_to_width() after sections are rendered, so a user at any
     width above the narrow band can see additional sections when
     their actual rendered width allows.
     """
-    if term_width >= _FULL_LAYOUT_MIN_COLS:
+    if term_width >= full_min:
         return sections_list
 
-    if term_width >= _COMPACT_LAYOUT_MIN_COLS:
+    if term_width >= compact_min:
         drop = set(_COMPACT_DROP)
     else:
         drop = set(_NARROW_DROP)
@@ -1566,20 +1654,55 @@ def render(data, theme_name="default"):
     # `shutil.get_terminal_size()` always returns the fallback. See
     # `_detect_terminal_width()` for the full chain (stdin JSON →
     # COLUMNS → shutil → /dev/tty stty/tput → compact default).
-    term_width = _detect_terminal_width(data)
-    line1 = _apply_responsive(theme["line1"], term_width)
-    line2 = _apply_responsive(theme["line2"], term_width)
+    # _detect_terminal_width_report() returns (winner, report). The
+    # report lets us tell whether the winning value came from a real
+    # probe (high confidence) or the safe-default fallback (low). We
+    # use confidence to gate the relaxed layout thresholds — only
+    # high-confidence width + new-enough Claude Code unlocks the
+    # 110/80 thresholds that recover sections on 100-149 col
+    # terminals.
+    term_width, width_report = _detect_terminal_width_report(data)
+    width_confidence_high = any(
+        "(winner" in status for _, status in width_report
+    )
+    full_min, compact_min = _layout_thresholds(data, width_confidence_high)
 
-    # Apply user-disabled sections
+    # Collect every `lineN` key the theme defines, starting at line1
+    # and stopping at the first missing index (gap in numbering is
+    # treated as the end — keeps the loop bounded and matches the
+    # user mental model that statusline rows are contiguous).
+    #
+    # Backward compat: themes that define only `line1` and `line2`
+    # stop at `line3` (missing) and render exactly two rows, same as
+    # every release through v0.6.3. Themes that opt in to a third
+    # (or further) row by adding `line3` etc render that many rows.
+    #
+    # Upstream context: Claude Code 2.1.139+ correctly truncates
+    # each line independently at terminal width (per anthropics/
+    # claude-code#36417, closed), and 2.1.141 passes `COLUMNS` /
+    # `LINES` env vars to the statusline subprocess (closes #22115),
+    # so multi-row output renders cleanly on modern Claude Code.
+    # On narrow terminals, rows past Line 1 can still be dropped by
+    # Claude Code's intentional rendering behavior (#28750 closed
+    # as "won't fix") — not something claude-status can override.
     disabled = set(get_disabled_sections())
-    if disabled:
-        line1 = [s for s in line1 if s not in disabled]
-        line2 = [s for s in line2 if s not in disabled]
+    raw_lines = []  # list of section-name lists, one per row
+    i = 1
+    while True:
+        key = "line{}".format(i)
+        if key not in theme:
+            break
+        sections = _apply_responsive(theme[key], term_width,
+                                     full_min=full_min,
+                                     compact_min=compact_min)
+        if disabled:
+            sections = [s for s in sections if s not in disabled]
+        raw_lines.append(sections)
+        i += 1
 
-    line1_named = _render_sections_named(n, line1, theme)
-    line2_named = _render_sections_named(n, line2, theme)
-
-    # Precise width-aware fit. Drop priority is _FIT_DROP_PRIORITY —
+    # Render + width-fit each row independently.
+    #
+    # Precise width-aware fit drop priority is _FIT_DROP_PRIORITY —
     # extends _COMPACT_DROP with last-resort drops (vim, agent, lines,
     # duration, burn, model, cache, budget) so the precise stage can
     # always reach a fitting result. Without these last-resort entries,
@@ -1587,14 +1710,12 @@ def render(data, theme_name="default"):
     # surviving line2 sections wouldn't be droppable. Sections not in
     # this list (bar, tokens, cost, branch, ctx_warning) are truly
     # essential and never dropped here.
-    line1_named = _fit_to_width(line1_named, sep_width, term_width, _FIT_DROP_PRIORITY)
-    line2_named = _fit_to_width(line2_named, sep_width, term_width, _FIT_DROP_PRIORITY)
-
     lines = []
-    if line1_named:
-        lines.append(sep.join(r for _, r in line1_named))
-    if line2_named:
-        lines.append(sep.join(r for _, r in line2_named))
+    for row in raw_lines:
+        named = _render_sections_named(n, row, theme)
+        named = _fit_to_width(named, sep_width, term_width, _FIT_DROP_PRIORITY)
+        if named:
+            lines.append(sep.join(r for _, r in named))
 
     return "\n".join(lines)
 
