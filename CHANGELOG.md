@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-05
+
+### Added
+
+- **N-line statusline support** ([#101](https://github.com/mkalkere/claude-statusline/issues/101)) — themes can now define `line3`, `line4`, etc, and `render()` will produce that many rows. The hardcoded 2-line ceiling at `cli.py:render()` is gone, replaced by a loop that iterates `lineN` keys in the theme until it hits a missing index. Backward compatible: every built-in theme (and every existing user `~/.claude/claude-status-theme.json`) defines only `line1` + `line2` and stops at `line3` (missing), producing exactly two rows — identical to v0.6.3. Themes that opt in to a third (or further) row see it render, subject to the same per-row adaptive layout (`_apply_responsive` + `_fit_to_width`) that v0.6.0's two-line layout used. The "gap in numbering" case (e.g., `line1` + `line2` + `line4` with no `line3`) is treated as "end of rows" rather than "skip and continue" — matches the user mental model that statusline rows are contiguous and keeps the loop bounded.
+
+  This feature was previously blocked on Claude Code's Ink TUI silently truncating lines past Line 1 ([anthropics/claude-code#28750](https://github.com/anthropics/claude-code/issues/28750), [#36417](https://github.com/anthropics/claude-code/issues/36417)). Both are now closed: the per-line independent width-limit fix landed in the 2.1.139 era and resolved #36417, and 2.1.141 ships the `COLUMNS` env-var handoff per its release notes (closes [#22115](https://github.com/anthropics/claude-code/issues/22115)). The official statusline docs explicitly support multi-row output. On narrow terminals, rows past Line 1 can still be dropped by Claude Code's intentional rendering behavior (#28750 closed as "not planned") — not something claude-status can override.
+
+### Changed
+
+- **Layout thresholds relax on Claude Code 2.1.141+** ([#94](https://github.com/mkalkere/claude-statusline/issues/94)) — `_FULL_LAYOUT_MIN_COLS` drops from 150 to 110 and `_COMPACT_LAYOUT_MIN_COLS` from 100 to 80 when BOTH gates pass: (a) `version` from stdin parses as Claude Code 2.1.141 or later (the release that ships the `COLUMNS` env handoff making width detection trustworthy), AND (b) the width-detection chain found a high-confidence signal (a real probe succeeded, not the safe-default fallback path).
+
+  Conservative thresholds remain the default for older Claude Code, for the no-trustworthy-signal case, and for any path where data is absent. This preserves the v0.5.4 safety contract from [#72](https://github.com/mkalkere/claude-statusline/issues/72) and protects users on older Claude Code or stuck on the 2.1.139 width-detection regression. For users on 2.1.141+ with a real terminal width, the practical effect is **sections that were dropped by the coarse pre-filter on 100-149 col terminals are now retained** (e.g., `version`, `rate_limits`, `effort`, `tools` at 120 cols on a 2.1.141 session).
+
+  Decision logic lives in two new functions in `cli.py`: `_parse_cc_version()` (converts the stdin `version` string to a comparable 3-tuple, rejecting non-string / garbage / fewer-than-3-parts inputs by returning None) and `_layout_thresholds(data, width_confidence_high)` (returns the threshold pair). `_apply_responsive()` now accepts the thresholds as keyword arguments (with the conservative pair as defaults, so existing callers that pass only `term_width` still get the safe behavior).
+
+### Notes
+
+- **Backward compatibility.** Every existing theme renders identically to v0.6.3 — the 2-line hardcode removal was a *capability* change, not a *behavior* change. Every user on Claude Code older than 2.1.141 also renders identically — the threshold relaxation is gated, not unconditional. The only visible-output change is for users who EITHER opt into a 3+ line theme OR run on Claude Code ≥ 2.1.141 with a high-confidence terminal width and a 100-149 col terminal.
+- **`render()` now uses `_detect_terminal_width_report()` instead of `_detect_terminal_width()`** so it can derive width-detection confidence from the per-step report. This is internal plumbing — `--doctor` already used the report variant in v0.6.0, so no observable change there.
+- **Custom themes can now opt into N-line layouts** — fixed during the v0.7.0 review cycle: `themes.load_custom_theme()` previously hardcoded `line1`/`line2` only, silently dropping any `lineN` keys for N≥3 from `~/.claude/claude-status-theme.json`. Without this fix the v0.7.0 N-line capability would have been unreachable for any user using `theme: custom`. Now accepts every `lineN` key (regex `line\d+` with isinstance-list guard).
+- All 549 tests pass (was 507, +42 net new in `tests/test_v070_nlines_and_thresholds.py`: 6 for N-line render contract, 7 for `_parse_cc_version()` (canonical, prefix, suffix, arity, type, garbage, ordering), 7 for `_layout_thresholds()` gate truth table, 3 end-to-end render tests, 3 for the `(winner` substring contract (real-report check + bidirectional stub-report tests), 6 for the custom-theme N-line accept path (line3/line5/double-digit/list-required/garbage-rejected/backward-compat), 2 for `_apply_responsive` × N-line interaction (line3 droppable filter + disabled-sections × line3), 2 for the strip-order fix (leading whitespace before `v`), 3 for `_layout_thresholds` non-dict data robustness (list / string / int defaults to conservative without crashing), and 3 for the custom-theme leading-zero key normalization (`"line01"` → `"line1"`, `"line003"` → `"line3"`, `"line0"` silently skipped without clobbering legitimate line1). Pure stdlib, no dependency changes.
+- Closes [#101](https://github.com/mkalkere/claude-statusline/issues/101) and [#94](https://github.com/mkalkere/claude-statusline/issues/94).
+
 ## [0.6.3] - 2026-06-04
 
 ### Changed

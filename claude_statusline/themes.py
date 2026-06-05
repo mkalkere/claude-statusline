@@ -541,11 +541,40 @@ def load_custom_theme():
         if key in user:
             theme[key] = user[key]
 
-    # Override line layout
-    if "line1" in user and isinstance(user["line1"], list):
-        theme["line1"] = user["line1"]
-    if "line2" in user and isinstance(user["line2"], list):
-        theme["line2"] = user["line2"]
+    # Override line layout. Accepts any `lineN` key for N>=1 so users
+    # can opt into the v0.7.0 N-line capability via custom themes.
+    # Without this, the v0.7.0 N-line marquee feature is unreachable
+    # for any user using `theme: custom` — the renderer would iterate
+    # the inherited base theme's lineN keys instead of the user's.
+    #
+    # Strategy: any `lineN` the user supplies REPLACES the inherited
+    # value at that index. Indices the user does NOT supply keep the
+    # base theme's value. This matches the per-key replace semantics
+    # of other theme keys above (separator, bar_filled, etc.). If the
+    # user wants a strictly-shorter layout than the base (e.g., base
+    # has line1+line2 but user wants only line1), they can set
+    # `line2: []` to render an empty row — which the renderer then
+    # silently skips per the v0.7.0 empty-lineN contract.
+    # Normalize the numeric suffix: a user key like `"line01"` (with
+    # leading zero) would pass `key[4:].isdigit()` but never match the
+    # renderer's strict `"line{}".format(i)` iteration (`"line1"` !=
+    # `"line01"`), so the user's section list would load silently
+    # without ever rendering — a footgun. Re-emit each matching key
+    # with the parsed integer to give the user the expected behavior.
+    for key in user:
+        if not (isinstance(key, str)
+                and len(key) > 4 and key.startswith("line")
+                and key[4:].isdigit()
+                and isinstance(user[key], list)):
+            continue
+        idx = int(key[4:])
+        if idx < 1:
+            # `line0` is meaningless — the renderer starts at line1.
+            # Silently skip rather than silently render at the wrong
+            # index.
+            continue
+        canonical = "line{}".format(idx)
+        theme[canonical] = user[key]
 
     # Override / merge colors
     if "colors" in user and isinstance(user["colors"], dict):
