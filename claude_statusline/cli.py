@@ -77,7 +77,23 @@ def _force_utf8():
 
 
 def _settings_path():
-    """Get Claude Code settings.json path."""
+    """Get Claude Code settings.json path.
+
+    Honors the ``CLAUDE_STATUSLINE_SETTINGS_PATH`` env override (same
+    convention as ``CLAUDE_STATUSLINE_WIDTH``). This is the single
+    chokepoint every settings read/write flows through — the override
+    lets the test suite (and CI) redirect ALL settings I/O to a temp
+    file centrally, so even a test that forgets to monkey-patch this
+    function can never touch the real ``~/.claude/settings.json``.
+    Defense-in-depth against the test-isolation footgun in #96: a
+    contributor running ``python -m unittest discover tests/`` must not
+    risk nuking their own Claude Code statusline config. A non-empty,
+    non-whitespace value wins; anything else falls through to the real
+    path so a stray empty export can't redirect writes to ``""``.
+    """
+    override = os.environ.get("CLAUDE_STATUSLINE_SETTINGS_PATH")
+    if isinstance(override, str) and override.strip():
+        return override
     home = os.path.expanduser("~")
     return os.path.join(home, ".claude", "settings.json")
 

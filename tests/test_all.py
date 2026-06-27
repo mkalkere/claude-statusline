@@ -43,6 +43,165 @@ from claude_statusline.cli import render, _render_sections, _settings_path
 _SENTINEL = object()
 
 
+# ─── Test isolation from the REAL ~/.claude/settings.json (#96) ─────────
+#
+# During v0.6.1 release verification the maintainer's real settings.json
+# was found nulled mid-session — the suspected cause was an install/
+# uninstall test writing to the real file instead of a tmpfile. The
+# install/uninstall tests DO each monkey-patch cli._settings_path, but
+# that is opt-in and a future test could forget it. We defend in depth
+# two ways, both anchored here at module scope:
+#
+#   1. Redirect the production chokepoint centrally. cli._settings_path()
+#      honors CLAUDE_STATUSLINE_SETTINGS_PATH; we point it at a temp file
+#      for the whole module run, so even a test that forgets to patch
+#      writes there, never to the real file.
+#   2. Snapshot the real file's bytes (as a hash) in setUpModule before
+#      any test runs, and assert it's unchanged in tearDownModule (which
+#      runs after EVERY test — including the uninstall tests, which sort
+#      after any guard test method would). Would have caught the original
+#      incident immediately. TestSettingsIsolation pins the mechanisms.
+
+import hashlib  # noqa: E402  (kept beside the isolation block it serves)
+
+_REAL_SETTINGS_PATH = os.path.join(
+    os.path.expanduser("~"), ".claude", "settings.json")
+_real_settings_hash_before = None
+_settings_redirect_dir = None
+_prev_settings_env = None
+
+# Distinct, never-None sentinel for "the real settings file exists but we
+# could NOT read it" (permission denied, transient lock, etc.). This MUST
+# stay distinct from None ("genuinely absent"): folding the two together
+# would let a transient read failure at snapshot time mask a later
+# deletion of the real file (None == None) — defeating this guard in
+# exactly the present→absent #96 scenario it exists to catch.
+_HASH_UNREADABLE = "<unreadable>"
+
+
+def _hash_real_settings():
+    """Return a sha256 hex digest of the real settings.json.
+
+    Tri-state on purpose:
+      - hex string       -> file read successfully
+      - None             -> file genuinely absent (FileNotFoundError); a
+                            valid untouched state for a contributor without
+                            Claude Code installed ("stayed absent" == None).
+      - _HASH_UNREADABLE -> file exists but is unreadable; kept distinct
+                            from None so before/after compare meaningfully.
+    """
+    try:
+        with open(_REAL_SETTINGS_PATH, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _HASH_UNREADABLE
+
+
+def setUpModule():
+    global _real_settings_hash_before, _settings_redirect_dir
+    global _prev_settings_env
+    _real_settings_hash_before = _hash_real_settings()
+    # Redirect every unpatched settings read/write to a throwaway file.
+    _settings_redirect_dir = tempfile.mkdtemp(prefix="claude-status-test-")
+    _prev_settings_env = os.environ.get("CLAUDE_STATUSLINE_SETTINGS_PATH")
+    os.environ["CLAUDE_STATUSLINE_SETTINGS_PATH"] = os.path.join(
+        _settings_redirect_dir, "settings.json")
+
+
+def tearDownModule():
+    # The load-bearing regression assertion lives HERE, not in a test
+    # method: tearDownModule provably runs after EVERY test in the module,
+    # whereas a test method sorts alphabetically (a TestReal*/TestSettings*
+    # class runs before TestUninstall*, so a method-only guard would miss
+    # the very uninstall tests that caused the original #96 incident).
+    # Compare the real file's bytes against the setUpModule snapshot; a
+    # mismatch means some test wrote to the real ~/.claude/settings.json.
+    after = _hash_real_settings()
+    # Restore the env to its prior state (unset vs. prior value) and clean
+    # the temp dir BEFORE asserting, so neither leaks if the assert raises.
+    if _prev_settings_env is None:
+        os.environ.pop("CLAUDE_STATUSLINE_SETTINGS_PATH", None)
+    else:
+        os.environ["CLAUDE_STATUSLINE_SETTINGS_PATH"] = _prev_settings_env
+    if _settings_redirect_dir:
+        import shutil as _shutil
+        _shutil.rmtree(_settings_redirect_dir, ignore_errors=True)
+    if after != _real_settings_hash_before:
+        raise AssertionError(
+            "A test mutated the real ~/.claude/settings.json! Some test "
+            "exercised install/uninstall/setup without redirecting settings "
+            "I/O to a tmpfile (monkey-patch cli._settings_path or set "
+            "CLAUDE_STATUSLINE_SETTINGS_PATH). See #96. "
+            "before={!r} after={!r}".format(
+                _real_settings_hash_before, after))
+
+
+class TestSettingsIsolation(unittest.TestCase):
+    """#96 hardening contracts. The load-bearing 'real file unchanged'
+    assertion lives in tearDownModule (so it runs last, after the
+    uninstall tests); these tests pin the mechanisms that make it hold so
+    a refactor can't silently regress them and re-expose the real file."""
+
+    def test_settings_path_honors_env_override(self):
+        import claude_statusline.cli as cli_mod
+        prev = os.environ.get("CLAUDE_STATUSLINE_SETTINGS_PATH")
+        # A deliberately non-existent placeholder string — we assert on the
+        # RETURN VALUE only and never touch the filesystem. Do not "fix"
+        # this into a tempfile; that would change what the test pins.
+        sentinel = os.path.join("nonexistent-dir", "redir.json")
+        try:
+            os.environ["CLAUDE_STATUSLINE_SETTINGS_PATH"] = sentinel
+            self.assertEqual(cli_mod._settings_path(), sentinel,
+                "a non-blank override must win verbatim")
+            # Blank / whitespace must NOT redirect — full-path equality to
+            # the real path (not just suffix) so a dropped home prefix is
+            # caught.
+            for blank in ("", "   ", "\t", "\n"):
+                os.environ["CLAUDE_STATUSLINE_SETTINGS_PATH"] = blank
+                self.assertEqual(
+                    cli_mod._settings_path(), _REAL_SETTINGS_PATH,
+                    "blank override {!r} must fall through to real path"
+                    .format(blank))
+            # Unset (the production default) must also resolve to the real
+            # path — the path every end user depends on.
+            os.environ.pop("CLAUDE_STATUSLINE_SETTINGS_PATH", None)
+            self.assertEqual(cli_mod._settings_path(), _REAL_SETTINGS_PATH,
+                "unset override must resolve to the real ~/.claude path")
+        finally:
+            if prev is None:
+                os.environ.pop("CLAUDE_STATUSLINE_SETTINGS_PATH", None)
+            else:
+                os.environ["CLAUDE_STATUSLINE_SETTINGS_PATH"] = prev
+
+    def test_unpatched_install_writes_to_redirect_not_real(self):
+        """The whole point of the chokepoint: an UNPATCHED cmd_install (no
+        monkey-patch of _settings_path, relying solely on the env override)
+        must write to the redirect and leave the real file byte-identical.
+        Makes the manually-proven protection a permanent guard."""
+        import claude_statusline.cli as cli_mod
+        real_before = _hash_real_settings()
+        prev = os.environ.get("CLAUDE_STATUSLINE_SETTINGS_PATH")
+        with tempfile.TemporaryDirectory() as tmp:
+            redirect = os.path.join(tmp, "nested", "settings.json")
+            os.environ["CLAUDE_STATUSLINE_SETTINGS_PATH"] = redirect
+            try:
+                cli_mod.cmd_install("default")  # NOT monkey-patched
+                self.assertTrue(os.path.exists(redirect),
+                    "unpatched install must write to the env redirect")
+                with open(redirect) as f:
+                    self.assertEqual(
+                        json.load(f)["statusLine"]["command"], "claude-status")
+            finally:
+                if prev is None:
+                    os.environ.pop("CLAUDE_STATUSLINE_SETTINGS_PATH", None)
+                else:
+                    os.environ["CLAUDE_STATUSLINE_SETTINGS_PATH"] = prev
+        self.assertEqual(_hash_real_settings(), real_before,
+            "unpatched install must NOT touch the real settings file")
+
+
 # ─── colors.py ────────────────────────────────────────────────────────
 
 class TestColors(unittest.TestCase):
@@ -3064,6 +3223,12 @@ class TestPrintConfig(unittest.TestCase):
             # them or the host's real home wins and the test goes flaky.
             env.pop("HOMEDRIVE", None)
             env.pop("HOMEPATH", None)
+            # This test controls the settings location via HOME, so it must
+            # drop the module-level CLAUDE_STATUSLINE_SETTINGS_PATH redirect
+            # (#96) — the override intentionally wins over expanduser("~"),
+            # which would otherwise point the subprocess at the empty temp
+            # redirect file instead of the settings.json we just wrote here.
+            env.pop("CLAUDE_STATUSLINE_SETTINGS_PATH", None)
             r = subprocess.run(
                 [sys.executable, "-m", "claude_statusline", "--print-config"],
                 env=env, capture_output=True, text=True, timeout=5,

@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-06-27
+
+### Fixed
+
+- **Test isolation from the real `~/.claude/settings.json`** ([#96](https://github.com/mkalkere/claude-statusline/issues/96)) — during v0.6.1 verification the maintainer's real settings file was found nulled after a test run: an install/uninstall test had written to the real file instead of a tmpfile. The install/uninstall tests do each monkey-patch `cli._settings_path`, but that is opt-in and a future test could forget it. Hardened two ways, both at module scope in `tests/test_all.py`:
+
+  1. **`_settings_path()` now honors a `CLAUDE_STATUSLINE_SETTINGS_PATH` env override** (same convention as `CLAUDE_STATUSLINE_WIDTH`). `setUpModule()` points it at a throwaway temp directory for the whole suite run, so even a test that forgets to monkey-patch the function writes there — never to the real file. A non-empty, non-whitespace value wins; a blank value falls through to the real path so a stray empty export can't redirect writes to `""`. This is the single chokepoint every settings read/write flows through.
+  2. **Regression guard** — `setUpModule()` snapshots a sha256 of the real settings file before any test runs (tri-state: hex digest / `None` if genuinely absent / a distinct sentinel if present-but-unreadable, so a transient read failure can't mask a later deletion), and `tearDownModule()` asserts it is unchanged after the whole module run. The assertion lives in `tearDownModule` — not a test method — because that provably runs after *every* test, including the uninstall tests that sort alphabetically after any guard method and caused the original incident. `TestSettingsIsolation` pins the two mechanisms: the `_settings_path()` override contract (non-blank wins verbatim; blank/whitespace/unset fall through to the real path) and an end-to-end check that an *unpatched* `cmd_install` writes to the redirect and leaves the real file byte-identical.
+
+### Notes
+
+- Production behavior is **unchanged** for end users — `_settings_path()` only consults the new env var, which is unset in normal use, so it resolves to `~/.claude/settings.json` exactly as before. The override exists for test/CI isolation.
+- **Subprocess-spawning tests that control the settings location via `HOME`/`USERPROFILE` must drop the override** from the child env (`env.pop("CLAUDE_STATUSLINE_SETTINGS_PATH", None)`), since it intentionally wins over `expanduser("~")`. Fixed in `test_subprocess_invocation_returns_correct_exit_code`; documented in the `docs/RELEASE.md` failure-mode catalog per the issue's acceptance criteria.
+- All 564 tests pass (was 562, +2 net new: the `_settings_path()` override contract test and the unpatched-install-writes-to-redirect guard; the real-file-unchanged assertion runs in `tearDownModule`). Pure stdlib, no dependency changes.
+- Closes [#96](https://github.com/mkalkere/claude-statusline/issues/96).
+
 ## [0.8.0] - 2026-06-27
 
 ### Added
