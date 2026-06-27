@@ -37,6 +37,11 @@ from claude_statusline.git import get_branch
 from claude_statusline.themes import THEMES, get_theme
 from claude_statusline.cli import render, _render_sections, _settings_path
 
+# Distinct sentinel meaning "omit this key entirely" in test helpers,
+# kept separate from None so tests can exercise both "key absent" and
+# "key present but null" — two different code paths in _normalize.
+_SENTINEL = object()
+
 
 # ─── colors.py ────────────────────────────────────────────────────────
 
@@ -6304,6 +6309,198 @@ class TestGitHubPRSection(unittest.TestCase):
         finally:
             THEMES["default"]["line2"] = orig_line2
             cli_mod.get_branch = orig_branch
+
+
+class TestPRReviewState(unittest.TestCase):
+    """`pr.review_state` (documented stdin enum: approved / pending /
+    changes_requested / draft) is captured since v0.6.3 and rendered as
+    a short ASCII token appended to the PR section. Hidden when absent or
+    malformed — the section degrades to bare PR#NN."""
+
+    def _plain(self, output):
+        no_ansi = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        return re.sub(r"\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)", "", no_ansi)
+
+    def _render_with_pr(self, review_state):
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["pr", "branch"]
+            pr = {"number": 86, "url": "https://github.com/x/y/pull/86"}
+            if review_state is not _SENTINEL:
+                pr["review_state"] = review_state
+            return self._plain(cli_mod.render(
+                {"pr": pr, "git_branch": "main"}, "default"))
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_normalize_accepts_documented_states(self):
+        from claude_statusline.cli import _normalize
+        for state in ("approved", "pending", "changes_requested", "draft"):
+            n = _normalize({"pr": {"number": 1, "review_state": state},
+                            "session_id": "x"})
+            self.assertEqual(n["pr_review_state"], state)
+
+    def test_normalize_case_insensitive(self):
+        """Production lower-cases before the enum check — parity with
+        effort.level. Covers the multi-word `changes_requested` form
+        too, so the underscore survives case-folding."""
+        from claude_statusline.cli import _normalize
+        for raw, want in (("APPROVED", "approved"),
+                          ("Changes_Requested", "changes_requested"),
+                          ("Pending", "pending"),
+                          ("DRAFT", "draft")):
+            n = _normalize({"pr": {"number": 1, "review_state": raw},
+                            "session_id": "x"})
+            self.assertEqual(n["pr_review_state"], want,
+                "{!r} must normalize to {!r}".format(raw, want))
+
+    def test_normalize_rejects_unknown_and_nonstring(self):
+        from claude_statusline.cli import _normalize
+        for bad in ("merged", "", 42, ["approved"], {"x": 1}, True, None):
+            n = _normalize({"pr": {"number": 1, "review_state": bad},
+                            "session_id": "x"})
+            self.assertIsNone(n["pr_review_state"],
+                "review_state={!r} must normalize to None".format(bad))
+
+    def test_render_each_state_token(self):
+        for state, token in (("approved", "ok"),
+                             ("changes_requested", "chg"),
+                             ("pending", "rev"),
+                             ("draft", "draft")):
+            plain = self._render_with_pr(state)
+            self.assertIn("PR#86", plain)
+            self.assertIn("PR#86 {}".format(token), plain,
+                "state {!r} should render token {!r}".format(state, token))
+
+    def test_render_bare_pr_when_state_absent_or_bad(self):
+        for bad in (_SENTINEL, "merged", 42, None):
+            plain = self._render_with_pr(bad)
+            self.assertIn("PR#86", plain)
+            # No stray review token should follow the PR number.
+            for token in ("ok", "chg", "rev", "draft"):
+                self.assertNotIn("PR#86 {}".format(token), plain,
+                    "bad/absent state {!r} must not render {!r}".format(
+                        bad, token))
+
+    def test_display_map_stays_in_sync_with_enum(self):
+        """The render map keys MUST equal the validated enum — a state
+        added to one but not the other would either crash the KeyError
+        lookup in render or silently drop a valid value."""
+        from claude_statusline.cli import (
+            _PR_REVIEW_STATES, _PR_REVIEW_DISPLAY)
+        self.assertEqual(set(_PR_REVIEW_DISPLAY), set(_PR_REVIEW_STATES))
+
+    def _render_raw_with_pr(self, review_state, color_overrides):
+        """Render with `pr` enabled and the given theme color overrides,
+        returning the RAW (un-stripped) output so callers can assert on
+        the actual ANSI color codes wrapping the review token."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_colors = THEMES["default"]["colors"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["pr", "branch"]
+            THEMES["default"]["colors"] = dict(orig_colors)
+            THEMES["default"]["colors"].update(color_overrides)
+            pr = {"number": 86, "url": "https://github.com/x/y/pull/86",
+                  "review_state": review_state}
+            return cli_mod.render({"pr": pr, "git_branch": "main"}, "default")
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            THEMES["default"]["colors"] = orig_colors
+            cli_mod.get_branch = orig_branch
+
+    def test_per_state_color_override_applied(self):
+        """The per-state theme key `pr_review_<state>` actually colors
+        the token — assert the override ANSI code wraps it, not just that
+        the token text appears."""
+        raw = self._render_raw_with_pr("approved",
+                                       {"pr_review_approved": CYAN})
+        self.assertIn(CYAN + "ok" + RESET, raw,
+            "pr_review_approved override must wrap the 'ok' token in CYAN")
+
+    def test_per_state_color_null_falls_through_to_default(self):
+        """An explicit `null` override must fall through `_first()` to the
+        built-in default color (RED for changes_requested) and NOT crash
+        colorize() — the theme-null degradation contract the project
+        guards elsewhere."""
+        raw = self._render_raw_with_pr(
+            "changes_requested", {"pr_review_changes_requested": None})
+        self.assertIn(RED + "chg" + RESET, raw,
+            "null override must fall through to the default RED, not crash")
+
+    def test_pr_is_compact_droppable(self):
+        """`pr` must shed under width pressure before essential sections.
+        Pins membership in _COMPACT_DROP (which feeds both _NARROW_DROP
+        and _FIT_DROP_PRIORITY) so a refactor can't silently break the
+        documented 'sheds first' contract."""
+        from claude_statusline.cli import (
+            _COMPACT_DROP, _NARROW_DROP, _FIT_DROP_PRIORITY)
+        self.assertIn("pr", _COMPACT_DROP)
+        self.assertIn("pr", _NARROW_DROP)
+        self.assertIn("pr", _FIT_DROP_PRIORITY)
+
+
+class TestThinkingSection(unittest.TestCase):
+    """`thinking.enabled` (documented stdin boolean) renders a `think`
+    badge ONLY when strictly True. Off / absent / malformed all hide it —
+    an off-indicator would be noise on every non-thinking session."""
+
+    def _plain(self, output):
+        return re.sub(r"\x1b\[[0-9;]*m", "", output)
+
+    def _shows_think(self, thinking_value):
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["thinking", "branch"]
+            data = {"git_branch": "main"}
+            if thinking_value is not _SENTINEL:
+                data["thinking"] = thinking_value
+            return "think" in self._plain(cli_mod.render(data, "default"))
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_normalize_true_only(self):
+        from claude_statusline.cli import _normalize
+        self.assertTrue(
+            _normalize({"thinking": {"enabled": True}, "session_id": "x"})
+            ["thinking_enabled"])
+        for falsey in ({"enabled": False}, {"enabled": 1}, {"enabled": "yes"},
+                       {}, "on", 42, ["enabled"], None):
+            n = _normalize({"thinking": falsey, "session_id": "x"})
+            self.assertIs(n["thinking_enabled"], False,
+                "thinking={!r} must normalize to False".format(falsey))
+
+    def test_renders_only_when_enabled(self):
+        self.assertTrue(self._shows_think({"enabled": True}))
+
+    def test_hidden_for_off_absent_and_malformed(self):
+        for val in ({"enabled": False}, {"enabled": 1}, _SENTINEL,
+                    "yes", 42, None):
+            self.assertFalse(self._shows_think(val),
+                "thinking={!r} must not render the badge".format(val))
+
+    def test_thinking_is_compact_droppable(self):
+        """`thinking` must shed under width pressure before essential
+        sections. Pins membership in _COMPACT_DROP (which feeds both
+        _NARROW_DROP and _FIT_DROP_PRIORITY)."""
+        from claude_statusline.cli import (
+            _COMPACT_DROP, _NARROW_DROP, _FIT_DROP_PRIORITY)
+        self.assertIn("thinking", _COMPACT_DROP)
+        self.assertIn("thinking", _NARROW_DROP)
+        self.assertIn("thinking", _FIT_DROP_PRIORITY)
 
 
 class TestCostBreakdownSection(unittest.TestCase):

@@ -45,11 +45,26 @@ CTX_WARNING_THRESHOLD_PCT = 85
 # as of 2026-06-04). Used by _normalize to membership-check the
 # captured value so a malformed upstream value never reaches
 # downstream consumers. Module-private — not part of the public API
-# surface; rendering of review state is tracked separately and may
-# change shape before it ships.
+# surface. Rendered by the `pr` section via _PR_REVIEW_DISPLAY, whose
+# keys must stay in sync with this set (asserted by
+# TestPRReviewState.test_display_map_stays_in_sync_with_enum).
 _PR_REVIEW_STATES = frozenset({
     "approved", "pending", "changes_requested", "draft",
 })
+
+# Render mapping for pr.review_state: each documented state → (short
+# ASCII token, default color). The token is deliberately ASCII (not an
+# emoji) so it is width-1-per-char and renders identically in every
+# terminal — consistent with the rest of the statusline. Keys MUST stay
+# in sync with _PR_REVIEW_STATES; the test suite asserts the two sets
+# are identical so a future state added to one can't silently desync the
+# other. Per-state theme override key is "pr_review_<state>".
+_PR_REVIEW_DISPLAY = {
+    "approved":          ("ok",    GREEN),
+    "changes_requested": ("chg",   RED),
+    "pending":           ("rev",   YELLOW),
+    "draft":             ("draft", BRIGHT_BLACK),
+}
 
 
 def _force_utf8():
@@ -223,9 +238,11 @@ def _normalize(data):
     # those names continues to work. The keys describe what claude-
     # status STORES, not which upstream namespace they came from.
     #
-    # pr.review_state is captured internally but NOT rendered in this
-    # release; tracked separately. Capturing now lets the rendering
-    # land in a follow-up without re-touching _normalize.
+    # pr.review_state is captured here and rendered by the `pr` section
+    # (see _PR_REVIEW_DISPLAY and the section == "pr" block in
+    # _render_sections). v0.6.3 added the capture and deferred the
+    # rendering; v0.8.0 landed the renderer without re-touching this
+    # normalize block.
     pr_obj = data.get("pr")
     pr_obj = pr_obj if isinstance(pr_obj, dict) else {}
     github_obj = data.get("github")
@@ -266,10 +283,9 @@ def _normalize(data):
         or _clean_pr_url(github_obj.get("pr_url"))
     )
 
-    # Review state: captured but not rendered in this release.
-    # Membership-checked against the documented enum so a malformed
-    # value never reaches downstream. Module-private to keep the
-    # public-API surface unchanged.
+    # Review state: membership-checked against the documented enum so a
+    # malformed value never reaches the renderer. Rendered by the `pr`
+    # section via _PR_REVIEW_DISPLAY.
     #
     # `.lower()` parity with `effort.level` / `effortLevel`: the
     # documented values are lowercase (`approved`, `pending`, etc.)
@@ -498,6 +514,23 @@ def _normalize(data):
     else:
         out["effort_level"] = None
 
+    # Extended-thinking state (thinking.enabled, documented stdin field).
+    # Stored as a STRICT bool — `is True` collapses every input to exactly
+    # True or False, so the renderer never sees None:
+    #   enabled is True            -> True   (render the section)
+    #   enabled False / absent /
+    #     non-bool / non-dict      -> False  (hide)
+    # We only surface the affirmative case — an "off" indicator would be
+    # noise on every non-thinking session, so the "explicitly off" and
+    # "field missing" inputs deliberately collapse to the same hidden
+    # state. isinstance(dict) guard mirrors every other nested-object read
+    # in _normalize so a malformed `thinking: "yes"` (string) can't crash.
+    # Strict `is True` rather than truthiness so a stray non-bool like
+    # `enabled: 1` does not masquerade as the documented boolean.
+    thinking_obj = data.get("thinking")
+    thinking_obj = thinking_obj if isinstance(thinking_obj, dict) else {}
+    out["thinking_enabled"] = thinking_obj.get("enabled") is True
+
     return out
 
 
@@ -655,6 +688,34 @@ def _render_sections_named(n, order, theme):
                 pr_text = colorize("PR#{}".format(pr_number), pr_color)
                 if pr_url:
                     pr_text = _osc8_link(pr_url, pr_text)
+
+                # Review state (pr.review_state, captured since v0.6.3,
+                # rendered here). A short ASCII token rather than an
+                # emoji glyph keeps it width-1-per-char and renders in
+                # every terminal — same conservative choice the project
+                # makes elsewhere. Appended OUTSIDE the OSC 8 link so
+                # the clickable target stays exactly "PR#N" and the
+                # state reads as an adjacent annotation.
+                #
+                # _normalize gates the value against _PR_REVIEW_STATES,
+                # and TestPRReviewState asserts that set equals the
+                # _PR_REVIEW_DISPLAY keys — so today every value that
+                # reaches us is a valid map key. The lookup still uses
+                # .get() (not a bare subscript) as defense-in-depth: if a
+                # future state were ever added to one set but not the
+                # other, an unmapped value degrades to a bare "PR#N"
+                # (this section) rather than raising KeyError and taking
+                # down the WHOLE line. Per-section graceful degradation is
+                # the project contract; the sync test stays as the loud
+                # signal that catches the desync in CI first.
+                review = n.get("pr_review_state")
+                entry = _PR_REVIEW_DISPLAY.get(review) if review else None
+                if entry:
+                    label, default_color = entry
+                    state_color = _first(tc.get("pr_review_" + review),
+                                         default_color)
+                    pr_text = pr_text + " " + colorize(label, state_color)
+
                 sections.append(pr_text)
 
         elif section == "burn" and total_tokens and duration:
@@ -938,6 +999,19 @@ def _render_sections_named(n, order, theme):
                     "effort:" + effort, ec, BOLD
                 ))
 
+        elif section == "thinking":
+            # Extended-thinking indicator (thinking.enabled, documented
+            # stdin field). _normalize reduces the field to a strict
+            # bool in n["thinking_enabled"]; we render ONLY when True —
+            # an "off" badge would clutter every non-thinking session.
+            # Pairs naturally with `effort`; both describe how the model
+            # is reasoning this session. Color falls through via _first()
+            # so a theme setting `thinking: null` degrades to BRIGHT_MAGENTA
+            # rather than crashing colorize().
+            if n.get("thinking_enabled"):
+                thc = _first(tc.get("thinking"), BRIGHT_MAGENTA)
+                sections.append(colorize("think", thc, BOLD))
+
         elif section == "git_extras":
             branch = n["git_branch"] or get_branch()
             if branch:
@@ -1018,7 +1092,7 @@ _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
     "sessions", "tools", "activity", "latency", "context_size", "session_name",
     "rate_limits", "output_style", "added_dirs", "effort", "git_worktree",
-    "speed", "git_state", "commit_age", "cost_breakdown", "pr",
+    "speed", "git_state", "commit_age", "cost_breakdown", "pr", "thinking",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",

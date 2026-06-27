@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-27
+
+### Added
+
+- **PR review-state rendering** ([#99](https://github.com/mkalkere/claude-statusline/issues/99) follow-up) — the `pr` section now renders `pr.review_state` as a short token appended to the PR number: `PR#1234 ok` (approved), `chg` (changes_requested), `rev` (pending), `draft`. The value was already captured and enum-validated in `_normalize()` since v0.6.3 (which deferred rendering to a follow-up); this release adds the renderer with no change to the capture path. The token is appended **outside** the OSC 8 hyperlink envelope so the clickable target stays exactly `PR#N` and the state reads as an adjacent annotation. Per-state color is themeable via `pr_review_<state>` keys (default: green/red/yellow/dim), falling through with `_first()` so a theme setting the key to `null` degrades to the default rather than crashing. Hidden — section degrades to bare `PR#N` — whenever `review_state` is absent or fails the documented enum (`approved`/`pending`/`changes_requested`/`draft`); the lookup is total over every value that survives normalization, so a desync between the validation set and the render map can't `KeyError`. A deliberately ASCII token (not an emoji) keeps it width-1-per-char and renders identically in every terminal, consistent with the rest of the statusline. Opt-in: rides along automatically wherever the `pr` section is already enabled.
+
+- **`thinking` section** — renders a `think` badge from the documented `thinking.enabled` stdin boolean. Surfaces only the affirmative case (`thinking.enabled` strictly `True`): an "off" indicator would be noise on every non-thinking session. `_normalize()` reduces the field to a strict bool via `is True` (not truthiness), so a malformed non-bool like `enabled: 1` does not masquerade as the documented value, and an `isinstance(dict)` guard mirrors every other nested-object read so `thinking: "yes"` (string) can't crash. Pairs naturally with `effort` — both describe how the model is reasoning this session. Color is themeable via the `thinking` key (default magenta). Opt-in via custom theme initially, matching the rollout of `pr` / `cost_breakdown`; may promote to a default-theme section if user feedback is positive.
+
+### Notes
+
+- **Both features are pure upstream-field consumers.** No new heuristics, no config parsing of undocumented files — they read documented stdin fields and degrade gracefully when absent, exactly like every other section. Verified against the live Claude Code statusline schema as of 2026-06-27. The audit that motivated this release also confirmed the `COLUMNS`/`LINES` env handoff is already consumed by the width-detection chain and `context_window.remaining_percentage` is already derivable — neither needed new code.
+- **`thinking` and `pr` (with review state) are dropped early under width pressure** — both are listed in `_COMPACT_DROP` (which feeds the narrow and precise-fit drop priorities) so they shed before essential sections on narrow terminals. The bar/tokens/cost/branch identity is never dropped.
+- All 562 tests pass (was 549, +13 net new in `tests/test_all.py`: 9 for `pr.review_state` (enum accept, case-insensitivity across single- and multi-word states, unknown/non-string reject, per-state token render, bare-PR fallback, render-map↔enum sync guard, per-state theme color override applied, null-override fall-through to default color, and `_COMPACT_DROP` membership) and 4 for `thinking` (strict-True normalize, renders-when-enabled, hidden for off/absent/malformed, and `_COMPACT_DROP` membership)). Pure stdlib, no dependency changes.
+- Closes the `pr.review_state` rendering follow-up from [#99](https://github.com/mkalkere/claude-statusline/issues/99).
+
 ## [0.7.0] - 2026-06-05
 
 ### Added
