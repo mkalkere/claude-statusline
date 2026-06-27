@@ -247,6 +247,17 @@ On a fresh 5h or 7d window with no usage data yet, Claude Code returns the `rese
 
 Tests that install/uninstall the statusline via `--install` and `--uninstall` can leave `~/.claude/settings.json` empty or partially written if the test process is killed. The install command is defensive (preserves other keys, atomic write via `os.replace()`), but a killed process between read and write can corrupt. After running install/uninstall tests, verify your own settings file: `cat ~/.claude/settings.json | python -m json.tool`.
 
+### Test isolation from the real settings file (#96)
+
+During v0.6.1 verification the maintainer's real `~/.claude/settings.json` was found with `statusLine: null` after a test run — a test had written to the real file instead of a tmpfile. v0.8.1 hardened this two ways, both at module scope in `tests/test_all.py`:
+
+1. **`_settings_path()` honors `CLAUDE_STATUSLINE_SETTINGS_PATH`** (same convention as `CLAUDE_STATUSLINE_WIDTH`). `setUpModule()` points it at a throwaway temp file for the whole run, so even a test that forgets to monkey-patch `cli._settings_path` writes there, never to the real file. This is the single chokepoint all settings I/O flows through.
+2. **Regression guard.** `setUpModule()` snapshots a hash of the real file before any test runs; `tearDownModule()` asserts it is unchanged afterward — the guard that would have caught the original incident. The assertion lives in `tearDownModule`, **not** a test method, because that provably runs after *every* test, including the uninstall tests (which sort alphabetically after any guard test method would and were the suspected culprit). The snapshot is tri-state — hash / `None` if genuinely absent / a distinct sentinel if present-but-unreadable — so a transient read failure at snapshot time can't mask a later deletion. `TestSettingsIsolation` pins the supporting contracts (`_settings_path()` override behavior + an end-to-end unpatched-`cmd_install` write check).
+
+Gotchas when touching this area:
+- **Subprocess tests that control the settings location via `HOME`/`USERPROFILE` must `env.pop("CLAUDE_STATUSLINE_SETTINGS_PATH", None)`** before spawning — the override intentionally wins over `expanduser("~")`, so leaving it set points the child at the empty redirect file (`installed=false`, exit 1). See `test_subprocess_invocation_returns_correct_exit_code`.
+- **Never exercise a real write path (`cmd_install`/`cmd_uninstall`) outside a redirected env, and never via `python /path/script.py`** — running a script by path puts the script's dir (not the project root) on `sys.path[0]`, so it imports the *installed* package (which may predate the override) instead of your local source, and the write hits the real file. Use `python - <<'EOF'` (stdin) from the project root, or set the env override first.
+
 ### Transcript path security
 
 `transcript_path` comes from external JSON on stdin. A malicious or buggy upstream could supply an arbitrary path. Defense: `get_session_activity_count` rejects any path whose `os.path.realpath` resolves outside `~/.claude/`. Use `_CLAUDE_DIR_REAL` for the comparison so users with a symlinked `~/.claude/` (common on macOS / NAS setups) are not silently locked out.
