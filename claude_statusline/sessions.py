@@ -4,6 +4,7 @@ Reads ~/.claude/ data files to provide aggregate metrics across sessions.
 Uses file-based caching to avoid expensive filesystem scans on every render.
 """
 
+import datetime
 import hashlib
 import json
 import os
@@ -14,6 +15,13 @@ import time
 _CACHE_TTL = 30  # seconds — longer than git cache since this is heavier
 _TOOL_CACHE_TTL = 10  # seconds — shorter for active session metrics
 _ACTIVITY_CACHE_TTL = 5  # seconds — shortest, this metric is "right now"
+# cache_age (#92) measures wall-clock time since the last assistant
+# message. Cache the *timestamp* (not the derived age) for 5s: the
+# timestamp is stable between reads, and the renderer recomputes the
+# age from it against the current clock every render, so the displayed
+# value stays live-to-the-second even while the underlying transcript
+# read is cached. Matches the activity metric's "right now" TTL.
+_CACHE_AGE_CACHE_TTL = 5
 # Longer TTL for the "gave up — turn larger than 1 MiB window" case.
 # This is a per-render 1 MiB tail read that will keep failing the
 # same way until the user sends the next prompt. 30s caps the worst-
@@ -345,6 +353,178 @@ def get_session_activity_count(transcript_path):
     elif status.startswith("no user message in 1 MiB"):
         _write_cache(gave_up_key, {"count": 0})
     return count
+
+
+def get_last_assistant_timestamp_ms(transcript_path):
+    """Epoch-ms timestamp of the most recent assistant message, or None.
+
+    Powers the ``cache_age`` section (#92): "how long since the last
+    assistant turn." The renderer derives a live age by subtracting
+    this from the current clock every render, which is why we cache the
+    *timestamp* rather than the age — the timestamp is stable between
+    transcript reads, so a 5s read cache never makes the displayed age
+    stale (the age is recomputed against ``time.time()`` each render).
+
+    Reads only the tail of the transcript (same windowing, path
+    validation, and error-swallowing contract as
+    :func:`get_session_activity_count`). Returns None — never raises —
+    on any degrade path (invalid/missing/unreadable file, no assistant
+    message in the tail window, unparseable timestamp), so the renderer
+    hides the section rather than crash.
+
+    Args:
+        transcript_path: Path to the session transcript JSONL from
+            Claude Code's stdin JSON. Validated as a real regular file
+            under ~/.claude/ before any read, identical to the
+            activity reader's defense-in-depth check.
+
+    Returns:
+        int epoch-milliseconds of the newest assistant message's
+        ``timestamp`` field, or None when unavailable. Future-dated or
+        otherwise implausible timestamps are returned as-is; the
+        renderer clamps a negative age to hidden so a clock skew can't
+        render a nonsense ``cache_age:-3s``.
+    """
+    if not transcript_path or not isinstance(transcript_path, str):
+        return None
+
+    # Defense-in-depth path check — identical rationale to
+    # get_session_activity_count: transcript_path is external input, so
+    # require the resolved real path to live under ~/.claude/ (resolved
+    # on both sides so relocated-via-symlink layouts still work).
+    try:
+        real = os.path.realpath(transcript_path)
+        if not real.startswith(_CLAUDE_DIR_REAL + os.sep) and real != _CLAUDE_DIR_REAL:
+            return None
+    except (OSError, ValueError):
+        return None
+
+    path_hash = hashlib.md5(
+        transcript_path.encode("utf-8", errors="replace")
+    ).hexdigest()[:12]
+    cache_key = "cache_age_ts_{}".format(path_hash)
+
+    cached = _read_cache(cache_key, ttl=_CACHE_AGE_CACHE_TTL)
+    if cached is not None:
+        # A cached miss (no assistant message found) is stored as the
+        # sentinel {"ts": None} so we don't re-read the tail every
+        # render during a long user-only pause. `.get` returns None for
+        # both "sentinel miss" and "malformed cache entry" — both mean
+        # "hide," so collapsing them is correct.
+        return cached.get("ts")
+
+    ts_ms = _last_assistant_timestamp_from_tail(transcript_path)
+    # Cache both hit and miss for the short TTL: a miss is a legitimate
+    # steady state (user hasn't sent a prompt whose response reached the
+    # tail window yet) and re-reading the tail every render for 5s buys
+    # nothing. Unlike the activity gave-up path, there's no 1 MiB retry
+    # here, so the read is always cheap and a flat 5s TTL is sufficient.
+    _write_cache(cache_key, {"ts": ts_ms})
+    return ts_ms
+
+
+def _last_assistant_timestamp_from_tail(transcript_path):
+    """Tail-read the transcript and return the newest assistant
+    message's epoch-ms timestamp, or None.
+
+    Pure function (no caching) — the caching wrapper is
+    :func:`get_last_assistant_timestamp_ms`. Walks the tail lines
+    backwards and returns the first assistant message's parsed
+    ``timestamp``. Uses the same single 64 KiB tail as the activity
+    reader's first pass: the most-recent assistant message is, by
+    definition, at the very end of the file, so a small tail always
+    reaches it (unlike the activity reader, which must reach back to a
+    possibly-distant *user* message and therefore needs the 1 MiB
+    retry). No expanded retry is needed here.
+    """
+    try:
+        if not os.path.isfile(transcript_path):
+            return None
+        size = os.path.getsize(transcript_path)
+        if size <= 0:
+            return None
+    except (OSError, IOError):
+        return None
+
+    try:
+        start = max(0, size - _TRANSCRIPT_TAIL_BYTES)
+        with open(transcript_path, "rb") as f:
+            f.seek(start)
+            chunk = f.read()
+    except (OSError, IOError):
+        return None
+
+    try:
+        text = chunk.decode("utf-8", errors="replace")
+    except (UnicodeDecodeError, AttributeError):
+        return None
+
+    lines = text.split("\n")
+    # Drop the leading partial line when we started mid-file (same guard
+    # as _parse_transcript_tail): if the chunk doesn't begin at a line
+    # boundary, lines[0] is a truncated fragment we must not parse.
+    if start > 0 and lines and not chunk.startswith(b"\n"):
+        lines = lines[1:]
+
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i]
+        # Cheap pre-filter before json.loads on every line: an
+        # assistant message line must mention both keys. Avoids parsing
+        # user/tool_result lines that dominate a transcript.
+        if '"timestamp"' not in line or '"assistant"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        # role lives on the inner message object on most schema
+        # versions, with an outer-envelope fallback (mirrors the
+        # activity reader's dual-location handling).
+        msg = entry.get("message")
+        is_assistant = (
+            (isinstance(msg, dict) and msg.get("role") == "assistant")
+            or entry.get("role") == "assistant"
+        )
+        if not is_assistant:
+            continue
+        ts = _parse_iso8601_ms(entry.get("timestamp"))
+        if ts is not None:
+            return ts
+    return None
+
+
+def _parse_iso8601_ms(value):
+    """Parse a Claude Code transcript ISO-8601 timestamp to epoch ms.
+
+    Transcript timestamps look like ``2026-07-02T23:00:49.920Z`` (UTC,
+    trailing Z). Returns int epoch-milliseconds, or None for any input
+    that isn't a well-formed string timestamp — a non-string, empty
+    string, or unparseable value all degrade to None so the caller
+    hides the section rather than crash.
+
+    Uses ``datetime.fromisoformat`` (stdlib, no deps). Python 3.11+
+    parses the trailing ``Z`` directly; for 3.10 and earlier we swap
+    ``Z`` for ``+00:00`` first, since ``fromisoformat`` there raises
+    ``ValueError`` on a bare ``Z``. This project supports Python 3.8+
+    (see ``requires-python`` in pyproject.toml), so the swap is
+    REQUIRED — not optional — for correct parsing on 3.8–3.10.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        dt = datetime.datetime.fromisoformat(text)
+        # A naive timestamp (no offset) is assumed UTC — Claude Code
+        # always emits the trailing Z, so this only guards a malformed
+        # upstream that dropped it; treating it as UTC is the least-
+        # surprising degrade.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def _count_activity_from_transcript(transcript_path):

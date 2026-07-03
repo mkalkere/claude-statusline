@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-02
+
+### Added
+
+- **`cache_age` section** ([#92](https://github.com/mkalkere/claude-statusline/issues/92)) — renders `cache_age:4m12s`, the wall-clock time since the last assistant turn. Useful as a cue for how long a long-running task has been going and, in particular, whether Anthropic's ~5-minute prompt cache is still warm. Past the cache TTL (`_CACHE_AGE_WARN_MS`, 5 min) the chip switches to a warning color to flag that the cache has likely gone cold; under it, a muted default color. Opt-in via custom theme, matching the rollout of `thinking` / `pr` / `cost_breakdown`.
+
+  - **Reads real, already-present data.** The age is derived from the `timestamp` field of the most recent assistant message in `transcript_path` — the same stdin field the `activity` section already tail-reads. No new stdin dependency, no undocumented-file parsing.
+
+  - **Reuses the proven transcript reader.** `get_last_assistant_timestamp_ms()` mirrors `get_session_activity_count()`'s defense-in-depth exactly: the `transcript_path` must resolve (via `realpath`, symlink-aware) under `~/.claude/` before any read; only the last 64 KiB is tail-read (the newest assistant message is always at EOF, so no 1 MiB retry is needed as it is for the activity reader's backward walk to a *user* message); and every error path — invalid/non-string path, missing/empty/unreadable file, no assistant message in the window, unparseable timestamp — degrades to `None` so the section hides rather than crashes.
+
+  - **Live-to-the-second despite caching.** The reader caches the *timestamp* (not the derived age) for 5 s, and the renderer recomputes the age against the current clock every render — so the displayed value ticks up smoothly while the transcript read stays cached. A cache *miss* is cached too (as a `{"ts": None}` sentinel) so a long user-only pause doesn't re-tail the file every render.
+
+  - **Clock-skew safe.** A future-dated last message (skew between the machine that wrote the transcript and the one rendering) yields a negative age; the section hides rather than render a nonsense `cache_age:-3s`. `--doctor` reports the future-dated case explicitly so a silently-hidden section still leaves a diagnostic trail.
+
+  - **Python 3.8+ safe timestamp parse.** `_parse_iso8601_ms()` swaps a trailing `Z` for `+00:00` before `datetime.fromisoformat()` so it parses the transcript's `2026-07-02T23:00:49.920Z` form on Python 3.8–3.10 (where `fromisoformat` doesn't accept `Z`) as well as 3.11+. A naive timestamp with no offset is assumed UTC rather than crashed on.
+
+### Notes
+
+- **Pure upstream-field consumer**, consistent with `thinking` / `pr`: reads a documented stdin-derived field and degrades gracefully when absent. No new heuristics, no dependency changes, pure stdlib.
+- **Dropped early under width pressure** — `cache_age` is listed in `_COMPACT_DROP` (which feeds the narrow and precise-fit drop priorities) so it sheds before essential sections on narrow terminals. The bar/tokens/cost/branch identity is never dropped.
+- **`--doctor` gained a `Cache age:` probe line** alongside the existing `Activity:`/`Parse:` transcript diagnostics, so users debugging a missing `cache_age` section can see whether the last assistant timestamp is extractable and what age it yields.
+- All 585 tests pass (was 564, +21 new: ISO-8601 parser edge cases, the tail extractor with path-validation / caching / schema-fallback coverage, and end-to-end render including the warn threshold, future-timestamp hiding, and droppable membership). Pure stdlib, no dependency changes.
+- Closes [#92](https://github.com/mkalkere/claude-statusline/issues/92).
+
 ## [0.8.1] - 2026-06-27
 
 ### Fixed
