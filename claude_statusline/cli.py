@@ -33,13 +33,21 @@ from .sessions import (
     _canonical_effort, _count_activity_with_status,
     _read_cache, _write_cache,
     get_budget_config, get_clickable_links_enabled, get_compaction_threshold,
-    get_disabled_sections, get_effort_level, get_session_activity_count,
+    get_disabled_sections, get_effort_level, get_last_assistant_timestamp_ms,
+    get_session_activity_count,
     get_session_tool_count, get_today_session_count,
 )
 from .themes import THEMES, get_theme
 
 # Percentage of context window usage that triggers the !CTX warning.
 CTX_WARNING_THRESHOLD_PCT = 85
+
+# cache_age (#92): milliseconds since the last assistant turn beyond
+# which the section renders in a warning color, signalling the prompt
+# cache has likely gone cold. Anthropic's prompt cache TTL is ~5
+# minutes; we mirror that default here. This is a display heuristic
+# only — it never changes behavior, just the color the user sees.
+_CACHE_AGE_WARN_MS = 5 * 60 * 1000
 
 # Documented review states for pr.review_state (statusline doc enum
 # as of 2026-06-04). Used by _normalize to membership-check the
@@ -857,6 +865,40 @@ def _render_sections_named(n, order, theme):
                         + colorize(str(act_count), act_color)
                     )
 
+        elif section == "cache_age":
+            # Time since the most recent assistant message (#92) — a cue
+            # for how long a task has been running / whether the ~5-min
+            # prompt cache is still warm. Reads the transcript tail via
+            # the same cached, path-validated reader as `activity`.
+            #
+            # We recompute the age from the (cached) timestamp against
+            # the current clock on every render, so the displayed value
+            # stays live-to-the-second even though the transcript read
+            # itself is cached for 5s. Past _CACHE_AGE_WARN_MS the chip
+            # switches to a warning color (cache likely cold).
+            #
+            # Hidden when: no transcript, no assistant message in the
+            # tail (ts None), or the age is negative — a future-dated
+            # timestamp (clock skew between the machine that wrote the
+            # transcript and this render) would otherwise produce a
+            # nonsense `cache_age:-3s`, so we suppress rather than show
+            # it. Color falls through via _first() so a theme setting
+            # `cache_age`/`cache_age_warn` to null degrades gracefully.
+            transcript = n.get("transcript_path", "")
+            if transcript:
+                ts_ms = get_last_assistant_timestamp_ms(transcript)
+                if ts_ms is not None:
+                    age_ms = int(time.time() * 1000) - ts_ms
+                    if age_ms >= 0:
+                        if age_ms >= _CACHE_AGE_WARN_MS:
+                            cagec = _first(tc.get("cache_age_warn"), YELLOW)
+                        else:
+                            cagec = _first(tc.get("cache_age"), BRIGHT_BLACK)
+                        sections.append(
+                            colorize("cache_age:", tc["label"])
+                            + colorize(fmt_duration(age_ms), cagec)
+                        )
+
         elif section == "sessions":
             count = get_today_session_count()
             if count > 0:
@@ -1106,9 +1148,10 @@ _RELAXED_MIN_CC_VERSION = (2, 1, 141)
 # Below _FULL_LAYOUT_MIN_COLS: drop least-essential sections progressively.
 _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
-    "sessions", "tools", "activity", "latency", "context_size", "session_name",
-    "rate_limits", "output_style", "added_dirs", "effort", "git_worktree",
-    "speed", "git_state", "commit_age", "cost_breakdown", "pr", "thinking",
+    "sessions", "tools", "activity", "cache_age", "latency", "context_size",
+    "session_name", "rate_limits", "output_style", "added_dirs", "effort",
+    "git_worktree", "speed", "git_state", "commit_age", "cost_breakdown",
+    "pr", "thinking",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",
@@ -2504,6 +2547,22 @@ def cmd_doctor():
             count, status = _count_activity_with_status(most_recent)
             print("  Activity:    {} tool_use(s) since last user message".format(count))
             print("  Parse:       {}".format(status))
+            # Probe the cache_age reader too so users debugging a
+            # missing `cache_age` section can see whether the last
+            # assistant timestamp is extractable and what age it
+            # yields. A future-dated timestamp (clock skew) is reported
+            # explicitly since the renderer hides it — otherwise the
+            # section would silently vanish with no diagnostic trail.
+            ts_ms = get_last_assistant_timestamp_ms(most_recent)
+            if ts_ms is None:
+                print("  Cache age:   no assistant timestamp in tail window")
+            else:
+                age_s = time.time() - ts_ms / 1000.0
+                if age_s < 0:
+                    print("  Cache age:   last assistant message is future-dated "
+                          "by {:.0f}s (clock skew) — section hidden".format(-age_s))
+                else:
+                    print("  Cache age:   {:.0f}s since last assistant message".format(age_s))
         except (OSError, ValueError) as exc:
             # Narrow to expected failure modes; programmer errors
             # (AttributeError, ImportError) bubble up so they're seen.

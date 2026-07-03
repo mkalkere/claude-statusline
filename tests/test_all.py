@@ -884,6 +884,39 @@ class TestCLISubprocess(unittest.TestCase):
         self.assertIn("Python:", result.stdout)
         self.assertIn("OS:", result.stdout)
 
+    def test_doctor_cache_age_probe(self):
+        """--doctor reports a `Cache age:` line derived from the most
+        recent transcript under ~/.claude/projects/. We plant a fixture
+        with a FUTURE mtime so it is deterministically selected as the
+        most-recent file, then assert the normal-age wording. Cleaned up
+        in finally so the user's real ~/.claude/projects/ is untouched.
+        """
+        import shutil as shutil_mod
+        from claude_statusline import sessions as sessions_mod
+        projects = os.path.join(sessions_mod._CLAUDE_DIR, "projects")
+        os.makedirs(projects, exist_ok=True)
+        fixture_dir = tempfile.mkdtemp(prefix="cacheage-doctor-", dir=projects)
+        fixture = os.path.join(fixture_dir, "session.jsonl")
+        ts = time.strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - 42))
+        try:
+            with open(fixture, "w", encoding="utf-8", newline="") as f:
+                f.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": []},
+                    "timestamp": ts}) + "\n")
+            # Bump mtime into the future so the doctor's most-recent
+            # selection deterministically picks this fixture regardless
+            # of what else lives under ~/.claude/projects/.
+            future = time.time() + 3600
+            os.utime(fixture, (future, future))
+            result = self._run(["--doctor"])
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("Cache age:", result.stdout)
+            self.assertIn("since last assistant message", result.stdout)
+        finally:
+            shutil_mod.rmtree(fixture_dir, ignore_errors=True)
+
 
 # ─── Issue #6: API latency ────────────────────────────────────────────
 
@@ -6666,6 +6699,402 @@ class TestThinkingSection(unittest.TestCase):
         self.assertIn("thinking", _COMPACT_DROP)
         self.assertIn("thinking", _NARROW_DROP)
         self.assertIn("thinking", _FIT_DROP_PRIORITY)
+
+
+class TestParseIso8601Ms(unittest.TestCase):
+    """`_parse_iso8601_ms` converts Claude Code transcript timestamps
+    (ISO-8601 UTC with trailing Z) to epoch ms, degrading to None for
+    any malformed input rather than raising."""
+
+    def test_parses_z_suffixed_utc(self):
+        from claude_statusline.sessions import _parse_iso8601_ms
+        # 2026-07-02T23:00:49.920Z — a real transcript-shaped value.
+        ms = _parse_iso8601_ms("2026-07-02T23:00:49.920Z")
+        self.assertIsNotNone(ms)
+        # Round-trips back to the same UTC wall-clock second.
+        got = time.gmtime(ms / 1000.0)
+        self.assertEqual((got.tm_year, got.tm_mon, got.tm_mday,
+                          got.tm_hour, got.tm_min, got.tm_sec),
+                         (2026, 7, 2, 23, 0, 49))
+
+    def test_parses_offset_form(self):
+        from claude_statusline.sessions import _parse_iso8601_ms
+        # Explicit +00:00 offset (some schema versions) must also parse.
+        self.assertIsNotNone(_parse_iso8601_ms("2026-07-02T23:00:49+00:00"))
+
+    def test_naive_timestamp_assumed_utc(self):
+        """A timestamp with no offset (malformed upstream that dropped
+        the Z) is assumed UTC, not crashed on."""
+        from claude_statusline.sessions import _parse_iso8601_ms
+        z = _parse_iso8601_ms("2026-07-02T23:00:49.920Z")
+        naive = _parse_iso8601_ms("2026-07-02T23:00:49.920")
+        self.assertIsNotNone(naive)
+        self.assertEqual(z, naive)
+
+    def test_malformed_returns_none(self):
+        from claude_statusline.sessions import _parse_iso8601_ms
+        for bad in (None, "", "not-a-date", 42, [], {}, "2026-13-99T99:99Z",
+                    True, 1783046343072):
+            self.assertIsNone(_parse_iso8601_ms(bad),
+                "_parse_iso8601_ms({!r}) must be None".format(bad))
+
+
+class TestLastAssistantTimestamp(unittest.TestCase):
+    """`get_last_assistant_timestamp_ms` reads the transcript tail and
+    returns the newest assistant message's epoch-ms timestamp, mirroring
+    the activity reader's path-validation, tail-read, and caching."""
+
+    def _write_transcript(self, lines):
+        f = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".jsonl",
+            delete=False, newline="", dir=self._test_dir,
+        )
+        for entry in lines:
+            f.write(json.dumps(entry) + "\n")
+        f.close()
+        self._created_paths.append(f.name)
+        return f.name
+
+    def _iso(self, secs_ago):
+        return time.strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z",
+            time.gmtime(time.time() - secs_ago))
+
+    def setUp(self):
+        import shutil as shutil_mod
+        from claude_statusline import sessions as sessions_mod
+        self._shutil_mod = shutil_mod
+        self._sessions_mod = sessions_mod
+        os.makedirs(sessions_mod._CLAUDE_DIR, exist_ok=True)
+        self._test_dir = tempfile.mkdtemp(
+            prefix="claude-status-cacheage-", dir=sessions_mod._CLAUDE_DIR,
+        )
+        self._created_paths = []
+        self._clear_cache()
+
+    def _clear_cache(self):
+        # cache_age uses its own key prefix; clear it so the 5s TTL
+        # doesn't leak between tests.
+        try:
+            cache_dir = self._sessions_mod._cache_dir()
+            if os.path.isdir(cache_dir):
+                for name in os.listdir(cache_dir):
+                    if name.startswith("cache_age_ts_"):
+                        try:
+                            os.remove(os.path.join(cache_dir, name))
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+
+    def tearDown(self):
+        self._shutil_mod.rmtree(self._test_dir, ignore_errors=True)
+
+    def test_returns_newest_assistant_timestamp(self):
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        path = self._write_transcript([
+            {"type": "user", "message": {"role": "user", "content": "hi"},
+             "timestamp": self._iso(300)},
+            {"type": "assistant",
+             "message": {"role": "assistant", "content": []},
+             "timestamp": self._iso(200)},
+            {"type": "assistant",
+             "message": {"role": "assistant", "content": []},
+             "timestamp": self._iso(30)},
+        ])
+        ms = get_last_assistant_timestamp_ms(path)
+        self.assertIsNotNone(ms)
+        # ~30s ago, not the 200s-ago earlier assistant line.
+        age = time.time() - ms / 1000.0
+        self.assertTrue(20 <= age <= 45, "expected ~30s age, got {}".format(age))
+
+    def test_outer_envelope_role_fallback(self):
+        """Some schema versions put role on the outer envelope, not the
+        inner message. The reader must handle both."""
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        path = self._write_transcript([
+            {"role": "assistant", "timestamp": self._iso(15)},
+        ])
+        self.assertIsNotNone(get_last_assistant_timestamp_ms(path))
+
+    def test_no_assistant_message_returns_none(self):
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        path = self._write_transcript([
+            {"type": "user", "message": {"role": "user", "content": "hi"},
+             "timestamp": self._iso(10)},
+        ])
+        self.assertIsNone(get_last_assistant_timestamp_ms(path))
+
+    def test_missing_timestamp_field_skipped(self):
+        """An assistant line missing the timestamp key is filtered by
+        the cheap substring pre-filter; the reader keeps walking back
+        for an earlier one that has one."""
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        path = self._write_transcript([
+            {"type": "assistant",
+             "message": {"role": "assistant", "content": []},
+             "timestamp": self._iso(50)},
+            {"type": "assistant",
+             "message": {"role": "assistant", "content": []}},  # no ts key
+        ])
+        ms = get_last_assistant_timestamp_ms(path)
+        # Falls back to the earlier line's timestamp (~50s ago).
+        self.assertIsNotNone(ms)
+        age = time.time() - ms / 1000.0
+        self.assertTrue(40 <= age <= 65, "expected ~50s, got {}".format(age))
+
+    def test_unparseable_timestamp_falls_through(self):
+        """A newest assistant line whose timestamp is PRESENT but
+        unparseable (passes the substring pre-filter, fails
+        _parse_iso8601_ms) must fall through to the previous valid
+        assistant line — the reader's per-line continue branch."""
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        path = self._write_transcript([
+            {"type": "assistant",
+             "message": {"role": "assistant", "content": []},
+             "timestamp": self._iso(40)},
+            {"type": "assistant",
+             "message": {"role": "assistant", "content": []},
+             "timestamp": "not-a-real-timestamp"},  # present but garbage
+        ])
+        ms = get_last_assistant_timestamp_ms(path)
+        self.assertIsNotNone(ms)
+        age = time.time() - ms / 1000.0
+        self.assertTrue(30 <= age <= 55,
+                        "must fall back to the ~40s line, got {}".format(age))
+
+    def test_corrupt_and_nondict_lines_tolerated(self):
+        """A truncated/corrupt JSON line and a non-dict JSON line that
+        both slip past the substring pre-filter must be skipped, not
+        crash — the reader still finds the valid assistant line."""
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        # Write raw so we can inject malformed lines the JSON helper
+        # wouldn't produce.
+        f = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".jsonl",
+            delete=False, newline="", dir=self._test_dir,
+        )
+        f.write(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": []},
+            "timestamp": self._iso(25)}) + "\n")
+        # Non-dict JSON array carrying both pre-filter substrings.
+        f.write('["timestamp", "assistant"]\n')
+        # Truncated object with both substrings — json.loads must raise.
+        f.write('{"timestamp": "2026-01-01T00:00:00.000Z", "assistant"\n')
+        f.close()
+        self._created_paths.append(f.name)
+        ms = get_last_assistant_timestamp_ms(f.name)
+        self.assertIsNotNone(ms)
+        age = time.time() - ms / 1000.0
+        self.assertTrue(15 <= age <= 40,
+                        "must skip garbage and find the ~25s line, got {}".format(age))
+
+    def test_cached_miss_sentinel(self):
+        """A cache MISS (no assistant message) is stored as the
+        {"ts": None} sentinel so a subsequent render answers None from
+        cache instead of re-tailing the file — the branch that avoids
+        re-reading on every render during a long user-only pause."""
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        path = self._write_transcript([
+            {"type": "user", "message": {"role": "user", "content": "hi"},
+             "timestamp": self._iso(5)},
+        ])
+        self.assertIsNone(get_last_assistant_timestamp_ms(path))
+        # Now append a valid assistant line, but the miss is cached for
+        # 5s — the second call must STILL return None (proving it read
+        # the sentinel, not the freshly-appended line).
+        with open(path, "a", encoding="utf-8", newline="") as fh:
+            fh.write(json.dumps({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": []},
+                "timestamp": self._iso(1)}) + "\n")
+        self.assertIsNone(get_last_assistant_timestamp_ms(path),
+                          "miss sentinel must suppress the re-read within TTL")
+
+    def test_invalid_and_nonstring_paths(self):
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        for bad in (None, "", 123, [], {}, "relative/path.jsonl"):
+            self.assertIsNone(get_last_assistant_timestamp_ms(bad),
+                "path {!r} must return None".format(bad))
+
+    def test_path_outside_claude_dir_rejected(self):
+        """Defense-in-depth: a transcript path resolving outside
+        ~/.claude/ must be rejected even if the file exists."""
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        outside = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False)
+        outside.write(json.dumps(
+            {"role": "assistant", "timestamp": self._iso(5)}) + "\n")
+        outside.close()
+        try:
+            self.assertIsNone(get_last_assistant_timestamp_ms(outside.name))
+        finally:
+            os.remove(outside.name)
+
+    def test_missing_file_returns_none(self):
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        ghost = os.path.join(self._test_dir, "does-not-exist.jsonl")
+        self.assertIsNone(get_last_assistant_timestamp_ms(ghost))
+
+    def test_empty_file_returns_none(self):
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        path = self._write_transcript([])  # zero lines → empty file
+        self.assertIsNone(get_last_assistant_timestamp_ms(path))
+
+    def test_result_is_cached(self):
+        """Second call within the TTL returns the cached value even if
+        the file is deleted underneath us."""
+        from claude_statusline.sessions import get_last_assistant_timestamp_ms
+        path = self._write_transcript([
+            {"role": "assistant", "timestamp": self._iso(10)},
+        ])
+        first = get_last_assistant_timestamp_ms(path)
+        self.assertIsNotNone(first)
+        os.remove(path)
+        # File gone, but the 5s cache should still answer.
+        second = get_last_assistant_timestamp_ms(path)
+        self.assertEqual(first, second)
+
+
+class TestCacheAgeSection(unittest.TestCase):
+    """End-to-end `cache_age` section rendering: shows time since the
+    last assistant turn, warns past the ~5-min prompt-cache TTL, and
+    hides on every degrade path (no transcript, no timestamp, future
+    timestamp)."""
+
+    def _plain(self, output):
+        return re.sub(r"\x1b\[[0-9;]*m", "", output)
+
+    def _write_transcript(self, secs_ago):
+        from claude_statusline import sessions as sessions_mod
+        os.makedirs(sessions_mod._CLAUDE_DIR, exist_ok=True)
+        d = tempfile.mkdtemp(
+            prefix="claude-status-cacheage-r-", dir=sessions_mod._CLAUDE_DIR)
+        self._dirs.append(d)
+        path = os.path.join(d, "t.jsonl")
+        ts = time.strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - secs_ago))
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(json.dumps(
+                {"type": "assistant",
+                 "message": {"role": "assistant", "content": []},
+                 "timestamp": ts}) + "\n")
+        return path
+
+    def setUp(self):
+        import shutil as shutil_mod
+        import claude_statusline.cli as cli_mod
+        from claude_statusline import sessions as sessions_mod
+        self._shutil_mod = shutil_mod
+        self._cli_mod = cli_mod
+        self._dirs = []
+        self._orig_line2 = THEMES["default"]["line2"]
+        self._orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        THEMES["default"]["line2"] = ["cache_age", "branch"]
+        # Wide COLUMNS so the compact-droppable cache_age isn't shed by
+        # the responsive layout (it lives in _COMPACT_DROP).
+        self._orig_cols = os.environ.get("COLUMNS")
+        os.environ["COLUMNS"] = "300"
+        # Clear the cache_age cache each test (5s TTL cross-contamination).
+        try:
+            cache_dir = sessions_mod._cache_dir()
+            if os.path.isdir(cache_dir):
+                for name in os.listdir(cache_dir):
+                    if name.startswith("cache_age_ts_"):
+                        os.remove(os.path.join(cache_dir, name))
+        except OSError:
+            pass
+
+    def tearDown(self):
+        THEMES["default"]["line2"] = self._orig_line2
+        self._cli_mod.get_branch = self._orig_branch
+        if self._orig_cols is None:
+            os.environ.pop("COLUMNS", None)
+        else:
+            os.environ["COLUMNS"] = self._orig_cols
+        for d in self._dirs:
+            self._shutil_mod.rmtree(d, ignore_errors=True)
+
+    def _render(self, data):
+        return self._plain(self._cli_mod.render(data, "default"))
+
+    def test_renders_recent_age(self):
+        # ~90s ago. Assert a tolerance band, not an exact string: the
+        # fixture floors the timestamp to the whole second and the age
+        # is recomputed against the wall clock at render time, so a
+        # loaded machine can legitimately read 1m30s or 1m31s. An exact
+        # "1m30s" assertion would flake (determinism is a project rule).
+        path = self._write_transcript(90)
+        out = self._render({"git_branch": "main", "transcript_path": path})
+        m = re.search(r"cache_age:1m(\d{2})s", out)
+        self.assertIsNotNone(m, out)
+        self.assertTrue(29 <= int(m.group(1)) <= 32,
+                        "expected ~1m30s, got {}".format(m.group(0)))
+
+    def test_seconds_only_format(self):
+        path = self._write_transcript(12)
+        out = self._render({"git_branch": "main", "transcript_path": path})
+        m = re.search(r"cache_age:(\d+)s", out)
+        self.assertIsNotNone(m, out)
+        self.assertTrue(8 <= int(m.group(1)) <= 20)
+
+    def test_warn_color_past_ttl(self):
+        """Past ~5 min the chip uses the warn color (YELLOW); under it,
+        the muted default (BRIGHT_BLACK)."""
+        cold = self._cli_mod.render(
+            {"git_branch": "main", "transcript_path": self._write_transcript(400)},
+            "default")
+        self.assertIn(YELLOW, cold)
+        # Fresh cache dir state for the warm render.
+        self.tearDown(); self.setUp()
+        warm = self._cli_mod.render(
+            {"git_branch": "main", "transcript_path": self._write_transcript(30)},
+            "default")
+        self.assertIn("cache_age:", self._plain(warm))
+        # Warm render must NOT carry the warn (YELLOW) color and MUST
+        # use the muted default (BRIGHT_BLACK). Asserting both directions
+        # pins the threshold: a regression that always emitted the warn
+        # color would still pass a mere presence check on the warm side.
+        # Safe because this isolated line2 (cache_age + branch, branch is
+        # GREEN, no cost data) has no other YELLOW source.
+        self.assertNotIn(YELLOW, warm)
+        self.assertIn(BRIGHT_BLACK, warm)
+
+    def test_hidden_without_transcript(self):
+        out = self._render({"git_branch": "main"})
+        self.assertNotIn("cache_age", out)
+
+    def test_hidden_when_no_assistant_message(self):
+        from claude_statusline import sessions as sessions_mod
+        os.makedirs(sessions_mod._CLAUDE_DIR, exist_ok=True)
+        d = tempfile.mkdtemp(dir=sessions_mod._CLAUDE_DIR)
+        self._dirs.append(d)
+        path = os.path.join(d, "t.jsonl")
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(json.dumps(
+                {"role": "user", "timestamp": "2026-01-01T00:00:00.000Z"}) + "\n")
+        out = self._render({"git_branch": "main", "transcript_path": path})
+        self.assertNotIn("cache_age", out)
+
+    def test_future_timestamp_hidden(self):
+        """A future-dated last message (clock skew) yields a negative
+        age; the section hides rather than render `cache_age:-3s`."""
+        path = self._write_transcript(-120)  # 2 minutes in the FUTURE
+        out = self._render({"git_branch": "main", "transcript_path": path})
+        self.assertNotIn("cache_age", out)
+
+    def test_bad_path_hidden_no_crash(self):
+        out = self._render({"git_branch": "main", "transcript_path": "/etc/passwd"})
+        self.assertNotIn("cache_age", out)
+
+    def test_cache_age_is_compact_droppable(self):
+        from claude_statusline.cli import (
+            _COMPACT_DROP, _NARROW_DROP, _FIT_DROP_PRIORITY)
+        self.assertIn("cache_age", _COMPACT_DROP)
+        self.assertIn("cache_age", _NARROW_DROP)
+        self.assertIn("cache_age", _FIT_DROP_PRIORITY)
 
 
 class TestCostBreakdownSection(unittest.TestCase):

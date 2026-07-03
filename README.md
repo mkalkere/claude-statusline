@@ -69,6 +69,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Git Worktree | `gwt` | Indicator when inside a native git worktree |
 | Tool Calls | `tools:42` | Number of tool calls in current session |
 | Activity | `act:3` | Live tool-call counter for the current assistant turn — resets on each user prompt (opt-in; reads transcript tail, 5s cache, hidden when zero) |
+| Cache Age | `cache_age:4m12s` | Time since the last assistant turn — a cue for how long a task has run and whether the ~5-min prompt cache is still warm. Warning color past 5 min. Reads the last assistant message timestamp from the transcript tail (opt-in; 5s cache, hidden when unavailable). |
 | Sessions Today | `sessions:3` | How many sessions you've started today |
 | Session Name | `✦ refactor auth` | Custom session name (via `--name` or `/rename`) |
 | Vim Mode | `NORMAL` | Blue for NORMAL, green for INSERT |
