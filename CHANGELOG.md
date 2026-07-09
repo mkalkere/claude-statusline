@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-09
+
+### Added
+
+- **`cost_rate` section** — renders `~$3.6/hr`, the session's projected cost per hour, from fields already on stdin (`cost.total_cost_usd` / `cost.total_duration_ms`). Pure arithmetic: no new data sources, no price tables, no vendor pricing knowledge (the cost field already reflects whatever pricing applies). Opt-in via custom theme, matching the `thinking` / `pr` / `cache_age` rollout.
+
+  - **Session-average by design** — total cost over total wall-clock time, *including idle*. It answers "what is this session costing per hour of being open", not "what would the current burst cost if sustained". A windowed recent-activity rate needs cached samples and is deliberately deferred.
+  - **The `~` prefix marks it as a projection**, not a bill — pinned by a test so a refactor can't silently turn the chip into a bill-looking number.
+  - **Hidden whenever the projection would be meaningless**: missing/garbage/NaN/Infinity inputs, zero or negative cost, sessions under one minute (`_COST_RATE_MIN_DURATION_MS` — a session's first seconds extrapolate absurdly, e.g. a $0.05 startup burst over 8s "projects" to $22/hr), and rates below rendering resolution (< $0.0005/hr would show a zero-looking `0c/hr` chip for a positive cost).
+  - Reuses `fmt_cost` for the dollar formatting, so the rate renders with the same conventions as the cost section (cents under a penny, `$0.XX` under a dollar, one decimal under $10, whole dollars above).
+
+### Fixed
+
+- **Garbage `cost` / `duration` values could blank the whole statusline.** A malformed upstream value (`total_cost_usd: "abc"`) flowed raw into `fmt_cost`/`fmt_duration` and threw from inside `render()` — caught only by `main()`'s outer handler, which blanks the entire statusline (stderr note, empty stdout) instead of hiding one section. The money/time trio (`cost`, `duration`, `api_duration`) is now coerced through `_safe_num` at the `_normalize` chokepoint (the house pattern), so garbage becomes `None` and every consumer already treats `None` as "hide". Numeric strings (`"0.5"`) coerce and render normally (pinned end-to-end). A present-but-garbage value leaves a one-line stderr breadcrumb (`claude-status: ignoring non-numeric cost value`) so the old crash's diagnostic trail isn't lost to a silent hide; absent fields stay silent. Found by this release's own new-feature tests probing garbage inputs.
+
+- **`_safe_num` now guarantees a FINITE float or None.** Previously `float("nan")`/`float("inf")` passed through — and NaN is poison downstream: every comparison is False, so it sails through threshold checks and detonates later inside a formatter's `int()`. `json.loads` accepts bare `NaN`/`Infinity`, so this was reachable from stdin. All existing `_safe_num` call sites treat `None` as "hide/skip", so the tightened contract is strictly safer; the one pre-existing explicit `isfinite` guard (cost-category filtering) is retained as documented defense-in-depth. Two concrete crashes and one lie this closes:
+  - `rate_limits.five_hour.resets_at: Infinity` previously reached `fmt_countdown`'s `int()` → `OverflowError` (not in its except tuple) → whole line blanked. Now hidden. `fmt_countdown` also gained `OverflowError` in its own except tuple so the hole stays shut even if `_safe_num` ever loosens.
+  - `used_percentage: NaN` previously sailed past the `>= 1e6` sanity cap (NaN comparisons are all False) into `min(100, nan)` → Python returns **100** → the statusline rendered a false danger-red `5h:100%` for garbage input. Now hidden — a masked wrong output replaced by an honest absence.
+
+### Notes
+
+- No changes to any default theme — `cost_rate` must be added to a custom theme's line list to appear. No rendering changes for existing sections beyond the garbage-input hardening above (which only affects payloads that previously crashed the render).
+- 624 tests pass (+21: formatter gates including boundary/garbage/non-finite/sub-resolution matrices, exact-value pin at the 60s gate, end-to-end section rendering with the tilde pin, droppable membership, `_safe_num` finite-contract pins, garbage cost AND duration/latency/speed render coverage, and the stringified-numerics e2e pin). Pure stdlib, zero dependencies, as always.
+
 ## [0.10.0] - 2026-07-09
 
 1M-context readiness release. Claude Code's default model now ships a
