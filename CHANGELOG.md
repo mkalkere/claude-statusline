@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-07-09
+
+1M-context readiness release. Claude Code's default model now ships a
+1,000,000-token context window, which surfaced three long-dormant
+rendering blemishes — all confirmed by running the renderer against
+1M-shaped payloads before fixing. Plus a first-impression refresh:
+theme screenshots, current demo data, and PyPI metadata.
+
+### Fixed
+
+- **`(1000K)` → `(1M)` context-size label** — the `context_size` section used ad-hoc integer division (`size // 1000` + `"K"`), written when 200K was the dominant window size. A 1M window rendered as `(1000K)`. Now formatted through `fmt_tokens` — one formatting path for every token-shaped number, so K/M suffix rules stay consistent. `(200K)` and `(500K)` render exactly as before.
+
+- **`1.0M` → `1M` trailing-zero strip in `fmt_tokens`** — the K branch already stripped the trailing `.0` (`1000` → `1K`) but the M branch didn't (`1_000_000` → `1.0M`). Same strip rule applied; meaningful decimals are kept (`2.5M`, `1.5M` unchanged). With 1M-window models as the default, `1.0M`-shaped values had become an every-render sight.
+
+- **Bar color / `!CTX` badge threshold alignment** — `_bar_color` went red only above 85% while the `!CTX` danger badge fires at ≥ 85%: at exactly 85% users saw a yellow "caution" bar beside a red danger badge. The bar's red band now starts at 85 to match `CTX_WARNING_THRESHOLD_PCT`. The two constants live in different modules (circular-import constraint), so a new cross-module test (`TestBarCtxWarningAlignment`) keeps them in lockstep.
+
+### Changed
+
+- **`_demo_data()` refreshed to a current default session** — 1M context window with internally consistent numbers (42% ≈ 412K input tokens), current model display name and Claude Code version, populated `pr` block, `thinking` enabled, explicit `effort` level. `--demo` and the README now show what a new user actually sees.
+
+- **README first-impression overhaul** — theme screenshots (SVG) for all 8 themes, including the four color themes that previously had a heading and *no example at all*; a "Try it now" `uvx claude-status --demo` one-liner under the badges (zero-install preview); every stale example updated (old model names, `(200K)`, pre-1M token counts, old version strings).
+
+- **PyPI metadata** — Development Status classifier promoted from Beta to Production/Stable (v0.10.0 is the 34th tagged release, with a 21-job test matrix across 3 OSes × Python 3.8–3.14), Documentation project URL added, and `context-usage` / `usage-tracking` keywords added.
+
+### Added
+
+- **`scripts/render_svg.py`** — repo tooling (not part of the package; pure stdlib like everything else) that renders `--demo` output for each theme into deterministic, git-diffable SVG terminal cards under `assets/themes/`. Every live-data source is pinned during generation — tool counts, commit age, git extras/state, clock, rate-limit countdown, AND all user-config readers (budget, compaction threshold, disabled sections, clickable links) plus the `CLAUDE_STATUSLINE_*` env overrides — so regeneration is byte-identical across runs and machines, and a maintainer's personal `~/.claude` config can never leak into public assets. Writes are atomic (`os.replace`, same pattern as the package's cache writes). Regenerate with `python scripts/render_svg.py` after any theme/section/demo change.
+
+- **`context_size` hardening** — the section now gates the window size through `_safe_num` + `isfinite`, so a non-numeric, `NaN`, or `Infinity` `context_window_size` (all reachable via `json.loads`) hides the section instead of throwing into `render()`'s outer catch. The pre-existing behavior for garbage input was also a crash (different exception), so this is strictly an improvement, now pinned by tests.
+
+### Notes
+
+- No behavioral changes for 200K-window sessions beyond the 85%-boundary bar color (previously yellow at exactly 85%, now red — matching the `!CTX` badge that was already firing at that percentage).
+- 603 tests pass (+14: M-suffix strip cases including the `9_999_999 → "10M"` two-digit-strip convergence and the `999_999` K/M seam, cross-module threshold-alignment pins, context-size label coverage at 950/200K/500K/1M, and non-numeric/NaN/Infinity window hardening). Pure stdlib, zero dependencies, as always.
+
 ## [0.9.0] - 2026-07-02
 
 ### Added

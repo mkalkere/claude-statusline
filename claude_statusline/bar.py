@@ -14,13 +14,24 @@ BAR_STYLES = {
 def _bar_color(pct):
     """Return color code based on context usage percentage.
 
-    Green: 0-60% (comfortable)
-    Yellow: 61-85% (caution)
-    Red: 86-100% (danger)
+    Green: <= 60 (comfortable)
+    Yellow: > 60 and < 85 (caution)
+    Red: >= 85 (danger)
+
+    Bands are stated as comparisons, not integer ranges, because
+    used_percentage arrives from external JSON and can be a float
+    (60.5 is yellow, 84.9 is yellow, 85.0 is red).
+
+    The red boundary is deliberately 85 — the same percentage at which
+    the !CTX badge fires (cli.CTX_WARNING_THRESHOLD_PCT), so the bar
+    and the badge always agree on "danger". Before this alignment, a
+    session at exactly 85% showed a yellow "caution" bar next to a red
+    danger badge. Not imported from cli (circular import); kept in
+    sync by a cross-module consistency test instead.
     """
     if pct <= 60:
         return colors.GREEN
-    if pct <= 85:
+    if pct < 85:
         return colors.YELLOW
     return colors.RED
 

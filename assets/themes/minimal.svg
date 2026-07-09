@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="832" height="100" viewBox="0 0 832 100" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14">
+<rect width="832" height="100" rx="10" fill="#16161e" stroke="#2f3549" stroke-width="1"/>
+<circle cx="24" cy="20" r="6" fill="#ff5f57"/>
+<circle cx="44" cy="20" r="6" fill="#febc2e"/>
+<circle cx="64" cy="20" r="6" fill="#28c840"/>
+<text x="20" y="56" xml:space="preserve"><tspan fill="#9ece6a">●●●●●●●●</tspan><tspan fill="#565f89">············</tspan><tspan fill="#565f89"> </tspan><tspan fill="#565f89">in:</tspan><tspan fill="#c0caf5">412K</tspan><tspan fill="#c0caf5"> </tspan><tspan fill="#565f89">out:</tspan><tspan fill="#c0caf5">18K</tspan><tspan fill="#565f89"> </tspan><tspan fill="#e0af68">$0.73</tspan><tspan fill="#565f89"> </tspan><tspan fill="#9ece6a">5h:34%</tspan><tspan fill="#c0caf5"> </tspan><tspan fill="#9ece6a">7d:18%</tspan><tspan fill="#c0caf5"> </tspan><tspan fill="#565f89">~2h00m</tspan></text>
+<text x="20" y="78" xml:space="preserve"><tspan fill="#c0caf5">12m05s</tspan><tspan fill="#565f89"> </tspan><tspan fill="#565f89">api:</tspan><tspan fill="#7dcfff">5m12s</tspan><tspan fill="#565f89"> </tspan><tspan fill="#7dcfff">⎇ myapp</tspan><tspan fill="#e0af68">/feat/statusline</tspan><tspan fill="#565f89"> </tspan><tspan fill="#565f89">sessions:</tspan><tspan fill="#7dcfff">3</tspan><tspan fill="#565f89"> </tspan><tspan fill="#7dcfff">✦ refactor auth</tspan><tspan fill="#565f89"> </tspan><tspan fill="#c0a7f5">Sonnet 5</tspan><tspan fill="#565f89"> </tspan><tspan fill="#c0a7f5" font-weight="bold">effort:high</tspan><tspan fill="#565f89"> </tspan><tspan fill="#565f89">15:30</tspan></text>
+</svg>

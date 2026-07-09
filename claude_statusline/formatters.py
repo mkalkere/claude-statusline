@@ -7,8 +7,8 @@ def fmt_tokens(n):
     """Format token count with human-readable suffix.
 
     0-999: exact number
-    1K-999K: with K suffix (1 decimal if < 10K)
-    1M+: with M suffix (1 decimal if < 10M)
+    1K-999K: with K suffix (1 decimal if < 10K, trailing .0 stripped)
+    1M+: with M suffix (1 decimal if < 10M, trailing .0 stripped)
     """
     if n is None:
         return "?"
@@ -27,7 +27,13 @@ def fmt_tokens(n):
         return "{}K".format(int(val))
     if n < 10_000_000:
         val = n / 1_000_000
-        return "{:.1f}M".format(val)
+        formatted = "{:.1f}".format(val)
+        # Strip trailing zero after decimal: 1.0 → 1, but keep 1.5 —
+        # same rule as the K branch above. Matters since 1M-context
+        # models made "1.0M"-shaped values an every-render sight.
+        if formatted.endswith("0") and "." in formatted:
+            formatted = formatted[:-1].rstrip(".")
+        return formatted + "M"
     val = n / 1_000_000
     return "{}M".format(int(val))
 
