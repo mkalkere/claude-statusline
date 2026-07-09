@@ -795,8 +795,19 @@ def _render_sections_named(n, order, theme):
                 sections.append(branch_text)
 
         elif section == "context_size" and context_size:
-            label = "{}K".format(context_size // 1000) if context_size >= 1000 else str(context_size)
-            sections.append(colorize("({})".format(label), BRIGHT_BLACK))
+            # fmt_tokens (not ad-hoc //1000 math) so a 1M window renders
+            # "(1M)" rather than "(1000K)". One formatting path for every
+            # token-shaped number keeps K/M suffix rules consistent —
+            # the old integer-division label predates 1M windows
+            # becoming the default. _safe_num rejects a non-numeric
+            # window size, and isfinite rejects NaN/Infinity (both are
+            # valid to Python's json.loads and NaN is truthy, so it
+            # would otherwise reach int() and crash — renderers must
+            # never crash on external JSON).
+            cs = _safe_num(context_size)
+            if cs and math.isfinite(cs):
+                sections.append(colorize(
+                    "({})".format(fmt_tokens(int(cs))), BRIGHT_BLACK))
 
         elif section == "ctx_warning":
             # Percentage-based warning — works for any context window size
@@ -1877,16 +1888,23 @@ def render(data, theme_name="default"):
 
 
 def _demo_data():
-    """Generate sample data for demo mode using the real nested schema."""
+    """Generate sample data for demo mode using the real nested schema.
+
+    Kept representative of a CURRENT default session (Sonnet 5 era:
+    1M context window, populated pr block, thinking on) so --demo and
+    the README screenshots generated from it show what a new user will
+    actually see. Numbers are roughly consistent: 42% of a 1M window
+    ≈ the 412K input tokens shown.
+    """
     return {
         "context_window": {
             "used_percentage": 42,
-            "context_window_size": 200_000,
+            "context_window_size": 1_000_000,
             "current_usage": {
-                "input_tokens": 245_000,
+                "input_tokens": 412_000,
                 "output_tokens": 18_500,
-                "cache_read_input_tokens": 180_000,
-                "cache_creation_input_tokens": 5_000,
+                "cache_read_input_tokens": 365_000,
+                "cache_creation_input_tokens": 12_000,
             },
         },
         "cost": {
@@ -1906,12 +1924,19 @@ def _demo_data():
             "git_worktree": False,
         },
         "model": {
-            "display_name": "Opus 4.8 (1M context)",
+            "display_name": "Sonnet 5",
         },
         "session_id": "demo-session",
         "session_name": "refactor auth",
-        "version": "2.1.92",
+        "version": "2.1.197",
         "output_style": {"name": "explanatory"},
+        "effort": {"level": "high"},
+        "thinking": {"enabled": True},
+        "pr": {
+            "number": 1234,
+            "url": "https://github.com/user/myapp/pull/1234",
+            "review_state": "approved",
+        },
         "rate_limits": {
             "five_hour": {
                 "used_percentage": 34,

@@ -9,9 +9,17 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://pypi.org/project/claude-status/)
 [![Downloads](https://img.shields.io/pypi/dm/claude-status)](https://pypi.org/project/claude-status/)
 
+**Try it now — no install, no config change:**
+
+```bash
+uvx claude-status --demo    # or: pipx run claude-status --demo
 ```
-Line 1:  [████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min
-Line 2:  5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ effort:high │ v0.5.0 │ CC:2.1.92 │ 15:30
+
+![claude-status default theme](https://raw.githubusercontent.com/mkalkere/claude-statusline/main/assets/themes/default.svg)
+
+```
+Line 1:  [████████░░░░░░░░░░░░] │ in:412K out:18K │ cache:46% │ $0.73 │ burn:66K/min
+Line 2:  5h:34% 7d:18% ~2h │ (1M) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Sonnet 5 │ effort:high │ v0.10.0 │ CC:2.1.197 │ 15:30
 ```
 
 ## 30-Second Setup
@@ -45,13 +53,13 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Feature | What You See | Why It Matters |
 |---------|-------------|----------------|
 | Context Bar | `[████████░░░░░░░░░░░░]` | Green/yellow/red adaptive — know your context budget instantly |
-| Token Counts | `in:245K out:18K` | Human-readable (K/M) — no squinting at raw numbers |
+| Token Counts | `in:412K out:18K` | Human-readable (K/M) — no squinting at raw numbers |
 | Cache Hit Ratio | `cache:87%` | Of cacheable prompt input, how much actually hit the cache — close to 100% means cache-friendly prompts |
 | Cost | `$0.73` | Session cost in real-time — cents for small, dollars for large |
 | Budget | `$0.73/$10` | Color-coded daily budget tracker (green/yellow/red) |
 | Burn Rate | `burn:37K/min` | Tokens/min consumption — unique to claude-status |
 | Rate Limits | `5h:34% 7d:18% ~2h` | API usage limits with reset countdown (Pro/Max only) |
-| Context Size | `(200K)` | Know if you're on 200K or 1M context |
+| Context Size | `(1M)` | Know if you're on a 200K or 1M context window |
 | Context Warning | `!CTX` | Bold red alert at 85%+ context usage |
 
 ### Line 2 — Session Context
@@ -75,48 +83,44 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Vim Mode | `NORMAL` | Blue for NORMAL, green for INSERT |
 | Agent | `[Explore]` | Shows which subagent is active |
 | Worktree | `wt:fix/bug-123` | Claude Code worktree branch indicator |
-| Model | `Opus` | Active model name |
+| Model | `Sonnet 5` | Active model name |
 | Output Style | `style:explanatory` | Active output style when set |
 | Added Dirs | `dirs:+2` | Extra directories added via `/add-dir` |
 | Effort Level | `effort:high` | Thinking effort: `low`, `high`, `xhigh`, or `max`. Shown when non-default. Read from stdin JSON `effort.level` (Claude Code v2.1.119+) for instant updates; falls back to `~/.claude/settings.json` for older versions. (The `/effort ultracode` setting reports as `xhigh` per Claude Code's documented enum; an `ultra` value from earlier installs is accepted as a silent alias that renders as `xhigh`.) |
 | Thinking | `think` | Shown when extended thinking is enabled for the session. Reads `thinking.enabled` from stdin; surfaces only the on state (an off badge would be noise). Opt-in via custom theme. |
 | Pull Request | `PR#86 ok` | Current GitHub PR number when detected, clickable to the PR page via OSC 8. Reads `pr.number` / `pr.url` from stdin (newer Claude Code releases) with `github.pr_number` / `github.pr_url` as a fallback for older releases. When `pr.review_state` is present, a short status token follows the number: `ok` (approved), `chg` (changes requested), `rev` (pending review), `draft`. Opt-in via custom theme. |
 | Cost Breakdown | `mcp:$0.80` | Largest non-base cost category from `cost.by_category` (newer Claude Code releases). Falls back to `other:$N` (sum) when no single category exceeds $0.01 but multiple together do. Opt-in via custom theme. |
-| Version | `v0.5.0` | claude-status version |
-| CC Version | `CC:2.1.92` | Claude Code application version |
+| Version | `v0.10.0` | claude-status version |
+| CC Version | `CC:2.1.197` | Claude Code application version |
 | Clock | `15:30` | Current time |
 
 ## Themes
 
-8 built-in themes to match your terminal aesthetic. Preview all live with `claude-status --demo`.
+8 built-in themes to match your terminal aesthetic. Preview all live with `claude-status --demo`. Screenshots below show each theme rendered with one fixed dark palette — themes select ANSI colors; your own terminal palette supplies the exact hues.
 
 ### default — full detail, clean separators
-```
-[████████░░░░░░░░░░░░] │ in:245K out:18K │ cache:41% │ $0.73 │ burn:37K/min
-5h:34% 7d:18% ~2h │ (200K) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Opus │ effort:high │ v0.5.0 │ CC:2.1.92 │ 15:30
-```
+![default theme](https://raw.githubusercontent.com/mkalkere/claude-statusline/main/assets/themes/default.svg)
 
 ### minimal — just the essentials
-```
-●●●●●●●●·············· in:245K out:18K $0.73 5h:34% 7d:18%
-12m05s ⎇ feat/statusline sessions:3 Opus 15:30
-```
+![minimal theme](https://raw.githubusercontent.com/mkalkere/claude-statusline/main/assets/themes/minimal.svg)
 
 ### powerline — Nerd Font separators
-```
-████████░░░░░░░░░░░░  in:245K out:18K  cache:41%  $0.73  burn:37K/min
-5h:34% 7d:18% ~2h  (200K)  12m05s  +247 -38  ⎇ myapp/feat/statusline  ✦ refactor auth  Opus  effort:high  v0.5.0  CC:2.1.92  15:30
-```
+![powerline theme](https://raw.githubusercontent.com/mkalkere/claude-statusline/main/assets/themes/powerline.svg)
 
 ### focus — single line, minimal footprint
-```
-[████████░░░░] │ $0.73 │ 5h:34% 7d:18% ~2h │ ⎇ main │ effort:high │ 15:30
-```
+![focus theme](https://raw.githubusercontent.com/mkalkere/claude-statusline/main/assets/themes/focus.svg)
 
 ### nord — cool blue tones
+![nord theme](https://raw.githubusercontent.com/mkalkere/claude-statusline/main/assets/themes/nord.svg)
+
 ### tokyo-night — purple and blue accents
+![tokyo-night theme](https://raw.githubusercontent.com/mkalkere/claude-statusline/main/assets/themes/tokyo-night.svg)
+
 ### gruvbox — warm retro palette
+![gruvbox theme](https://raw.githubusercontent.com/mkalkere/claude-statusline/main/assets/themes/gruvbox.svg)
+
 ### rose-pine — soft muted pinks
+![rose-pine theme](https://raw.githubusercontent.com/mkalkere/claude-statusline/main/assets/themes/rose-pine.svg)
 
 ## Installation
 

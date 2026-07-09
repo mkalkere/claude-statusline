@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-status"
-version = "0.9.0"
+version = "0.10.0"
 description = "Beautiful, informative status line for Claude Code — zero dependencies, cross-platform"
 readme = "README.md"
 license = {text = "MIT"}
@@ -23,10 +23,10 @@ keywords = [
     "ai-agent", "subagent", "ai-coding", "llm-tooling",
     "ai-developer-tools", "prompt-engineering", "prompt-cache",
     "responsive-layout", "terminal-width", "git-status",
-    "observability", "devtool",
+    "observability", "devtool", "context-usage", "usage-tracking",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
@@ -50,6 +50,7 @@ claude-status = "claude_statusline.cli:main"
 [project.urls]
 Homepage = "https://github.com/mkalkere/claude-statusline"
 Repository = "https://github.com/mkalkere/claude-statusline"
+Documentation = "https://github.com/mkalkere/claude-statusline#readme"
 Issues = "https://github.com/mkalkere/claude-statusline/issues"
 Changelog = "https://github.com/mkalkere/claude-statusline/blob/main/CHANGELOG.md"
 

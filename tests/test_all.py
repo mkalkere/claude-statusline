@@ -271,6 +271,28 @@ class TestFmtTokens(unittest.TestCase):
     def test_999m(self):
         self.assertEqual(fmt_tokens(999_000_000), "999M")
 
+    def test_1m_no_trailing_zero(self):
+        """1_000_000 must render "1M", not "1.0M" — same trailing-zero
+        strip as the K branch. Every-render sight on 1M-window models."""
+        self.assertEqual(fmt_tokens(1_000_000), "1M")
+
+    def test_4m_no_trailing_zero(self):
+        self.assertEqual(fmt_tokens(4_000_000), "4M")
+
+    def test_2_5m_keeps_decimal(self):
+        """The strip must not eat meaningful decimals."""
+        self.assertEqual(fmt_tokens(2_500_000), "2.5M")
+
+    def test_k_m_seam(self):
+        """999_999 sits at the K/M branch seam."""
+        self.assertEqual(fmt_tokens(999_999), "999K")
+
+    def test_9_999_999_rounds_to_10m(self):
+        """"{:.1f}" rounds 9_999_999 to "10.0"; the strip reduces it
+        to "10M", converging with the >= 10M integer branch — the one
+        input where the strip handles a two-digit ".0"."""
+        self.assertEqual(fmt_tokens(9_999_999), "10M")
+
     def test_none(self):
         self.assertEqual(fmt_tokens(None), "?")
 
@@ -396,6 +418,90 @@ class TestRenderBar(unittest.TestCase):
         bar = render_bar(50, 10, theme)
         self.assertIn("<", bar)
         self.assertIn(">", bar)
+
+
+class TestBarCtxWarningAlignment(unittest.TestCase):
+    """The bar's red "danger" boundary and the !CTX badge threshold
+    must agree. Before v0.10.0, `_bar_color` went red at 86+ while
+    !CTX fired at >= 85 — at exactly 85% users saw a yellow "caution"
+    bar beside a red danger badge. `_bar_color` can't import the
+    threshold from cli (circular import), so this cross-module test
+    is what keeps the two constants in lockstep."""
+
+    def test_red_starts_exactly_at_ctx_threshold(self):
+        from claude_statusline.bar import _bar_color
+        from claude_statusline.cli import CTX_WARNING_THRESHOLD_PCT
+        from claude_statusline import colors
+        self.assertEqual(_bar_color(CTX_WARNING_THRESHOLD_PCT), colors.RED,
+            "bar must be red at the exact !CTX threshold")
+        self.assertEqual(_bar_color(CTX_WARNING_THRESHOLD_PCT - 1), colors.YELLOW,
+            "one point below the threshold is still caution-yellow")
+
+    def test_color_bands(self):
+        from claude_statusline.bar import _bar_color
+        from claude_statusline import colors
+        self.assertEqual(_bar_color(0), colors.GREEN)
+        self.assertEqual(_bar_color(60), colors.GREEN)
+        self.assertEqual(_bar_color(61), colors.YELLOW)
+        self.assertEqual(_bar_color(100), colors.RED)
+
+
+class TestContextSizeLabel(unittest.TestCase):
+    """context_size renders via fmt_tokens so a 1M window shows "(1M)"
+    — not the pre-1M-era "(1000K)" integer-division label."""
+
+    def _plain(self, s):
+        return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+    def _render_ctx(self, size):
+        import claude_statusline.cli as cli_mod
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["context_size", "branch"]
+            data = {
+                "git_branch": "main",
+                "context_window": {"context_window_size": size,
+                                   "used_percentage": 10},
+            }
+            return self._plain(cli_mod.render(data, "default"))
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_1m_window(self):
+        self.assertIn("(1M)", self._render_ctx(1_000_000))
+
+    def test_200k_window(self):
+        self.assertIn("(200K)", self._render_ctx(200_000))
+
+    def test_500k_window(self):
+        self.assertIn("(500K)", self._render_ctx(500_000))
+
+    def test_sub_1000_window_exact(self):
+        """Below 1000 the label stays the exact number — pins the seam
+        the fmt_tokens refactor removed (old code special-cased it)."""
+        self.assertIn("(950)", self._render_ctx(950))
+
+    def test_non_numeric_window_hidden_no_crash(self):
+        """A garbage context_window_size must hide the section, not
+        crash render — _safe_num gate (house rule for external JSON)."""
+        out = self._render_ctx("abc")
+        self.assertNotIn("(", out.split("⎇")[0])  # no ( chip before branch
+        self.assertIn("main", out)  # render itself succeeded
+
+    def test_nan_window_hidden_no_crash(self):
+        """json.loads accepts bare NaN; NaN is truthy and would reach
+        int() without the isfinite gate. Must hide, not crash."""
+        out = self._render_ctx(float("nan"))
+        self.assertIn("main", out)
+        self.assertNotIn("nan", out.lower())
+
+    def test_infinity_window_hidden_no_crash(self):
+        out = self._render_ctx(float("inf"))
+        self.assertIn("main", out)
+        self.assertNotIn("inf", out.lower())
 
 
 # ─── git.py ───────────────────────────────────────────────────────────
@@ -4594,7 +4700,9 @@ class TestRenderUsesDetectedWidth(unittest.TestCase):
                 "Line 2 width {} is too small — terminal.columns from "
                 "stdin was probably not consumed".format(line2_width))
             # Specific recovered sections that proved the bug originally:
-            self.assertIn("(1000K)", out, "context_size should appear at 165 cols")
+            # (label changed "(1000K)" -> "(1M)" in v0.10.0 when
+            # context_size adopted fmt_tokens)
+            self.assertIn("(1M)", out, "context_size should appear at 165 cols")
             self.assertIn("effort:xhigh", out, "effort should appear at 165 cols")
         finally:
             for name, fn in orig.items():
