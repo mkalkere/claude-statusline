@@ -21,8 +21,8 @@ from .colors import (
     YELLOW, colorize,
 )
 from .formatters import (
-    fmt_burn_rate, fmt_cache_pct, fmt_cost, fmt_countdown, fmt_duration,
-    fmt_lines, fmt_speed, fmt_tokens,
+    fmt_burn_rate, fmt_cache_pct, fmt_cost, fmt_cost_rate, fmt_countdown,
+    fmt_duration, fmt_lines, fmt_speed, fmt_tokens,
 )
 from .git import (
     get_branch, get_git_extras, get_git_state,
@@ -115,13 +115,22 @@ def _first(*vals):
 
 
 def _safe_num(val):
-    """Coerce to float or return None. Prevents crashes on non-numeric input."""
+    """Coerce to a FINITE float or return None.
+
+    Prevents crashes on non-numeric input. NaN and Infinity are
+    rejected too (json.loads accepts both as bare literals): every
+    consumer treats the return value as render-ready, and NaN in
+    particular is poison downstream — all comparisons are False, so it
+    sails through threshold checks and only blows up later inside a
+    formatter's int(). "Safe" means finite.
+    """
     if val is None:
         return None
     try:
-        return float(val)
+        num = float(val)
     except (TypeError, ValueError):
         return None
+    return num if math.isfinite(num) else None
 
 
 def _osc8_link(url, text):
@@ -191,9 +200,37 @@ def _normalize(data):
     # of a dict.
     cost_obj = data.get("cost")
     cost_obj = cost_obj if isinstance(cost_obj, dict) else {}
-    out["cost"] = _first(cost_obj.get("total_cost_usd"), data.get("cost_usd"))
-    out["duration"] = _first(cost_obj.get("total_duration_ms"), data.get("session_duration_ms"))
-    out["api_duration"] = _first(cost_obj.get("total_api_duration_ms"), data.get("api_duration_ms"))
+    # _safe_num on the money/time trio: a stringified or garbage value
+    # (e.g. `total_cost_usd: "abc"` from a malformed upstream) would
+    # otherwise flow raw into fmt_cost/fmt_duration and throw from
+    # inside render() — caught only by main()'s outer fallback, which
+    # blanks the whole statusline instead of hiding one section.
+    # Coercing here (same chokepoint pattern as by_category below)
+    # turns garbage into None, which every consumer already treats as
+    # "hide". Numeric strings ("0.5") coerce and render normally.
+    #
+    # The stderr breadcrumb preserves diagnosability: the old crash at
+    # least left "render error: ..." on stderr (visible in Claude
+    # Code's debug logs), whereas a silent hide would leave a user
+    # debugging "my cost chip vanished" with nothing. present-but-
+    # garbage is the ONLY case that notes; absent stays silent.
+    def _num_or_note(field, raw):
+        num = _safe_num(raw)
+        if num is None and raw is not None:
+            print(
+                "claude-status: ignoring non-numeric {} value".format(field),
+                file=sys.stderr,
+            )
+        return num
+
+    out["cost"] = _num_or_note(
+        "cost", _first(cost_obj.get("total_cost_usd"), data.get("cost_usd")))
+    out["duration"] = _num_or_note(
+        "duration",
+        _first(cost_obj.get("total_duration_ms"), data.get("session_duration_ms")))
+    out["api_duration"] = _num_or_note(
+        "api_duration",
+        _first(cost_obj.get("total_api_duration_ms"), data.get("api_duration_ms")))
     out["lines_added"] = _first(cost_obj.get("total_lines_added"), data.get("lines_added"))
     out["lines_removed"] = _first(cost_obj.get("total_lines_removed"), data.get("lines_removed"))
 
@@ -217,14 +254,15 @@ def _normalize(data):
             if not isinstance(k, str):
                 continue
             num = _safe_num(v)
-            # math.isfinite() rejects nan and ±inf. Without it,
-            # a stringified `"inf"` upstream would coerce via
-            # _safe_num to float('inf'), pass `num > 0`, and the
-            # sum-fallback path would then render an infinite total.
-            # Pre-v0.6.1 the renderer's isinstance filter would have
-            # rejected the string `"inf"` before coercion; the new
-            # coerce-on-store contract makes the explicit isfinite
-            # guard load-bearing here at the boundary.
+            # Defense-in-depth: since v0.11.0 _safe_num itself rejects
+            # nan/±inf (returns None), so this explicit isfinite is
+            # redundant — but it stays because this exact hole (a
+            # stringified `"inf"` coercing to float('inf'), passing
+            # `num > 0`, and rendering an infinite total via the
+            # sum-fallback) was opened and had to be re-guarded within
+            # a single release (v0.6.1, caught pre-release), and the
+            # local guard pins the contract at this boundary even if
+            # _safe_num's semantics ever loosen again.
             if num is None or not math.isfinite(num) or num <= 0:
                 continue
             sane_categories[k] = float(num)
@@ -766,6 +804,20 @@ def _render_sections_named(n, order, theme):
                     colorize("speed:", tc["label"]) + colorize(speed_str, spc)
                 )
 
+        elif section == "cost_rate":
+            # Projected session cost per hour, rendered "~$3.6/hr" —
+            # the leading tilde signals "projection", not a bill.
+            # Session-average including idle time; fmt_cost_rate owns
+            # every hide-gate (missing/garbage/NaN inputs, zero cost,
+            # sub-minute sessions), so an empty string means hide.
+            # Color falls through via _first() so a theme setting
+            # `cost_rate: null` degrades to CYAN rather than crashing
+            # colorize().
+            rate_str = fmt_cost_rate(cost, duration)
+            if rate_str:
+                crc = _first(tc.get("cost_rate"), CYAN)
+                sections.append(colorize("~" + rate_str, crc))
+
         elif section == "lines":
             lines_str = fmt_lines(lines_added, lines_removed)
             if lines_str:
@@ -799,13 +851,13 @@ def _render_sections_named(n, order, theme):
             # "(1M)" rather than "(1000K)". One formatting path for every
             # token-shaped number keeps K/M suffix rules consistent —
             # the old integer-division label predates 1M windows
-            # becoming the default. _safe_num rejects a non-numeric
-            # window size, and isfinite rejects NaN/Infinity (both are
-            # valid to Python's json.loads and NaN is truthy, so it
-            # would otherwise reach int() and crash — renderers must
-            # never crash on external JSON).
+            # becoming the default. _safe_num rejects non-numeric AND
+            # non-finite window sizes (NaN/Infinity are valid to
+            # Python's json.loads; _safe_num guarantees a finite float
+            # or None since v0.11.0), so nothing garbage reaches int()
+            # — renderers must never crash on external JSON.
             cs = _safe_num(context_size)
-            if cs and math.isfinite(cs):
+            if cs:
                 sections.append(colorize(
                     "({})".format(fmt_tokens(int(cs))), BRIGHT_BLACK))
 
@@ -1161,8 +1213,8 @@ _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
     "sessions", "tools", "activity", "cache_age", "latency", "context_size",
     "session_name", "rate_limits", "output_style", "added_dirs", "effort",
-    "git_worktree", "speed", "git_state", "commit_age", "cost_breakdown",
-    "pr", "thinking",
+    "git_worktree", "speed", "cost_rate", "git_state", "commit_age",
+    "cost_breakdown", "pr", "thinking",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",

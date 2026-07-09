@@ -353,6 +353,55 @@ class TestFmtBurnRate(unittest.TestCase):
         self.assertEqual(fmt_burn_rate(1000, 0), "?")
 
 
+class TestFmtCostRate(unittest.TestCase):
+    """fmt_cost_rate projects session cost to $/hr ("$3.6/hr").
+    Empty string means "hide the section" — every meaningless or
+    garbage input must land there, never an exception."""
+
+    def test_normal(self):
+        # $0.73 over 12m05s -> ~$3.62/hr -> fmt_cost one-decimal form
+        from claude_statusline.formatters import fmt_cost_rate
+        self.assertEqual(fmt_cost_rate(0.73, 725_000), "$3.6/hr")
+
+    def test_exact_hour(self):
+        from claude_statusline.formatters import fmt_cost_rate
+        self.assertEqual(fmt_cost_rate(5.0, 3_600_000), "$5.0/hr")
+
+    def test_cheap_session_cents(self):
+        """Sub-penny rates reuse fmt_cost's cents form."""
+        from claude_statusline.formatters import fmt_cost_rate
+        self.assertEqual(fmt_cost_rate(0.0002, 120_000), "0.6c/hr")
+
+    def test_big_rate_whole_dollars(self):
+        from claude_statusline.formatters import fmt_cost_rate
+        self.assertEqual(fmt_cost_rate(12.0, 3_600_000), "$12/hr")
+
+    def test_sub_minute_hidden(self):
+        """Early-session extrapolation is absurd; hidden under 60s."""
+        from claude_statusline.formatters import fmt_cost_rate
+        self.assertEqual(fmt_cost_rate(0.50, 59_999), "")
+
+    def test_exactly_at_gate_shows(self):
+        """Exact value pinned: $0.50 over exactly 1 minute is $30/hr.
+        Pins both the arithmetic and the >= (not >) gate direction."""
+        from claude_statusline.formatters import fmt_cost_rate
+        self.assertEqual(fmt_cost_rate(0.50, 60_000), "$30/hr")
+
+    def test_zero_and_negative_cost_hidden(self):
+        from claude_statusline.formatters import fmt_cost_rate
+        self.assertEqual(fmt_cost_rate(0, 3_600_000), "")
+        self.assertEqual(fmt_cost_rate(-1.0, 3_600_000), "")
+
+    def test_missing_and_garbage_hidden(self):
+        from claude_statusline.formatters import fmt_cost_rate
+        for cost, dur in ((None, None), (None, 100_000), (1.0, None),
+                          ("abc", 100_000), (1.0, "xyz"), ({}, []),
+                          (float("nan"), 100_000), (1.0, float("nan")),
+                          (float("inf"), 100_000), (1.0, float("inf"))):
+            self.assertEqual(fmt_cost_rate(cost, dur), "",
+                "cost={!r} dur={!r} must hide".format(cost, dur))
+
+
 class TestFmtLines(unittest.TestCase):
     def test_both(self):
         self.assertEqual(fmt_lines(10, 5), "+10 -5")
@@ -502,6 +551,168 @@ class TestContextSizeLabel(unittest.TestCase):
         out = self._render_ctx(float("inf"))
         self.assertIn("main", out)
         self.assertNotIn("inf", out.lower())
+
+
+class TestCostRateSection(unittest.TestCase):
+    """End-to-end `cost_rate` section: "~$3.6/hr" projection from
+    cost.total_cost_usd / cost.total_duration_ms. Opt-in via custom
+    theme; hidden on every degrade path (fmt_cost_rate owns the gates,
+    these tests pin the section wiring)."""
+
+    def _plain(self, s):
+        return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+    def _render(self, cost_obj):
+        import claude_statusline.cli as cli_mod
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["cost_rate", "branch"]
+            data = {"git_branch": "main"}
+            if cost_obj is not _SENTINEL:
+                data["cost"] = cost_obj
+            return self._plain(cli_mod.render(data, "default"))
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_renders_projection(self):
+        out = self._render(
+            {"total_cost_usd": 0.73, "total_duration_ms": 725_000})
+        self.assertIn("~$3.6/hr", out)
+
+    def test_tilde_prefix(self):
+        """The tilde marks it as a projection — pin it so a refactor
+        doesn't silently turn the chip into a bill-looking number.
+        The startswith check discriminates properly: it fails for a
+        missing tilde AND for a doubled one, unlike a substring
+        assertion (\"~~$5.0/hr\" would still contain \"~$5.0/hr\")."""
+        out = self._render(
+            {"total_cost_usd": 5.0, "total_duration_ms": 3_600_000})
+        self.assertIn("~$5.0/hr", out)
+        chip_lines = [l for l in out.split("\n") if "/hr" in l]
+        self.assertTrue(chip_lines and chip_lines[0].startswith("~$5.0/hr"),
+                        "chip must start with exactly one tilde: {!r}".format(chip_lines))
+
+    def test_hidden_when_cost_absent(self):
+        self.assertNotIn("/hr", self._render(_SENTINEL))
+
+    def test_hidden_sub_minute_session(self):
+        out = self._render(
+            {"total_cost_usd": 0.50, "total_duration_ms": 30_000})
+        self.assertNotIn("/hr", out)
+
+    def test_hidden_zero_cost(self):
+        out = self._render(
+            {"total_cost_usd": 0, "total_duration_ms": 3_600_000})
+        self.assertNotIn("/hr", out)
+
+    def test_garbage_cost_object_no_crash(self):
+        """cost as a bare string (older schemas / malformed upstream)
+        must hide the section, not crash — _normalize's isinstance
+        guard plus _safe_num coercion both stand in the way. NaN and
+        Infinity (valid json.loads literals) are included: _safe_num
+        rejects non-finite values at the chokepoint."""
+        for garbage in ("expensive", 42, ["x"], {"total_cost_usd": "abc"},
+                        {"total_cost_usd": float("nan"),
+                         "total_duration_ms": 100_000},
+                        {"total_cost_usd": 1.0,
+                         "total_duration_ms": float("inf")}):
+            out = self._render(garbage)
+            self.assertNotIn("/hr", out,
+                "cost={!r} must not render a rate".format(garbage))
+            self.assertIn("main", out)
+
+    def test_cost_rate_is_compact_droppable(self):
+        from claude_statusline.cli import (
+            _COMPACT_DROP, _NARROW_DROP, _FIT_DROP_PRIORITY)
+        self.assertIn("cost_rate", _COMPACT_DROP)
+        self.assertIn("cost_rate", _NARROW_DROP)
+        self.assertIn("cost_rate", _FIT_DROP_PRIORITY)
+
+    def test_subpenny_rate_hidden_not_zero_chip(self):
+        """A positive-but-below-resolution rate must hide rather than
+        render a zero-looking "~0c/hr" chip (contradicts the zero-is-
+        noise gate). $0.02 over ~116 days projects under 0.1c/hr."""
+        from claude_statusline.formatters import fmt_cost_rate
+        self.assertEqual(fmt_cost_rate(0.02, 10_000_000_000), "")
+        # Just above the resolution floor still shows.
+        self.assertEqual(fmt_cost_rate(0.0006, 3_600_000), "0.1c/hr")
+
+    def test_garbage_duration_sections_no_crash(self):
+        """Garbage total_duration_ms / total_api_duration_ms rendered
+        through their ACTUAL consuming sections (duration, latency,
+        speed) — pre-v0.11.0 fmt_duration("xyz") crashed render().
+        The cost_rate-only fixtures above never exercise these."""
+        import claude_statusline.cli as cli_mod
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = [
+                "duration", "latency", "speed", "branch"]
+            out = self._plain(cli_mod.render({
+                "git_branch": "main",
+                "cost": {"total_duration_ms": "xyz",
+                         "total_api_duration_ms": ["nope"]},
+            }, "default"))
+            self.assertIn("main", out)
+            self.assertNotIn("xyz", out)
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_stringified_numerics_render_normally(self):
+        """CHANGELOG claim pinned e2e: numeric strings coerce and
+        render — "0.5" cost shows $0.50, "725000" duration shows
+        12m05s. Guards against a future over-tightening of _safe_num
+        (e.g. an isinstance gate) blanking string-emitting upstreams."""
+        import claude_statusline.cli as cli_mod
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["duration", "cost_rate", "branch"]
+            out = self._plain(cli_mod.render({
+                "git_branch": "main",
+                "cost": {"total_cost_usd": "0.5",
+                         "total_duration_ms": "725000"},
+            }, "default"))
+            self.assertIn("$0.50", out)      # cost section (line1)
+            self.assertIn("12m05s", out)     # duration section (line2)
+            # 0.5/(725s/3600s) = $2.48/hr; fmt_cost's one-decimal
+            # branch ROUNDS, so the chip reads $2.5, not $2.4.
+            self.assertIn("~$2.5/hr", out)
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+
+class TestSafeNumFinite(unittest.TestCase):
+    """_safe_num guarantees a FINITE float or None (v0.11.0). NaN in
+    particular is poison: every comparison is False, so it sails
+    through threshold checks and detonates later inside a formatter's
+    int(). "Safe" means finite — pinned here so a future refactor
+    can't quietly reopen the hole."""
+
+    def test_finite_passthrough(self):
+        from claude_statusline.cli import _safe_num
+        self.assertEqual(_safe_num(1.5), 1.5)
+        self.assertEqual(_safe_num("0.5"), 0.5)
+        self.assertEqual(_safe_num(0), 0.0)
+
+    def test_non_finite_rejected(self):
+        from claude_statusline.cli import _safe_num
+        for bad in (float("nan"), float("inf"), float("-inf"),
+                    "nan", "inf", "-inf", "Infinity", "NaN"):
+            self.assertIsNone(_safe_num(bad),
+                "_safe_num({!r}) must be None".format(bad))
+
+    def test_garbage_rejected(self):
+        from claude_statusline.cli import _safe_num
+        for bad in (None, "abc", [], {}, object()):
+            self.assertIsNone(_safe_num(bad))
 
 
 # ─── git.py ───────────────────────────────────────────────────────────

@@ -58,6 +58,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Cost | `$0.73` | Session cost in real-time — cents for small, dollars for large |
 | Budget | `$0.73/$10` | Color-coded daily budget tracker (green/yellow/red) |
 | Burn Rate | `burn:37K/min` | Tokens/min consumption — unique to claude-status |
+| Cost Rate | `~$3.6/hr` | Projected session cost per hour (session average, includes idle time; the `~` marks it as a projection). Hidden for sessions under a minute. Opt-in via custom theme. |
 | Rate Limits | `5h:34% 7d:18% ~2h` | API usage limits with reset countdown (Pro/Max only) |
 | Context Size | `(1M)` | Know if you're on a 200K or 1M context window |
 | Context Warning | `!CTX` | Bold red alert at 85%+ context usage |

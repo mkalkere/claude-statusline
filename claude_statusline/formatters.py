@@ -1,6 +1,15 @@
 """Formatting functions for tokens, cost, duration, and burn rate."""
 
+import math
 import time
+
+# Minimum session duration before a $/hr projection is shown. A
+# session's first seconds extrapolate absurdly (a $0.05 startup burst
+# over 8s "projects" to $22/hr), so the cost_rate section stays hidden
+# until the average has something real behind it. One minute is the
+# smallest window where the session-average starts being meaningful;
+# it also matches the intuition that a projection needs history.
+_COST_RATE_MIN_DURATION_MS = 60_000
 
 
 def fmt_tokens(n):
@@ -99,6 +108,52 @@ def fmt_burn_rate(total_tokens, duration_ms):
     return "{}/min".format(fmt_tokens(int(rate)))
 
 
+def fmt_cost_rate(cost, duration_ms):
+    """Project session cost to dollars per hour: "$3.6/hr".
+
+    Session-average by design: total cost over total wall-clock time,
+    INCLUDING idle time — this answers "what is this session costing
+    me per hour of it being open", not "what would the current burst
+    cost if sustained". (A windowed recent-activity rate is a possible
+    future refinement; it needs cached samples and is deliberately out
+    of scope here.)
+
+    Returns "" (section hidden) when the projection would be
+    meaningless or the inputs are garbage:
+      - cost or duration missing / non-numeric / NaN / Infinity
+      - cost <= 0 (a zero session projects to $0/hr — noise)
+      - duration under _COST_RATE_MIN_DURATION_MS (early-session
+        extrapolation is absurd; see the constant's comment)
+      - rate below fmt_cost's rendering resolution (< $0.0005/hr),
+        which would show a zero-looking "0c/hr" chip for a positive
+        cost — same noise the zero gate exists to suppress
+
+    Reuses fmt_cost for the dollar formatting so rate and cost render
+    with identical conventions (cents under a penny, $0.XX under a
+    dollar, one decimal under $10, whole dollars above).
+    """
+    try:
+        c = float(cost)
+        d = float(duration_ms)
+    except (TypeError, ValueError):
+        return ""
+    if not (math.isfinite(c) and math.isfinite(d)):
+        return ""
+    if c <= 0 or d < _COST_RATE_MIN_DURATION_MS:
+        return ""
+    rate = c / (d / 3_600_000)
+    if not math.isfinite(rate):
+        return ""
+    # Below fmt_cost's rendering resolution the chip would read
+    # "0c/hr" — a zero-looking projection for a positive cost, which
+    # contradicts the "zero projection is noise" gate above. fmt_cost's
+    # cents branch shows one decimal, so anything under half of 0.1c
+    # (rate < $0.0005/hr) rounds to "0.0" and gets hidden instead.
+    if rate < 0.0005:
+        return ""
+    return fmt_cost(rate) + "/hr"
+
+
 def fmt_lines(added, removed):
     """Format lines changed in git-diff style."""
     parts = []
@@ -136,7 +191,13 @@ def fmt_countdown(resets_at_ms):
     try:
         now_ms = int(time.time() * 1000)
         remaining_ms = int(resets_at_ms) - now_ms
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: int(float("inf")). Since v0.11.0 _safe_num
+        # rejects non-finite values upstream so inf can't reach here
+        # from stdin — but this local catch pins the hole shut
+        # independently, so a future loosening of _safe_num can't
+        # silently reintroduce a whole-line crash. (Same tuple as
+        # _clean_pr_number's handler in cli.py.)
         return ""
     if remaining_ms < 1000:
         return ""
