@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-07-09
+
+### Added
+
+- **Per-subagent status rows** ([#110](https://github.com/mkalkere/claude-statusline/issues/110), closes [#91](https://github.com/mkalkere/claude-statusline/issues/91)) — claude-status now serves Claude Code's `subagentStatusLine` hook: each running subagent task renders as `[Explore] [███░░░░░] 41% · 23s · Sonnet 5` (name, per-task context bar + percentage, elapsed time, model) in the agent panel. One binary, both hooks — add alongside your `statusLine` entry:
+
+  ```json
+  "subagentStatusLine": {"type": "command", "command": "claude-status --subagent"}
+  ```
+
+  - **`--subagent` is the documented interface**; a subagent payload arriving on the bare command is auto-detected as a fallback (with a stderr note suggesting the flag). With the flag, every error path prints nothing — a JSONL consumer never sees a stray statusline or the main hook's `?` fallback (a truncated payload that merely *looks* subagent-shaped also suppresses `?`).
+  - **Emitted per the documented upstream contract**: JSONL `{"id", "content"}` per task; ids echo back as their original JSON type; a task that can't be rendered (malformed, finished, or nothing fits the width) is **omitted** — upstream's default row always beats a hidden or garbled one, and empty content (which hides a row) is never emitted.
+  - **Status-aware**: terminal statuses (completed/failed/cancelled/…) hand the row back to Claude Code's default rendering — no forever-ticking elapsed timer on finished tasks. Unknown statuses fail open (render).
+  - **Degrades per segment**: percentage needs `tokenCount` ≥ 0 AND `contextWindowSize` > 0 (displayed pct clamps at 100); elapsed accepts `startTime` as ISO-8601, epoch seconds, or epoch milliseconds (magnitude-banded — the format is undocumented upstream) and drops on clock skew or >7-day ages; the model chip shortens ids (`claude-sonnet-5-20250707` → `Sonnet 5`). On pre-2.1.205 Claude Code (no model/context fields) rows show `[name] 23s`.
+  - **Width policy**: rows fit the panel's `columns` (with a small margin); drop order model → bar → elapsed, minimum `[name] 41%`, name truncation with ellipsis; percentage colors use the same 60/85 bands as the main context bar. Task names are control-character-stripped before embedding (terminal-escape injection guard).
+  - **Zero side effects**: subagent rendering never touches `_normalize`, git, caches, or the daily-spend ledger — the hook fires once per refresh tick per panel. Pinned by a test.
+  - **Install funnel**: `--setup` gains an opt-in question that writes the key (theme-propagated); `--install` prints the ready-to-paste snippet; `--uninstall` removes a claude-status-owned `subagentStatusLine`; `--print-config` gains a 9th `subagent=` line (appended — key=value parsers keep working; exact-8-line-count parsers need a one-line update); `--doctor` reports the hook's config state.
+  - Design went through two adversarial reviews before implementation (which set the envelope-only payload discriminator — `tasks: []` is a valid subagent payload; malformed elements can never flip the mode — and the never-empty-content rule) plus the standard four-agent review after.
+
+### Notes
+
+- **#91 closes as completed-with-delta**: it asked for a subagent runtime timer in the *main statusline's* agent section; the elapsed timer ships in the *agent panel* rows instead, because upstream provides `startTime` only on the subagent hook — the main-hook data #91 hoped for never materialized.
+- The main statusline is completely unchanged unless you add the new settings key.
+- 704 tests pass (+51: discriminator matrix, JSONL shape/purity incl. subprocess-level pins for both modes, id-type preservation, status matrix, startTime format bands incl. bool rejection, width drop-order and narrow-panel honesty, NaN-id invalid-JSONL guard, control-char stripping, model-shortener matrix, all-themes sweep, zero-side-effects pins at BOTH the renderer and the main() dispatch level, the full install-funnel matrix — hook install/preserve/corrupt-settings, uninstall foreign-hook/sub-only/stale-.bak scenarios, print-config variants — and the print-config 9-line contract update). Pure stdlib, zero dependencies, as always.
+
 ## [0.12.0] - 2026-07-09
 
 ### Changed — ⚠️ the `budget` section's meaning is fixed (and its label changes)
