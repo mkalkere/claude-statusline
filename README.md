@@ -95,6 +95,24 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | CC Version | `CC:2.1.197` | Claude Code application version |
 | Clock | `15:30` | Current time |
 
+### Per-Subagent Status Rows (v0.13.0+)
+
+When Claude Code runs subagents, its `subagentStatusLine` hook lets a command render each task's row in the agent panel. claude-status serves both hooks from one binary — add this next to your existing `statusLine` entry (same command, plus `--subagent`):
+
+```json
+"subagentStatusLine": {"type": "command", "command": "claude-status --subagent"}
+```
+
+Each running task then renders as:
+
+```
+[Explore] [███░░░░░] 41% · 23s · Sonnet 5
+```
+
+— task name, context usage (bar + percentage, colored with the same 60/85% bands as the main context bar), elapsed time, and model. Segments degrade independently and drop in a fixed order (model → bar → elapsed) on narrow panels; finished tasks keep Claude Code's default rendering. Uses your `--theme` if you pass the same one as your statusLine command.
+
+**Version notes:** the per-task `model` and context fields require Claude Code **2.1.205+** — on older versions rows show `[name] 23s`. The `subagentStatusLine` setting's own minimum version isn't documented upstream; if an older Claude Code warns about an unknown settings key, remove the entry.
+
 ## Themes
 
 8 built-in themes to match your terminal aesthetic. Preview all live with `claude-status --demo`. Screenshots below show each theme rendered with one fixed dark palette — themes select ANSI colors; your own terminal palette supplies the exact hues.
@@ -152,7 +170,7 @@ claude-status --setup
 
 ### What `--setup` does
 
-Walks you through theme selection with a compact preview, optional budget configuration, and writes the statusLine entry to `~/.claude/settings.json`. Preserves all your existing settings.
+Walks you through theme selection with a compact preview, optional budget configuration, an optional per-subagent status rows question (see below), and writes the statusLine entry to `~/.claude/settings.json`. Preserves all your existing settings.
 
 > **Command not found?** Ensure your Python scripts directory is in `PATH`.
 > Fallback: `python -m claude_statusline --setup`
@@ -180,6 +198,7 @@ For full agent recipes (themes, budget, verification, uninstall, troubleshooting
 | `claude-status --print-config` | Show current install state in machine-readable form (for scripts/agents) |
 | `claude-status --demo` | Preview all 8 themes with sample data |
 | `claude-status --doctor` | Diagnostics: Python version, OS, terminal, current settings |
+| `claude-status --subagent` | Render per-subagent task rows (used by the `subagentStatusLine` hook, not run by hand — see Per-Subagent Status Rows) |
 | `claude-status --version` | Show version |
 | `claude-status --help` | Show usage |
 
@@ -327,6 +346,8 @@ If claude-status doesn't appear after installation:
 3. Ensure your Python scripts directory is in your `PATH`
 4. Try `python -m claude_statusline --setup` as a fallback
 5. Restart Claude Code after any configuration change
+
+**Why don't I see per-subagent rows?** In likely order: (1) rows only exist **while subagents are running** — an idle session shows nothing, that's normal; (2) check `~/.claude/settings.json` has the `subagentStatusLine` entry (`claude-status --doctor` reports its state); (3) your Claude Code version may predate the hook — the per-task model/context fields need 2.1.205+; (4) restart Claude Code after adding the entry; (5) probe the renderer directly: `claude-status --subagent < payload.json` with a captured payload prints the JSONL rows it would emit.
 
 ## Uninstall
 

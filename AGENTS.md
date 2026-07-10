@@ -23,7 +23,7 @@ The user must restart Claude Code for the status line to appear. Tell them this 
 claude-status --print-config
 ```
 
-A successful install prints 8 `key=value` lines in stable order — values are always present (empty string when absent) so a parser can rely on a fixed line count:
+A successful install prints 9 `key=value` lines in stable order (8 original + `subagent`, appended in v0.13.0 — key=value and first-8-lines parsers keep working; a parser asserting an exact 8-line count needs updating) — values are always present (empty string when absent) so a parser can rely on a fixed line count:
 
 ```
 installed=true
@@ -34,6 +34,13 @@ theme=<theme name; "default" when --theme not specified>
 version=<package version, e.g. 0.5.5>
 settings_path=<absolute path to settings.json>
 settings_state=ok
+subagent=<installed | installed_missing_flag | not_installed>
+```
+
+`subagent` reports the optional `subagentStatusLine` hook (per-task agent rows, v0.13.0+). To enable it on the user's behalf, add to settings.json alongside `statusLine`:
+
+```json
+"subagentStatusLine": {"type": "command", "command": "claude-status --subagent"}
 ```
 
 **Exit codes** (relied on by scripts):

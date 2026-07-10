@@ -14,7 +14,7 @@ import tempfile
 import time
 
 from . import __version__
-from .bar import render_bar
+from .bar import _bar_color, render_bar
 from . import colors as _colors_mod
 from .colors import (
     BOLD, BRIGHT_BLACK, BRIGHT_MAGENTA, BRIGHT_RED, CYAN, GREEN, RED, RESET,
@@ -31,6 +31,7 @@ from .git import (
 from .sessions import (
     _CLAUDE_DIR, _CLAUDE_DIR_REAL, _VALID_EFFORT_LEVELS,
     _canonical_effort, _count_activity_with_status,
+    _parse_iso8601_ms,
     _read_cache, _write_cache,
     get_budget_config, get_budget_scope, get_clickable_links_enabled,
     get_compaction_threshold,
@@ -1981,6 +1982,294 @@ def render(data, theme_name="default"):
     return "\n".join(lines)
 
 
+# ─── subagentStatusLine support (v0.13.0, #110) ──────────────────────
+#
+# Claude Code's `subagentStatusLine` settings hook feeds a command
+# `columns` + a `tasks[]` array on stdin and renders each emitted
+# JSONL line `{"id": <task id>, "content": <row body>}` as that
+# task's row in the agent panel. One binary serves both hooks:
+# `claude-status --subagent` is the documented interface; a payload
+# arriving on the plain command is auto-detected as a convenience
+# fallback (stderr breadcrumb suggests the flag).
+
+# Terminal task statuses: rows are emitted only for tasks that are
+# (or may be) running. Omitting the id for finished tasks hands the
+# row back to upstream's default rendering — and kills the
+# forever-ticking elapsed timer a finished task would otherwise show.
+# Upstream's status enum is not documented; this set is deliberately
+# broad and matching is case-insensitive. Unknown/missing status
+# fails OPEN (render): wrongly rendering a live row for a new
+# terminal status is a cosmetic staleness bug, while wrongly hiding
+# running tasks would gut the feature.
+_TERMINAL_TASK_STATUSES = frozenset({
+    "completed", "complete", "done", "failed", "error", "errored",
+    "cancelled", "canceled", "aborted", "success", "succeeded",
+    "finished", "killed", "timeout", "timed_out",
+})
+
+# Free text from task definitions is embedded into terminal output —
+# strip C0/C1 control characters so a task name can't smuggle escape
+# sequences into the user's terminal (same threat model as the OSC 8
+# URL sanitizer above).
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+# Trailing date stamp on model IDs ("claude-sonnet-5-20250707").
+_MODEL_DATE_RE = re.compile(r"-\d{8}$")
+
+_SUBAGENT_NAME_MAX = 24         # name segment cap (with ellipsis)
+_SUBAGENT_COLUMNS_DEFAULT = 80  # when columns is garbage after tasks qualified
+_SUBAGENT_COLUMNS_MARGIN = 2    # upstream may spend row budget on its own glyphs
+_SUBAGENT_ELAPSED_MAX_MS = 7 * 24 * 3600 * 1000  # >7d elapsed = garbage clock
+
+
+def _is_subagent_payload(data):
+    """Envelope-only discriminator for subagentStatusLine payloads.
+
+    True iff `tasks` is a LIST and `columns` is numeric (bool
+    excluded — it passes isinstance(int)). Deliberately nothing else:
+
+    - `tasks: []` (no agents running) IS a subagent payload — the
+      correct output is nothing, not a full ANSI statusline dumped
+      into the JSONL panel.
+    - Malformed ELEMENTS never flip the mode: element validation
+      happens per-row in render_subagent with skip, because one bad
+      task turning the whole payload into cross-mode corruption is
+      the worst available failure.
+    - There is no documented discriminator field upstream; this
+      inference (tasks + columns together) is the narrowest signal
+      the documented schema provides. A future MAIN payload growing
+      both keys would misroute — the --subagent flag exists so
+      correctly-configured users never depend on this inference.
+    """
+    if not isinstance(data, dict):
+        return False
+    if not isinstance(data.get("tasks"), list):
+        return False
+    cols = data.get("columns")
+    if isinstance(cols, bool):
+        return False
+    return _safe_num(cols) is not None
+
+
+def _parse_start_time_ms(value):
+    """Task startTime -> epoch ms, or None. Format is NOT documented
+    upstream, so accept the three plausible encodings:
+
+    - ISO-8601 string ("2026-07-09T18:00:00.000Z") via the transcript
+      timestamp parser.
+    - Epoch numbers, disambiguated by magnitude: < 1e11 -> seconds
+      (1e11 s is year 5138), 1e11..1e14 -> milliseconds (1e11 ms is
+      1973), >= 1e14 -> microseconds-or-garbage, rejected. The bands
+      cannot collide for ~3000 years.
+    - Numeric strings coerce via _safe_num (which also kills
+      NaN/Infinity — both valid json.loads output). Bools are
+      rejected explicitly (same rule as columns: bool is an int
+      subclass and `true` is not a timestamp).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        iso = _parse_iso8601_ms(value)
+        if iso is not None:
+            return iso
+    num = _safe_num(value)
+    if num is None or num <= 0:
+        return None
+    if num < 1e11:
+        return int(num * 1000)
+    if num < 1e14:
+        return int(num)
+    return None
+
+
+def _sanitize_row_text(value):
+    """Control-char-stripped, length-capped text for row embedding."""
+    if not isinstance(value, str):
+        return ""
+    text = _CONTROL_CHARS_RE.sub("", value).strip()
+    if len(text) > _SUBAGENT_NAME_MAX:
+        text = text[:_SUBAGENT_NAME_MAX - 1] + "…"
+    return text
+
+
+def _short_model(model_id):
+    """Compact display for a task's model id: "claude-sonnet-5-20250707"
+    -> "Sonnet 5", "claude-opus-4-8" -> "Opus 4.8". Trailing numeric
+    id parts are version components, joined with dots. Unknown shapes
+    degrade to the sanitized, dash-split, title-cased raw id.
+
+    Control-strip WITHOUT the length cap first: _sanitize_row_text's
+    24-char truncation would eat the trailing "-YYYYMMDD" before the
+    date regex could strip it ("claude-haiku-4-5-20251001" is 25
+    chars). The cap is applied to the final short form instead."""
+    if not isinstance(model_id, str):
+        return ""
+    text = _CONTROL_CHARS_RE.sub("", model_id).strip()
+    if not text:
+        return ""
+    text = _MODEL_DATE_RE.sub("", text)
+    if text.startswith("claude-"):
+        text = text[len("claude-"):]
+    parts = [p for p in text.split("-") if p]
+    version = []
+    while parts and parts[-1].isdigit():
+        version.insert(0, parts.pop())
+    family = " ".join(parts).title()
+    if family and version:
+        short = "{} {}".format(family, ".".join(version))
+    else:
+        short = family or ".".join(version)
+    if len(short) > _SUBAGENT_NAME_MAX:
+        short = short[:_SUBAGENT_NAME_MAX - 1] + "…"
+    return short
+
+
+def render_subagent(data, theme_name="default", _now=None):
+    """Render a subagentStatusLine payload to JSONL row overrides.
+
+    Contract (documented upstream): one `{"id", "content"}` JSON
+    object per line; a task whose id is omitted keeps its default
+    rendering; empty content HIDES a row. Consequences honored here:
+
+    - A task we cannot render (non-dict, no id, terminal status, or
+      nothing fits the width) is OMITTED — default rendering always
+      beats a hidden or garbled row. Empty content is never emitted:
+      a degradation path must not blank the user's panel.
+    - The id is echoed back as its ORIGINAL JSON value (int stays
+      int) so upstream's row matching cannot miss.
+    - ZERO disk writes and zero subprocess spawns happen here: this
+      never calls _normalize (which mirrors the effort cache to
+      disk), never touches git, and never records daily spend. The
+      hook fires once per refresh tick per panel — side effects would
+      multiply.
+
+    Row shape, fitted to `columns` minus a small margin (upstream may
+    spend part of the budget on its own glyphs — unverified):
+
+        [Explore] [███░░░░░] 41% · 23s · Sonnet 5
+
+    Drop order under width pressure: model -> bar -> elapsed; the
+    minimum row is "[name] 41%" (or "[name] 23s" on pre-2.1.205
+    payloads, which omit model/contextWindowSize). Percent color uses
+    the same 60/85 bands as the main context bar, so the panel and
+    the statusline agree on what "danger" looks like.
+    """
+    theme = get_theme(theme_name)
+    tc = theme["colors"]
+    now_ms = int((time.time() if _now is None else _now) * 1000)
+
+    # Trust any small positive width: a genuinely narrow panel must
+    # get a narrow budget (rows that can't fit are OMITTED — upstream's
+    # default rendering is the honest degrade). Falling back to the
+    # 80-col default for small values would invert the contract: a
+    # 19-col panel would receive 78-col rows, overflowing 3x. The
+    # default is reserved for genuine garbage (missing/non-positive/
+    # absurd).
+    cols = data.get("columns")
+    cols_num = None if isinstance(cols, bool) else _safe_num(cols)
+    if cols_num is None or cols_num <= 0 or cols_num > 4000:
+        width_budget = _SUBAGENT_COLUMNS_DEFAULT
+    else:
+        width_budget = int(cols_num)
+    width_budget -= _SUBAGENT_COLUMNS_MARGIN
+
+    lines = []
+    for task in data.get("tasks", []):
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("id")
+        if task_id is None:
+            continue
+
+        status = task.get("status")
+        if isinstance(status, str) and \
+                status.strip().lower() in _TERMINAL_TASK_STATUSES:
+            continue  # finished: upstream's default row, no live timer
+
+        name = ""
+        for key in ("name", "label", "type"):
+            name = _sanitize_row_text(task.get(key))
+            if name:
+                break
+        if not name:
+            name = "task"
+        name_seg = colorize("[{}]".format(name), tc["agent"])
+
+        # Context percentage: tokenCount may legitimately be 0 (a 0%
+        # bar); contextWindowSize must be strictly positive (guards
+        # ZeroDivision). Displayed pct clamps to 100 — upstream lag
+        # can put tokenCount above the window and "[####] 412%" is a
+        # lie either way (same rationale as the rate-limits clamp).
+        tokens = _safe_num(task.get("tokenCount"))
+        ctx = _safe_num(task.get("contextWindowSize"))
+        pct_seg = bar_seg = None
+        if tokens is not None and tokens >= 0 and ctx is not None and ctx > 0:
+            pct = min(100.0, (tokens / ctx) * 100.0)
+            pct_seg = colorize("{:.0f}%".format(pct), _bar_color(pct))
+            bar_seg = render_bar(pct, width=8, theme=theme)
+
+        # Elapsed: negative (future startTime / clock skew) and
+        # absurd (>7d) ages drop the segment — cache_age precedent.
+        elapsed_seg = None
+        start_ms = _parse_start_time_ms(task.get("startTime"))
+        if start_ms is not None:
+            age_ms = now_ms - start_ms
+            if 0 <= age_ms <= _SUBAGENT_ELAPSED_MAX_MS:
+                elapsed_seg = colorize(fmt_duration(age_ms), tc["value"])
+
+        model_seg = None
+        short = _short_model(task.get("model"))
+        if short:
+            model_seg = colorize(short, tc.get("model", BRIGHT_BLACK))
+
+        # Assemble at full detail, then drop model -> bar -> elapsed
+        # until the row fits. Never pad; never emit an empty row.
+        def _assemble(with_model, with_bar, with_elapsed):
+            parts = [name_seg]
+            gauge = " ".join(p for p in (
+                bar_seg if with_bar else None, pct_seg) if p)
+            if gauge:
+                parts.append(gauge)
+            if with_elapsed and elapsed_seg:
+                parts.append(elapsed_seg)
+            if with_model and model_seg:
+                parts.append(model_seg)
+            head = parts[0]
+            rest = parts[1:]
+            if not rest:
+                return head
+            return head + " " + " · ".join(rest)
+
+        row = None
+        for wm, wb, we in ((True, True, True), (False, True, True),
+                           (False, False, True), (False, False, False)):
+            candidate = _assemble(wm, wb, we)
+            if _visible_width(candidate) <= width_budget:
+                row = candidate
+                break
+        if row is None:
+            # Even "[name]"/"[name] 41%" overflows: truncate the name
+            # harder; if that still can't fit, omit the row entirely.
+            bare = colorize("[{}]".format(name[:8]), tc["agent"])
+            if _visible_width(bare) <= width_budget:
+                row = bare
+            else:
+                continue
+
+        # allow_nan=False + skip: a NaN/Infinity float id (json.loads
+        # accepts the bare literals) would otherwise serialize as
+        # `{"id": NaN, ...}` — invalid strict JSON that upstream's
+        # JSON.parse throws on, potentially poisoning EVERY row in the
+        # response. One bad task must never take down the panel.
+        try:
+            lines.append(json.dumps(
+                {"id": task_id, "content": row}, allow_nan=False))
+        except ValueError:
+            continue
+
+    return "\n".join(lines)
+
+
 def _demo_data():
     """Generate sample data for demo mode using the real nested schema.
 
@@ -2188,9 +2477,12 @@ def cmd_print_config():
     """Print current install state in a deterministic key=value form.
 
     Designed for coding agents and shell scripts. Output is a stable
-    8-line block — fields are always emitted in the same order, every
-    field always appears, and values containing newlines are
-    sanitized so the line count stays fixed.
+    9-line block (8 original lines + `subagent`, appended in v0.13.0
+    so existing key=value and first-8-lines parsers keep working; a
+    parser asserting an exact 8-line count does need updating) —
+    fields are always emitted in the same order, every field always
+    appears, and values containing newlines are sanitized so the line
+    count stays fixed.
 
     Output keys (in order):
       installed         true | false
@@ -2201,6 +2493,10 @@ def cmd_print_config():
       version           running module version
       settings_path     absolute path to the settings.json we inspected
       settings_state    ok | missing | unreadable
+      subagent          installed | installed_missing_flag | not_installed
+                        (state of the subagentStatusLine hook; the
+                        _missing_flag variant means the hook points at
+                        claude-status but lacks --subagent)
 
     Exit codes:
       0  installed (statusLine.command launches claude-status)
@@ -2221,6 +2517,7 @@ def cmd_print_config():
     refresh = ""
     theme = ""
     settings_state = "missing"
+    settings = None  # stays None when the settings file doesn't exist
 
     if os.path.exists(settings_file):
         try:
@@ -2275,6 +2572,18 @@ def cmd_print_config():
                     installed = True
                     theme = _extract_theme(parts)
 
+    # subagentStatusLine state (v0.13.0): appended as an EXTRA line
+    # after the original 8 so existing key=value parsers keep working;
+    # the docstring documents the addition.
+    subagent_state = "not_installed"
+    if isinstance(settings, dict):
+        sub = settings.get("subagentStatusLine")
+        if isinstance(sub, dict) and \
+                "claude-status" in str(sub.get("command", "")):
+            subagent_state = ("installed"
+                              if "--subagent" in str(sub.get("command", ""))
+                              else "installed_missing_flag")
+
     print("installed={}".format("true" if installed else "false"))
     print("command={}".format(_sanitize_field(cmd_str)))
     print("type={}".format(_sanitize_field(sl_type)))
@@ -2283,9 +2592,70 @@ def cmd_print_config():
     print("version={}".format(__version__))
     print("settings_path={}".format(_sanitize_field(settings_file)))
     print("settings_state={}".format(settings_state))
+    print("subagent={}".format(subagent_state))
     if settings_state == "unreadable":
         sys.exit(2)
     sys.exit(0 if installed else 1)
+
+
+def _subagent_command(theme_name="default"):
+    """The settings.json command string for the subagent hook —
+    same construction as the statusLine command, plus --subagent."""
+    cmd = "claude-status"
+    if theme_name != "default":
+        cmd += " --theme {}".format(theme_name)
+    return cmd + " --subagent"
+
+
+def _install_subagent_hook(theme_name="default"):
+    """Write the subagentStatusLine key into settings.json.
+
+    Returns True on success. Read-modify-ATOMIC-write (tmp +
+    os.replace); deliberately makes NO .bak of its own — the only
+    caller is the --setup wizard's opt-in question, which runs
+    seconds after cmd_install already created settings.json.bak.
+    Never called unconditionally: the setting's minimum Claude Code
+    version is undocumented upstream, and interactive setup is where
+    the user can check their version.
+    """
+    settings_file = _settings_path()
+    settings = {}
+    if os.path.exists(settings_file):
+        try:
+            with open(settings_file, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            if not isinstance(settings, dict):
+                settings = {}
+        except (json.JSONDecodeError, IOError) as e:
+            print("  Warning: could not read settings: {}".format(e))
+            return False
+    settings["subagentStatusLine"] = {
+        "type": "command",
+        "command": _subagent_command(theme_name),
+    }
+    # Atomic write (tmp + os.replace, the ledger/cache pattern): a
+    # disk-full mid-dump on a plain open() would leave settings.json
+    # truncated mid-JSON — corrupting the user's Claude Code config is
+    # the #96 incident class and never acceptable from a wizard step.
+    tmp = settings_file + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(settings_file), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, settings_file)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        print("  Warning: could not write settings: {}".format(e))
+        print("  Your settings.json was NOT modified (atomic write "
+              "failed before replace); a .bak from the install step "
+              "may also exist alongside it.")
+        return False
+    print("  subagentStatusLine: {}".format(_subagent_command(theme_name)))
+    return True
 
 
 def cmd_install(theme_name="default"):
@@ -2332,6 +2702,13 @@ def cmd_install(theme_name="default"):
     print("  statusLine: {}".format(cmd))
     print()
     print("Restart Claude Code to see your new status line!")
+    print()
+    print("Optional — per-subagent status rows in the agent panel")
+    print("(model/context fields need Claude Code 2.1.205+). Add to")
+    print("your settings.json, or run claude-status --setup:")
+    print()
+    print('  "subagentStatusLine": {{"type": "command", '
+          '"command": "{}"}}'.format(_subagent_command(theme_name)))
 
 
 def cmd_uninstall():
@@ -2355,14 +2732,36 @@ def cmd_uninstall():
         print("Error: could not read {}: {}".format(settings_file, e))
         return
 
-    if "statusLine" not in settings:
+    if "statusLine" not in settings and "subagentStatusLine" not in settings:
         print("claude-status is not installed (no statusLine in settings).")
         return
 
-    # Check for backup with previous statusLine config
+    # Remove the subagent hook if it points at claude-status —
+    # shipping an installer for a key the uninstaller strands would
+    # be a bug. A subagentStatusLine belonging to some other tool is
+    # left alone.
+    had_statusline = "statusLine" in settings
+    removed_sub = False
+    sub = settings.get("subagentStatusLine")
+    if isinstance(sub, dict) and "claude-status" in str(sub.get("command", "")):
+        del settings["subagentStatusLine"]
+        removed_sub = True
+
+    if not had_statusline and not removed_sub:
+        # Only a FOREIGN subagentStatusLine exists: nothing of ours to
+        # remove. Don't rewrite (and reformat) the user's settings, and
+        # don't print a false "Removed statusLine" message.
+        print("claude-status is not installed "
+              "(the subagentStatusLine present belongs to another tool).")
+        return
+
+    # Check for backup with previous statusLine config. Gated on the
+    # settings actually HAVING had a statusLine: without the gate, a
+    # subagent-hook-only uninstall against a stale .bak would resurrect
+    # a statusLine the user had deliberately removed.
     backup_file = settings_file + ".bak"
     restored = False
-    if os.path.exists(backup_file):
+    if had_statusline and os.path.exists(backup_file):
         try:
             with open(backup_file, "r", encoding="utf-8") as f:
                 backup = json.load(f)
@@ -2377,7 +2776,9 @@ def cmd_uninstall():
                   file=sys.stderr)
 
     if not restored:
-        del settings["statusLine"]
+        # pop, not del: this path also serves subagent-hook-only
+        # payloads where "statusLine" is legitimately absent.
+        settings.pop("statusLine", None)
 
     try:
         with open(settings_file, "w", encoding="utf-8") as f:
@@ -2387,10 +2788,12 @@ def cmd_uninstall():
         print("Error writing settings: {}".format(e))
         return
 
+    if removed_sub:
+        print("Removed subagentStatusLine hook.")
     if restored:
         print("Restored previous statusLine config from backup.")
         print("  statusLine: {}".format(settings.get("statusLine")))
-    else:
+    elif had_statusline:
         print("Removed statusLine from {}".format(settings_file))
 
     print()
@@ -2524,12 +2927,31 @@ def cmd_setup():
     print()
     cmd_install(theme_choice)
 
+    # Step 4b: optional per-subagent rows (v0.13.0). Opt-in question
+    # rather than unconditional write: --setup is interactive, so the
+    # user can check their Claude Code version; the setting's own
+    # minimum version is not documented upstream, and writing an
+    # unknown settings key on an old Claude Code may surface warnings.
+    subagent_enabled = False
+    try:
+        sub_input = input(
+            "Also enable per-subagent status rows in the agent panel?\n"
+            "  (task name, context %, elapsed — model/context need "
+            "Claude Code 2.1.205+) [y/N]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        sub_input = ""
+    if sub_input in ("y", "yes"):
+        subagent_enabled = _install_subagent_hook(theme_choice)
+
     # Step 5: Summary
     print()
     print("Setup complete!")
     print("  Theme: {}".format(theme_choice))
     if budget is not None:
         print("  Budget: ${:.2f}/day".format(budget))
+    if subagent_enabled:
+        print("  Subagent rows: enabled")
     print()
     print("Tip: Add \"refreshInterval\": 10 to your statusLine config")
     print("     for periodic updates (clock, sessions, rate limits).")
@@ -2573,6 +2995,19 @@ def cmd_doctor():
                 settings = json.load(f)
             sl = settings.get("statusLine", "(not configured)")
             print("  statusLine: {}".format(sl))
+            sub = settings.get("subagentStatusLine")
+            if sub is None:
+                print("  subagentStatusLine: (not configured — per-task "
+                      "agent rows disabled; see README)")
+            else:
+                print("  subagentStatusLine: {}".format(sub))
+                if isinstance(sub, dict) and \
+                        "claude-status" in str(sub.get("command", "")) and \
+                        "--subagent" not in str(sub.get("command", "")):
+                    print("    note: command lacks --subagent — "
+                          "auto-detection covers it, but emits a "
+                          "per-tick stderr reminder; add the flag to "
+                          "silence it")
             if isinstance(sl, dict):
                 ri = sl.get("refreshInterval")
                 if ri:
@@ -2785,6 +3220,9 @@ def main():
     parser.add_argument("--print-config", action="store_true",
                         dest="print_config",
                         help="Print install state in machine-readable form (for scripts/agents)")
+    parser.add_argument("--subagent", action="store_true",
+                        help="Render subagentStatusLine task rows (JSONL) "
+                             "instead of the statusline")
     parser.add_argument("--theme", default="default",
                         choices=["default", "minimal", "powerline",
                                  "nord", "tokyo-night", "gruvbox", "rose-pine",
@@ -2820,15 +3258,50 @@ def main():
         return
 
     # Normal mode: read JSON from stdin, output statusline
+    raw = ""  # pre-bind: stdin.read() itself can raise ValueError
+    # (io.UnsupportedOperation on a closed stdin IS a ValueError
+    # subclass), and the handler below dereferences `raw`.
     try:
         raw = sys.stdin.read()
         if not raw.strip():
             return
         data = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
-        print("?")
+        # JSONL purity: in subagent mode (or anything that even LOOKS
+        # like a truncated subagent payload) a bare "?" line would be
+        # injected into the agent panel's JSONL stream. Print nothing
+        # there; keep the long-standing "?" for the main hook.
+        # '"tasks":' (with colon) so only a KEY position matches — a
+        # truncated MAIN payload whose git branch is literally named
+        # "tasks" must still get its long-standing "?".
+        if not args.subagent and '"tasks":' not in (raw or ""):
+            print("?")
+        else:
+            print("claude-status: undecodable subagent payload",
+                  file=sys.stderr)
         return
     except KeyboardInterrupt:
+        return
+
+    # subagentStatusLine dispatch — BEFORE render()/_normalize, which
+    # have side effects (effort-cache mirror, git subprocesses, spend
+    # ledger) that must never run on the per-tick subagent hook.
+    # --subagent is the documented interface; auto-detection is a
+    # convenience fallback for users who pasted the bare command.
+    if args.subagent or _is_subagent_payload(data):
+        if not args.subagent:
+            print("claude-status: subagent payload auto-detected; "
+                  "prefer \"claude-status --subagent\" in "
+                  "subagentStatusLine settings", file=sys.stderr)
+        try:
+            output = render_subagent(data, args.theme) \
+                if _is_subagent_payload(data) else ""
+        except Exception as exc:
+            print("claude-status: subagent render error: {}".format(exc),
+                  file=sys.stderr)
+            output = ""
+        if output:
+            print(output)
         return
 
     try:

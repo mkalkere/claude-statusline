@@ -1,3 +1,3 @@
 """claude-status: Beautiful status line for Claude Code."""
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"

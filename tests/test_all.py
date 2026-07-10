@@ -3912,11 +3912,13 @@ class TestPrintConfig(unittest.TestCase):
                     kv[k] = v
             return kv, exit_code
 
-    def test_emits_all_eight_keys_in_stable_order(self):
-        """Output contract: 8 keys, always in this exact order.
+    def test_emits_all_keys_in_stable_order(self):
+        """Output contract: 9 keys, always in this exact order
+        (`subagent` APPENDED in v0.13.0 — appending keeps pre-existing
+        8-line parsers working; inserting or reordering would not).
 
         Agents and shell scripts parse this — silent reordering or
-        adding/removing keys would break every downstream consumer.
+        removing keys would break every downstream consumer.
         """
         import claude_statusline.cli as cli_mod
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3943,7 +3945,8 @@ class TestPrintConfig(unittest.TestCase):
         self.assertEqual(
             keys_in_order,
             ["installed", "command", "type", "refreshInterval",
-             "theme", "version", "settings_path", "settings_state"],
+             "theme", "version", "settings_path", "settings_state",
+             "subagent"],
             "key order or set changed — agents parsing this output will break"
         )
 
@@ -4256,15 +4259,16 @@ class TestPrintConfigEdgeCases(unittest.TestCase):
     def test_newline_in_command_does_not_break_line_count(self):
         """A command containing \\n would inject a fake key=value line
         into the output, breaking every parser that relies on the
-        documented 8-line contract. Sanitization must convert it to a
+        documented fixed-line contract (9 lines since v0.13.0 added
+        the subagent field). Sanitization must convert it to a
         single space."""
         kv, code, stdout_text, _ = self._run_with_settings({
             "statusLine": {"type": "command",
                            "command": "claude-status\nPWNED=evil"}
         })
-        # Exactly 8 lines, regardless of injected content.
-        self.assertEqual(len(stdout_text.strip().split("\n")), 8,
-            "newline in command field broke the 8-line contract")
+        # Exactly 9 lines, regardless of injected content.
+        self.assertEqual(len(stdout_text.strip().split("\n")), 9,
+            "newline in command field broke the 9-line contract")
         # PWNED should NOT appear as a key — it should be folded into
         # the command value (with the newline replaced by space).
         self.assertNotIn("PWNED", kv,
@@ -4295,7 +4299,7 @@ class TestPrintConfigEdgeCases(unittest.TestCase):
             "corrupt settings must exit 2 so agents do not overwrite recoverable config")
         # Diagnostic on stderr — agent's logs need to know why.
         self.assertIn("settings.json", stderr_text)
-        # 8 lines on stdout still — contract preserved even on error.
+        # 9 lines on stdout still — contract preserved even on error.
         self.assertEqual(kv["installed"], "false")
 
     # ── Gemini review fixes: versioned python, last-theme-wins, nulls
@@ -8192,6 +8196,585 @@ class TestCostBreakdownSection(unittest.TestCase):
         self.assertIsNone(n["cost"],
             "total_cost_usd absent must result in cost=None (existing "
             "contract — cost sections hide cleanly)")
+
+
+# ─── subagentStatusLine (v0.13.0, #110) ──────────────────────────────
+
+class TestSubagentDiscriminator(unittest.TestCase):
+    """Envelope-only payload discrimination. tasks=[] IS a subagent
+    payload; element contents can never flip the mode; bool columns
+    rejected (bool is an int subclass)."""
+
+    def _is(self, data):
+        from claude_statusline.cli import _is_subagent_payload
+        return _is_subagent_payload(data)
+
+    def test_canonical_subagent_payload(self):
+        self.assertTrue(self._is({"tasks": [{"id": "t"}], "columns": 100}))
+
+    def test_empty_tasks_is_subagent(self):
+        """No agents running is a legit subagent payload — falling
+        through to main would dump a full ANSI statusline into the
+        JSONL panel (the worst cross-mode corruption)."""
+        self.assertTrue(self._is({"tasks": [], "columns": 80}))
+
+    def test_malformed_elements_do_not_flip_mode(self):
+        self.assertTrue(self._is(
+            {"tasks": ["garbage", {"no": "id"}, 42], "columns": 80}))
+
+    def test_main_payload_is_not_subagent(self):
+        self.assertFalse(self._is({"session_id": "x", "cost": {}}))
+
+    def test_bool_columns_rejected(self):
+        self.assertFalse(self._is({"tasks": [], "columns": True}))
+
+    def test_missing_columns_rejected(self):
+        self.assertFalse(self._is({"tasks": []}))
+
+    def test_numeric_string_columns_accepted(self):
+        self.assertTrue(self._is({"tasks": [], "columns": "120"}))
+
+    def test_non_dict_payloads(self):
+        for bad in (None, [], "x", 42):
+            self.assertFalse(self._is(bad))
+
+
+class TestSubagentRender(unittest.TestCase):
+    """render_subagent: JSONL shape, degradation, sanitization,
+    width policy, and the zero-side-effects contract."""
+
+    def setUp(self):
+        # ONE clock for fixtures AND rendering: fmt_duration floors,
+        # so a >=1s gap between fixture-build time and render time
+        # would flip "23s" to "24s" — the clock-gap flake class fixed
+        # in the v0.12 tests. Every fixture startTime and every render
+        # derives from self._now.
+        self._now = time.time()
+
+    def _plain(self, s):
+        return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+    def _rows(self, payload, theme="default", now=None):
+        import claude_statusline.cli as cli_mod
+        out = cli_mod.render_subagent(
+            payload, theme, _now=self._now if now is None else now)
+        if not out:
+            return []
+        return [json.loads(line) for line in out.split("\n")]
+
+    def _task(self, **over):
+        base = {"id": "t1", "name": "Explore", "status": "running",
+                "startTime": int((self._now - 23) * 1000),
+                "tokenCount": 410_000, "model": "claude-sonnet-5-20250707",
+                "contextWindowSize": 1_000_000}
+        base.update(over)
+        return base
+
+    def test_full_row_shape(self):
+        rows = self._rows({"columns": 100, "tasks": [self._task()]})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "t1")
+        body = self._plain(rows[0]["content"])
+        self.assertIn("[Explore]", body)
+        self.assertIn("41%", body)
+        self.assertIn("23s", body)
+        self.assertIn("Sonnet 5", body)
+
+    def test_id_type_preserved(self):
+        """Int id echoes as int — stringifying could break upstream
+        row matching, silently default-rendering the row."""
+        rows = self._rows({"columns": 100, "tasks": [self._task(id=42)]})
+        self.assertEqual(rows[0]["id"], 42)
+        self.assertIsInstance(rows[0]["id"], int)
+
+    def test_terminal_status_omitted(self):
+        """Finished tasks are omitted (default rendering) — a rendered
+        row would show a forever-ticking elapsed timer."""
+        for status in ("completed", "FAILED", "Cancelled", "done",
+                       "succeeded", "error"):
+            rows = self._rows(
+                {"columns": 100, "tasks": [self._task(status=status)]})
+            self.assertEqual(rows, [], status)
+
+    def test_unknown_status_renders(self):
+        """Fail OPEN: unknown/missing status renders — wrongly hiding
+        running tasks would gut the feature."""
+        for status in ("thinking", None, 42, ""):
+            payload = {"columns": 100, "tasks": [self._task(status=status)]}
+            self.assertEqual(len(self._rows(payload)), 1, repr(status))
+
+    def test_never_empty_content(self):
+        """Empty content HIDES a row upstream — degradation must OMIT
+        instead. At columns=5 (budget 3) even the bare truncated name
+        cannot fit: the row must be omitted entirely, never emitted
+        with empty content."""
+        rows = self._rows({"columns": 5,
+                           "tasks": [self._task(name="A" * 200)]})
+        self.assertEqual(rows, [])
+        # At a moderate width the bare truncated-name fallback renders.
+        rows = self._rows({"columns": 14,
+                           "tasks": [self._task(name="A" * 200)]})
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["content"])
+        self.assertIn("[AAAAAAAA]", self._plain(rows[0]["content"]))
+
+    def test_malformed_tasks_skipped_good_ones_render(self):
+        payload = {"columns": 100, "tasks": [
+            "garbage", {"name": "no-id"}, self._task(), 42]}
+        rows = self._rows(payload)
+        self.assertEqual([r["id"] for r in rows], ["t1"])
+
+    def test_zero_tokens_renders_zero_pct(self):
+        """tokenCount=0 is a legit just-started task — truthiness
+        gates drop zeros (house rule)."""
+        rows = self._rows({"columns": 100,
+                           "tasks": [self._task(tokenCount=0)]})
+        self.assertIn("0%", self._plain(rows[0]["content"]))
+
+    def test_zero_ctx_no_gauge_no_crash(self):
+        rows = self._rows({"columns": 100,
+                           "tasks": [self._task(contextWindowSize=0)]})
+        body = self._plain(rows[0]["content"])
+        self.assertNotIn("%", body)
+        self.assertIn("[Explore]", body)
+
+    def test_overflow_pct_clamped(self):
+        rows = self._rows({"columns": 100, "tasks": [
+            self._task(tokenCount=5_000_000, contextWindowSize=1_000_000)]})
+        self.assertIn("100%", self._plain(rows[0]["content"]))
+        self.assertNotIn("500%", self._plain(rows[0]["content"]))
+
+    def test_start_time_formats(self):
+        from claude_statusline.cli import _parse_start_time_ms
+        self.assertEqual(_parse_start_time_ms(1_783_046_343),
+                         1_783_046_343_000)          # epoch seconds
+        self.assertEqual(_parse_start_time_ms(1_783_046_343_072),
+                         1_783_046_343_072)          # epoch ms
+        self.assertIsNotNone(_parse_start_time_ms("2026-07-09T18:00:00Z"))
+        self.assertEqual(_parse_start_time_ms("1783046343"),
+                         1_783_046_343_000)          # numeric string
+        for bad in (1e15, -5, 0, None, "garbage", float("nan"),
+                    float("inf"), [], {}):
+            self.assertIsNone(_parse_start_time_ms(bad), repr(bad))
+
+    def test_future_and_ancient_start_time_drop_elapsed(self):
+        now = time.time()
+        for start in (int((now + 300) * 1000),           # future: skew
+                      int((now - 30 * 86400) * 1000)):   # 30d: garbage
+            rows = self._rows(
+                {"columns": 100, "tasks": [self._task(startTime=start)]},
+                now=now)
+            body = self._plain(rows[0]["content"])
+            self.assertNotIn("s ·", body + " ·")  # no elapsed segment
+            self.assertIn("41%", body)            # rest of row intact
+
+    def test_control_chars_stripped_from_name(self):
+        rows = self._rows({"columns": 100, "tasks": [
+            self._task(name="Ex\x1b]0;pwn\x07plore")]})
+        self.assertNotIn("\x1b]", self._plain(rows[0]["content"]))
+        self.assertNotIn("\x07", rows[0]["content"])
+
+    def test_width_drop_order(self):
+        """model drops first, then bar, then elapsed; minimum keeps
+        name + colored pct."""
+        task = self._task()
+        wide = self._plain(self._rows(
+            {"columns": 120, "tasks": [task]})[0]["content"])
+        self.assertIn("Sonnet 5", wide)
+        mid = self._plain(self._rows(
+            {"columns": 40, "tasks": [task]})[0]["content"])
+        self.assertNotIn("Sonnet 5", mid)
+        self.assertIn("41%", mid)
+        narrow = self._plain(self._rows(
+            {"columns": 25, "tasks": [task]})[0]["content"])
+        self.assertIn("[Explore]", narrow)
+        self.assertIn("41%", narrow)
+        self.assertNotIn("█", narrow)  # bar dropped before pct
+
+    def test_garbage_columns_defaults_not_flips(self):
+        """Garbage columns uses the default width — the renderer must
+        NOT crash and must still emit the row (unconditional length
+        assertion: an empty result here would BE the regression)."""
+        for cols in ("abc", -5, 0, 10**9, None):
+            payload = {"columns": cols, "tasks": [self._task()]}
+            rows = self._rows(payload)
+            self.assertEqual(len(rows), 1, repr(cols))
+            self.assertTrue(rows[0]["content"])
+
+    def test_numeric_string_columns_honored(self):
+        """The discriminator accepts columns "120"; the renderer must
+        use it as a real width (118 budget), not the default."""
+        rows = self._rows({"columns": "120", "tasks": [self._task()]})
+        self.assertEqual(len(rows), 1)
+        self.assertIn("Sonnet 5", self._plain(rows[0]["content"]))
+
+    def test_name_fallback_chain(self):
+        for task, expected in (
+            ({"id": "a", "label": "MyLabel"}, "[MyLabel]"),
+            ({"id": "b", "type": "explore"}, "[explore]"),
+            ({"id": "c"}, "[task]"),
+        ):
+            rows = self._rows({"columns": 80, "tasks": [task]})
+            self.assertIn(expected, self._plain(rows[0]["content"]))
+
+    def test_all_builtin_themes_render(self):
+        """A theme with a missing color key would crash render_subagent
+        (bracket indexing) — and main() would silently blank the whole
+        panel. Pin every built-in theme end to end."""
+        for theme in ("default", "minimal", "powerline", "nord",
+                      "tokyo-night", "gruvbox", "rose-pine", "focus"):
+            rows = self._rows({"columns": 100, "tasks": [self._task()]},
+                              theme=theme)
+            self.assertEqual(len(rows), 1, theme)
+            self.assertIn("[Explore]", self._plain(rows[0]["content"]))
+
+    def test_short_model_matrix(self):
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-sonnet-5-20250707"), "Sonnet 5")
+        self.assertEqual(_short_model("claude-opus-4-8"), "Opus 4.8")
+        self.assertEqual(_short_model("claude-haiku-4-5-20251001"),
+                         "Haiku 4.5")
+        self.assertEqual(_short_model("mystery-model"), "Mystery Model")
+        self.assertEqual(_short_model(""), "")
+        self.assertEqual(_short_model(None), "")
+        self.assertEqual(_short_model(42), "")
+
+    def test_empty_tasks_renders_nothing(self):
+        self.assertEqual(self._rows({"columns": 80, "tasks": []}), [])
+
+    def test_nan_id_row_skipped_not_invalid_jsonl(self):
+        """A NaN float id (json.loads accepts the bare literal) must
+        skip the row — json.dumps would emit `{"id": NaN}` which is
+        invalid strict JSON and could poison the whole panel response
+        upstream."""
+        rows = self._rows({"columns": 100, "tasks": [
+            self._task(id=float("nan")),
+            self._task(id="good", name="Other")]})
+        self.assertEqual([r["id"] for r in rows], ["good"])
+
+    def test_narrow_panel_gets_narrow_budget(self):
+        """A genuinely narrow panel (cols=12) must NOT fall back to
+        the 80-col default — that would hand a 12-col panel 78-col
+        rows (3x overflow). Rows that can't fit are omitted; short
+        names still render."""
+        rows = self._rows({"columns": 12, "tasks": [self._task(name="Ex")]})
+        if rows:  # short name fits: must respect the narrow budget
+            from claude_statusline.cli import _visible_width
+            self.assertLessEqual(_visible_width(rows[0]["content"]), 10)
+        # A long-name task at the same width is omitted, not overflowed.
+        rows2 = self._rows({"columns": 12,
+                            "tasks": [self._task(name="VeryLongAgentName")]})
+        for r in rows2:
+            from claude_statusline.cli import _visible_width
+            self.assertLessEqual(_visible_width(r["content"]), 10)
+
+    def test_zero_side_effects(self):
+        """Subagent rendering must never write to disk or record
+        spend — the hook fires per refresh tick per panel."""
+        import claude_statusline.cli as cli_mod
+        calls = []
+        orig_wc = cli_mod._write_cache
+        orig_rec = cli_mod.record_and_get_daily_spend
+        cli_mod._write_cache = lambda *a, **k: calls.append("write_cache")
+        cli_mod.record_and_get_daily_spend = \
+            lambda *a, **k: calls.append("ledger") or (0.0, False)
+        try:
+            self._rows({"columns": 100, "tasks": [self._task()],
+                        "session_id": "parent", "effort": {"level": "high"},
+                        "cost": {"total_cost_usd": 5.0}})
+        finally:
+            cli_mod._write_cache = orig_wc
+            cli_mod.record_and_get_daily_spend = orig_rec
+        self.assertEqual(calls, [],
+            "subagent rendering must be side-effect free")
+
+    def test_main_dispatch_skips_normalize_entirely(self):
+        """The REAL invariant: main()'s dispatch must route a subagent
+        payload BEFORE _normalize/render ever run (_normalize itself
+        writes the effort cache; render spawns git). Pins the dispatch
+        ORDER, not just render_subagent's own purity."""
+        import claude_statusline.cli as cli_mod
+        from io import StringIO
+        calls = []
+        orig_norm = cli_mod._normalize
+        orig_branch = cli_mod.get_branch
+        cli_mod._normalize = lambda d: calls.append("normalize") or {}
+        cli_mod.get_branch = lambda: calls.append("git") or ""
+        payload = json.dumps({"columns": 100, "tasks": [self._task()],
+                              "effort": {"level": "high"}})
+        old_stdin, old_stdout = sys.stdin, sys.stdout
+        old_argv = sys.argv
+        sys.stdin = StringIO(payload)
+        sys.stdout = StringIO()
+        sys.argv = ["claude-status", "--subagent"]
+        try:
+            cli_mod.main()
+            out = sys.stdout.getvalue()
+        finally:
+            sys.stdin, sys.stdout = old_stdin, old_stdout
+            sys.argv = old_argv
+            cli_mod._normalize = orig_norm
+            cli_mod.get_branch = orig_branch
+        self.assertEqual(calls, [],
+            "_normalize/git must never run on the subagent hook")
+        self.assertIn('"id"', out)  # the JSONL actually rendered
+
+    def test_bool_start_time_rejected(self):
+        """bool is an int subclass; `true` is not a timestamp — same
+        explicit rejection rule as columns."""
+        from claude_statusline.cli import _parse_start_time_ms
+        self.assertIsNone(_parse_start_time_ms(True))
+        self.assertIsNone(_parse_start_time_ms(False))
+
+
+class TestSubagentEndToEnd(unittest.TestCase):
+    """Subprocess-level: the --subagent flag, auto-detection fallback,
+    and the JSONL stdout-purity contract."""
+
+    _env = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls._env = os.environ.copy()
+        cls._env["PYTHONIOENCODING"] = "utf-8"
+        cls._env.pop("CLAUDE_STATUSLINE_WIDTH", None)
+
+    def _run(self, args, payload):
+        return subprocess.run(
+            [sys.executable, "-m", "claude_statusline"] + args,
+            input=payload, capture_output=True, timeout=10,
+            env=self._env, encoding="utf-8", errors="replace",
+            cwd=os.path.join(os.path.dirname(__file__), ".."),
+        )
+
+    def _payload(self):
+        return json.dumps({"columns": 100, "tasks": [
+            {"id": "t1", "name": "Explore", "status": "running",
+             "startTime": int((time.time() - 23) * 1000),
+             "tokenCount": 410_000, "model": "claude-sonnet-5",
+             "contextWindowSize": 1_000_000}]})
+
+    def test_flag_renders_jsonl(self):
+        r = self._run(["--subagent"], self._payload())
+        self.assertEqual(r.returncode, 0)
+        lines = [l for l in r.stdout.strip().split("\n") if l]
+        self.assertEqual(len(lines), 1)
+        obj = json.loads(lines[0])
+        self.assertEqual(obj["id"], "t1")
+        self.assertIn("Explore", obj["content"])
+
+    def test_flag_garbage_stdin_prints_nothing(self):
+        """JSONL purity: with --subagent, undecodable stdin must not
+        emit the main hook's '?' fallback."""
+        r = self._run(["--subagent"], "{truncated")
+        self.assertEqual(r.stdout.strip(), "")
+        self.assertEqual(r.returncode, 0)
+
+    def test_flag_main_payload_prints_nothing(self):
+        """--subagent with a non-subagent payload outputs nothing,
+        exit 0 — never a statusline into the JSONL panel."""
+        r = self._run(["--subagent"],
+                      json.dumps({"session_id": "x", "git_branch": "main"}))
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_autodetect_fallback_with_breadcrumb(self):
+        r = self._run([], self._payload())
+        self.assertEqual(r.returncode, 0)
+        obj = json.loads(r.stdout.strip().split("\n")[0])
+        self.assertEqual(obj["id"], "t1")
+        self.assertIn("--subagent", r.stderr)
+
+    def test_truncated_subagent_garbage_no_question_mark(self):
+        """A truncated payload that LOOKS subagent-shaped must not put
+        a bare '?' into the panel even without the flag."""
+        r = self._run([], '{"tasks": [{"id": "t1"')
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_main_mode_unaffected(self):
+        r = self._run([], json.dumps(
+            {"git_branch": "main",
+             "context_window": {"used_percentage": 30}}))
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn('"id"', r.stdout)
+        self.assertIn("[", r.stdout)  # the context bar
+
+    def test_main_mode_garbage_still_question_mark(self):
+        """The main hook's long-standing '?' contract is preserved for
+        payloads that don't look subagent-shaped. Exact match — any
+        other output would also have contained a '?' under assertIn."""
+        r = self._run([], "not json at all {{{")
+        self.assertEqual(r.stdout.strip(), "?")
+
+    def test_value_position_tasks_still_question_mark(self):
+        """The '?'-suppression sniff matches only the KEY position
+        ('"tasks":') — a truncated MAIN payload whose branch is
+        literally named "tasks" keeps its '?'."""
+        r = self._run([], '{"git_branch": "tasks", "cost"')
+        self.assertEqual(r.stdout.strip(), "?")
+
+
+class TestSubagentInstallFunnel(unittest.TestCase):
+    """The install/uninstall/print-config funnel for the
+    subagentStatusLine hook. All in-process with _settings_path
+    patched to a temp file — never the real settings.json (#96)."""
+
+    def setUp(self):
+        import claude_statusline.cli as cli_mod
+        self._cli = cli_mod
+        self._dir = tempfile.mkdtemp(prefix="claude-status-funnel-")
+        self._settings = os.path.join(self._dir, "settings.json")
+        self._orig_path = cli_mod._settings_path
+        cli_mod._settings_path = lambda: self._settings
+
+    def tearDown(self):
+        import shutil as shutil_mod
+        self._cli._settings_path = self._orig_path
+        shutil_mod.rmtree(self._dir, ignore_errors=True)
+
+    def _write(self, obj):
+        with open(self._settings, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+
+    def _read(self):
+        with open(self._settings, encoding="utf-8") as f:
+            return json.load(f)
+
+    def _capture(self, fn, *a):
+        from io import StringIO
+        old = sys.stdout
+        sys.stdout = StringIO()
+        try:
+            fn(*a)
+            return sys.stdout.getvalue()
+        finally:
+            sys.stdout = old
+
+    # --- _install_subagent_hook ---------------------------------------
+
+    def test_hook_install_fresh_file(self):
+        self._capture(self._cli._install_subagent_hook, "default")
+        s = self._read()
+        self.assertEqual(s["subagentStatusLine"]["command"],
+                         "claude-status --subagent")
+
+    def test_hook_install_preserves_existing_keys(self):
+        self._write({"statusLine": {"type": "command",
+                                    "command": "claude-status"},
+                     "otherKey": {"keep": True}})
+        self._capture(self._cli._install_subagent_hook, "nord")
+        s = self._read()
+        self.assertEqual(s["subagentStatusLine"]["command"],
+                         "claude-status --theme nord --subagent")
+        self.assertEqual(s["otherKey"], {"keep": True})
+        self.assertIn("statusLine", s)
+
+    def test_hook_install_unreadable_settings_returns_false(self):
+        with open(self._settings, "w") as f:
+            f.write("{corrupt json")
+        out_val = []
+        out = self._capture(
+            lambda: out_val.append(
+                self._cli._install_subagent_hook("default")))
+        self.assertFalse(out_val[0])
+        # File untouched — the corrupt original is preserved for the
+        # user to inspect, not clobbered.
+        with open(self._settings) as f:
+            self.assertEqual(f.read(), "{corrupt json")
+
+    # --- cmd_uninstall interactions -------------------------------------
+
+    def test_uninstall_removes_claude_status_sub_hook(self):
+        self._write({
+            "statusLine": {"type": "command", "command": "claude-status"},
+            "subagentStatusLine": {"type": "command",
+                                   "command": "claude-status --subagent"},
+        })
+        out = self._capture(self._cli.cmd_uninstall)
+        s = self._read()
+        self.assertNotIn("subagentStatusLine", s)
+        self.assertNotIn("statusLine", s)
+        self.assertIn("Removed subagentStatusLine hook.", out)
+
+    def test_uninstall_leaves_foreign_sub_hook(self):
+        """A subagentStatusLine belonging to another tool is not ours
+        to remove — and with no statusLine either, nothing is
+        rewritten and no false 'Removed' message prints."""
+        original = {"subagentStatusLine": {"type": "command",
+                                           "command": "other-tool"}}
+        self._write(original)
+        before = open(self._settings).read()
+        out = self._capture(self._cli.cmd_uninstall)
+        self.assertEqual(open(self._settings).read(), before,
+                         "settings must not be rewritten")
+        self.assertNotIn("Removed", out)
+
+    def test_uninstall_sub_hook_only_no_keyerror(self):
+        """Settings with ONLY a claude-status subagentStatusLine: the
+        pop-not-del path — a revert to `del settings["statusLine"]`
+        crashes exactly here."""
+        self._write({"subagentStatusLine": {
+            "type": "command", "command": "claude-status --subagent"}})
+        out = self._capture(self._cli.cmd_uninstall)
+        s = self._read()
+        self.assertEqual(s, {})
+        self.assertIn("Removed subagentStatusLine hook.", out)
+
+    def test_uninstall_sub_only_stale_bak_does_not_resurrect(self):
+        """A stale .bak containing an old statusLine must NOT be
+        restored when the live settings had no statusLine to remove —
+        the user deliberately removed it."""
+        self._write({"subagentStatusLine": {
+            "type": "command", "command": "claude-status --subagent"}})
+        with open(self._settings + ".bak", "w") as f:
+            json.dump({"statusLine": {"type": "command",
+                                      "command": "claude-status"}}, f)
+        self._capture(self._cli.cmd_uninstall)
+        self.assertNotIn("statusLine", self._read())
+
+    # --- print-config subagent variants ---------------------------------
+
+    def _print_config_lines(self):
+        from io import StringIO
+        old = sys.stdout
+        sys.stdout = StringIO()
+        try:
+            try:
+                self._cli.cmd_print_config()
+            except SystemExit:
+                pass
+            return sys.stdout.getvalue().strip().split("\n")
+        finally:
+            sys.stdout = old
+
+    def _subagent_line(self):
+        return [l for l in self._print_config_lines()
+                if l.startswith("subagent=")][0]
+
+    def test_print_config_subagent_installed(self):
+        self._write({"statusLine": {"type": "command",
+                                    "command": "claude-status"},
+                     "subagentStatusLine": {
+                         "type": "command",
+                         "command": "claude-status --subagent"}})
+        self.assertEqual(self._subagent_line(), "subagent=installed")
+
+    def test_print_config_subagent_missing_flag(self):
+        self._write({"subagentStatusLine": {
+            "type": "command", "command": "claude-status"}})
+        self.assertEqual(self._subagent_line(),
+                         "subagent=installed_missing_flag")
+
+    def test_print_config_subagent_not_installed_variants(self):
+        for settings in ({}, {"subagentStatusLine": "garbage"},
+                         {"subagentStatusLine": {"command": "other-tool"}}):
+            self._write(settings)
+            self.assertEqual(self._subagent_line(),
+                             "subagent=not_installed", repr(settings))
+
+    def test_print_config_subagent_no_settings_file(self):
+        # No file at all: settings stays None — must not crash.
+        self.assertEqual(self._subagent_line(), "subagent=not_installed")
 
 
 if __name__ == "__main__":
