@@ -69,6 +69,8 @@ _REAL_SETTINGS_PATH = os.path.join(
 _real_settings_hash_before = None
 _settings_redirect_dir = None
 _prev_settings_env = None
+_cache_redirect_dir = None
+_prev_cache_dir_fn = None
 
 # Distinct, never-None sentinel for "the real settings file exists but we
 # could NOT read it" (permission denied, transient lock, etc.). This MUST
@@ -101,13 +103,26 @@ def _hash_real_settings():
 
 def setUpModule():
     global _real_settings_hash_before, _settings_redirect_dir
-    global _prev_settings_env
+    global _prev_settings_env, _cache_redirect_dir, _prev_cache_dir_fn
     _real_settings_hash_before = _hash_real_settings()
     # Redirect every unpatched settings read/write to a throwaway file.
     _settings_redirect_dir = tempfile.mkdtemp(prefix="claude-status-test-")
     _prev_settings_env = os.environ.get("CLAUDE_STATUSLINE_SETTINGS_PATH")
     os.environ["CLAUDE_STATUSLINE_SETTINGS_PATH"] = os.path.join(
         _settings_redirect_dir, "settings.json")
+    # Redirect every unpatched CACHE read/write to a throwaway dir —
+    # the v0.12.0 daily-spend ledger made this load-bearing: any render
+    # test that passes session_id + cost triggers the budget path on a
+    # machine with a real ~/.claude/claude-status-budget.json, and an
+    # unredirected run would write phantom spend_* ledger files into
+    # the REAL cache dir, inflating the maintainer's live day-spend
+    # chip with test dollars until midnight (monotonic max — it cannot
+    # self-correct). Same incident class as #96; same chokepoint fix.
+    # Per-class setUp patches layer on top of this harmlessly.
+    from claude_statusline import sessions as _sessions_mod
+    _cache_redirect_dir = tempfile.mkdtemp(prefix="claude-status-cache-")
+    _prev_cache_dir_fn = _sessions_mod._cache_dir
+    _sessions_mod._cache_dir = lambda: _cache_redirect_dir
 
 
 def tearDownModule():
@@ -128,6 +143,14 @@ def tearDownModule():
     if _settings_redirect_dir:
         import shutil as _shutil
         _shutil.rmtree(_settings_redirect_dir, ignore_errors=True)
+    # Restore the cache-dir redirect and clean its temp dir (before the
+    # assert below for the same leak-on-raise reason).
+    if _prev_cache_dir_fn is not None:
+        from claude_statusline import sessions as _sessions_mod
+        _sessions_mod._cache_dir = _prev_cache_dir_fn
+    if _cache_redirect_dir:
+        import shutil as _shutil2
+        _shutil2.rmtree(_cache_redirect_dir, ignore_errors=True)
     if after != _real_settings_hash_before:
         raise AssertionError(
             "A test mutated the real ~/.claude/settings.json! Some test "
@@ -687,6 +710,441 @@ class TestCostRateSection(unittest.TestCase):
         finally:
             THEMES["default"]["line2"] = orig_line2
             cli_mod.get_branch = orig_branch
+
+
+class TestDailySpendLedger(unittest.TestCase):
+    """Per-(day, session) spend ledger powering the budget section's
+    daily semantics (v0.12.0). Every scenario here traces to a finding
+    from the adversarial design review — see the docstring of
+    record_and_get_daily_spend for the model."""
+
+    def setUp(self):
+        import shutil as shutil_mod
+        from claude_statusline import sessions as sessions_mod
+        self._shutil = shutil_mod
+        self._sess = sessions_mod
+        self._tmp = tempfile.mkdtemp(prefix="claude-status-ledger-")
+        self._orig_cache_dir = sessions_mod._cache_dir
+        sessions_mod._cache_dir = lambda: self._tmp
+        # Determinism: pin "now" to local NOON of the current day.
+        # With real time.time(), a suite run in the minutes after
+        # local midnight would misclassify "started today" (start ≈
+        # now - duration lands on yesterday) and hard-fail several
+        # attribution tests — the project's determinism rule forbids
+        # that. Noon keeps every duration in these tests (< 12h) on
+        # today's side of the boundary.
+        lt = time.localtime()
+        self._noon = time.mktime(
+            (lt.tm_year, lt.tm_mon, lt.tm_mday, 12, 0, 0, 0, 0, -1))
+        self._day = time.strftime("%Y-%m-%d", time.localtime(self._noon))
+
+    def tearDown(self):
+        self._sess._cache_dir = self._orig_cache_dir
+        self._shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _rec(self, sid, cost, dur_ms, now=None):
+        return self._sess.record_and_get_daily_spend(
+            sid, cost, dur_ms, _now=self._noon if now is None else now)
+
+    # --- attribution rules --------------------------------------------
+
+    def test_started_today_full_attribution(self):
+        """Session started today: base=0, whole cumulative counts.
+        This is also the upgrade-day honesty case."""
+        total, found = self._rec("sid-a", 3.0, 600_000)
+        self.assertTrue(found)
+        self.assertAlmostEqual(total, 3.0)
+
+    def test_midnight_spanning_growth_only(self):
+        """Session started 30h ago: base captured at first sight, only
+        today's growth counts — the over-attribution the base rule
+        exists to prevent."""
+        total, _ = self._rec("sid-b", 8.0, 30 * 3600 * 1000)
+        self.assertAlmostEqual(total, 0.0)
+        total, _ = self._rec("sid-b", 8.6, 30 * 3600 * 1000 + 60_000)
+        self.assertAlmostEqual(total, 0.6)
+
+    def test_missing_duration_conservative(self):
+        """No duration signal -> base=cur (undercount one turn, never
+        overcount)."""
+        total, _ = self._rec("sid-c", 1.5, None)
+        self.assertAlmostEqual(total, 0.0)
+        total, _ = self._rec("sid-c", 2.0, None)
+        self.assertAlmostEqual(total, 0.5)
+
+    def test_monotonic_no_regression_on_stale_rerender(self):
+        self._rec("sid-d", 3.0, 600_000)
+        total, _ = self._rec("sid-d", 2.9, 610_000)  # stale/lower
+        self.assertAlmostEqual(total, 3.0)
+
+    def test_multi_session_sum(self):
+        self._rec("sid-e", 3.0, 600_000)
+        total, _ = self._rec("sid-f", 2.5, 300_000)
+        self.assertAlmostEqual(total, 5.5)
+
+    def test_negative_cost_clamped(self):
+        """Garbage negative cur must not create phantom spend when a
+        later legit value arrives (review finding: base=-3 then cur=2
+        would contribute 5). Exact value pinned: the clamp writes
+        {cost:0, base:0}, then cost 2 contributes exactly 2.0 — a
+        range assertion would also pass an over-clamp that silently
+        dropped the legitimate spend."""
+        self._rec("sid-g", -3.0, 60_000)
+        total, _ = self._rec("sid-g", 2.0, 120_000)
+        self.assertAlmostEqual(total, 2.0)
+
+    # --- robustness ----------------------------------------------------
+
+    def test_corrupt_and_garbage_files_skipped(self):
+        self._rec("sid-h", 4.0, 600_000)
+        day = self._day  # same pinned clock as the recording calls
+        for name, content in (
+            ("spend_{}_aaaaaaaaaaaa.json".format(day), "{not json"),
+            ("spend_{}_bbbbbbbbbbbb.json".format(day), "[1,2]"),
+            ("spend_{}_cccccccccccc.json".format(day),
+             json.dumps({"cost": "abc", "base": 0})),
+            ("spend_{}_dddddddddddd.json".format(day),
+             json.dumps({"cost": float("nan"), "base": 0})),
+        ):
+            with open(os.path.join(self._tmp, name), "w") as f:
+                f.write(content)
+        total, _ = self._rec("sid-h", 4.0, 600_000)
+        self.assertAlmostEqual(total, 4.0)
+
+    def test_yesterday_files_not_summed(self):
+        """Day boundary via the _now seam: an entry recorded 'two days
+        ago' must not appear in today's total."""
+        self._rec("sid-i", 9.0, 60_000, now=self._noon - 2 * 86400)
+        total, found = self._rec("sid-j", 1.0, 60_000)
+        self.assertAlmostEqual(total, 1.0)
+        self.assertTrue(found)
+
+    def test_shared_sid_interleave_self_heals(self):
+        """Two processes sharing one session_id (double resume) can
+        transiently regress each other via max(); the file must never
+        go NEGATIVE in contribution and must self-heal once the higher
+        counter writes again."""
+        self._rec("sid-k", 5.0, 600_000)   # process A
+        self._rec("sid-k", 6.0, 650_000)   # process B, higher
+        total, _ = self._rec("sid-k", 5.5, 700_000)  # A again, lower
+        self.assertGreaterEqual(total, 0.0)
+        total, _ = self._rec("sid-k", 6.2, 750_000)  # B recovers
+        self.assertAlmostEqual(total, 6.2)
+
+    def test_no_session_id_live_contribution_still_counts(self):
+        """Silent-failure review: a chip labeled day: must NEVER
+        exclude the live session. With no usable sid the contribution
+        is computed in memory — 2.0 (other) + 99.0 (live, started
+        today) = 101.0, NOT 2.0."""
+        self._rec("sid-l", 2.0, 60_000)
+        total, found = self._rec("", 99.0, 60_000)
+        self.assertTrue(found)
+        self.assertAlmostEqual(total, 101.0)
+
+    def test_no_sid_midnight_spanning_growth_only_in_memory(self):
+        """The in-memory path applies the SAME attribution rule: a
+        midnight-spanning session (started 30h ago) with no usable sid
+        contributes 0, not its full cumulative — a cli-side raw-cost
+        fallback would have over-attributed here."""
+        self._rec("sid-m", 2.0, 60_000)
+        total, found = self._rec("", 50.0, 30 * 3600 * 1000)
+        self.assertTrue(found)
+        self.assertAlmostEqual(total, 2.0)
+
+    def test_empty_ledger_not_found(self):
+        total, found = self._rec("", None, None)
+        self.assertFalse(found)
+        self.assertAlmostEqual(total, 0.0)
+
+    def test_shared_tempdir_fallback_skips_ledger(self):
+        """When _cache_dir degrades to the SHARED temp root, ledger IO
+        must be skipped entirely: no spend file is written (privacy),
+        no foreign spend_* files are summed (poisoning), and the live
+        session still counts in memory."""
+        self._sess._cache_dir = lambda: tempfile.gettempdir()
+        # A poisoned file in the shared root must NOT be readable into
+        # the total. Plant one with a unique sid hash, then verify.
+        poison = os.path.join(
+            tempfile.gettempdir(),
+            "spend_{}_feedfacefeed.json".format(self._day))
+        with open(poison, "w") as f:
+            f.write(json.dumps({"cost": 500.0, "base": 0.0}))
+        try:
+            total, found = self._rec("sid-n", 3.0, 60_000)
+            self.assertTrue(found)
+            self.assertAlmostEqual(total, 3.0)  # own only; poison ignored
+            # And nothing was written for our sid into the shared root.
+            import hashlib as _h
+            sid12 = _h.md5(b"sid-n").hexdigest()[:12]
+            own = os.path.join(
+                tempfile.gettempdir(),
+                "spend_{}_{}.json".format(self._day, sid12))
+            self.assertFalse(os.path.exists(own),
+                             "ledger must not write into the shared temp root")
+        finally:
+            os.unlink(poison)
+
+    def test_unreachable_cache_dir_degrades(self):
+        """Nonexistent cache dir: writes swallowed, scan OSError caught,
+        live contribution still returned in memory."""
+        self._sess._cache_dir = lambda: os.path.join(
+            self._tmp, "does", "not", "exist")
+        total, found = self._rec("sid-o", 2.5, 60_000)
+        self.assertTrue(found)
+        self.assertAlmostEqual(total, 2.5)
+
+    def test_tmp_leftover_ignored(self):
+        """A crash-orphaned .json.tmp must be excluded by the reader's
+        endswith('.json') filter — pin, not a bug."""
+        self._rec("sid-p", 1.0, 60_000)
+        leftover = os.path.join(
+            self._tmp, "spend_{}_aaaabbbbcccc.json.tmp".format(self._day))
+        with open(leftover, "w") as f:
+            f.write(json.dumps({"cost": 900.0, "base": 0.0}))
+        total, _ = self._rec("sid-p", 1.0, 60_000)
+        self.assertAlmostEqual(total, 1.0)
+
+    def test_cost_none_sid_present_reader_only(self):
+        """cost=None with a sid: writer skips, no in-memory contribution,
+        but other sessions' entries still sum."""
+        self._rec("sid-q", 4.0, 60_000)
+        total, found = self._sess.record_and_get_daily_spend(
+            "sid-r", None, None, _now=self._noon)
+        self.assertTrue(found)
+        self.assertAlmostEqual(total, 4.0)
+
+
+class TestBudgetSectionDaily(unittest.TestCase):
+    """End-to-end budget chip with daily semantics: day: label,
+    summed numerator, color bands on the TOTAL, scope escape hatch,
+    and the honest lower-bound degrade."""
+
+    def _plain(self, s):
+        return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+    def setUp(self):
+        import shutil as shutil_mod
+        import claude_statusline.cli as cli_mod
+        from claude_statusline import sessions as sessions_mod
+        self._shutil = shutil_mod
+        self._cli = cli_mod
+        self._sess = sessions_mod
+        self._tmp = tempfile.mkdtemp(prefix="claude-status-budget-")
+        self._orig_cache_dir = sessions_mod._cache_dir
+        sessions_mod._cache_dir = lambda: self._tmp
+        self._orig_budget = cli_mod.get_budget_config
+        self._orig_scope = cli_mod.get_budget_scope
+        self._orig_branch = cli_mod.get_branch
+        cli_mod.get_budget_config = lambda: 10.0
+        cli_mod.get_budget_scope = lambda: "daily"
+        cli_mod.get_branch = lambda: "main"
+        self._orig_line1 = THEMES["default"]["line1"]
+        THEMES["default"]["line1"] = ["budget"]
+        # Determinism: pin the ledger clock to local noon (see
+        # TestDailySpendLedger.setUp for why — midnight would flip the
+        # started-today classification). cli.render has no _now
+        # parameter, so wrap the imported name at the cli module level.
+        lt = time.localtime()
+        self._noon = time.mktime(
+            (lt.tm_year, lt.tm_mon, lt.tm_mday, 12, 0, 0, 0, 0, -1))
+        self._orig_record = cli_mod.record_and_get_daily_spend
+        cli_mod.record_and_get_daily_spend = (
+            lambda sid, c, d: self._sess.record_and_get_daily_spend(
+                sid, c, d, _now=self._noon))
+
+    def _seed(self, sid, cost, dur):
+        self._sess.record_and_get_daily_spend(sid, cost, dur, _now=self._noon)
+
+    def tearDown(self):
+        self._sess._cache_dir = self._orig_cache_dir
+        self._cli.get_budget_config = self._orig_budget
+        self._cli.get_budget_scope = self._orig_scope
+        self._cli.get_branch = self._orig_branch
+        self._cli.record_and_get_daily_spend = self._orig_record
+        THEMES["default"]["line1"] = self._orig_line1
+        self._shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _render(self, sid, cost, dur):
+        data = {"git_branch": "main", "session_id": sid,
+                "context_window": {"used_percentage": 10}}
+        if cost is not None:
+            data["cost"] = {"total_cost_usd": cost,
+                            "total_duration_ms": dur}
+        return self._plain(self._cli.render(data, "default"))
+
+    def test_day_label_and_sum(self):
+        self._sess.record_and_get_daily_spend("other-sess", 4.0, 600_000)
+        out = self._render("this-sess", 3.4, 700_000)
+        self.assertIn("day:$7.4/$10", out)
+
+    def test_color_band_on_total_not_session(self):
+        """$4 (other) + $5.2 (this) = $9.2 of $10 -> >=90% band. The
+        pre-v0.12.0 bug would have used $5.2 (52%, green)."""
+        self._sess.record_and_get_daily_spend("other-sess", 4.0, 600_000)
+        raw = self._cli.render({
+            "git_branch": "main", "session_id": "this-sess",
+            "cost": {"total_cost_usd": 5.2, "total_duration_ms": 700_000},
+            "context_window": {"used_percentage": 10}}, "default")
+        self.assertIn("day:$9.2/$10", self._plain(raw))
+        self.assertIn(BRIGHT_RED, raw)
+
+    def test_upgrade_day_lower_bound(self):
+        """Empty ledger + live session (started today) -> live cost as
+        the honest partial day total, same day: label."""
+        out = self._render("fresh-sess", 2.1, 400_000)
+        self.assertIn("day:$2.1/$10", out)
+
+    def test_no_session_id_still_day_label(self):
+        """Writer can't record without a sid; the live cost is still a
+        true lower bound and keeps the day: label (meaning never
+        switches — design review required this)."""
+        out = self._render("", 2.1, 400_000)
+        self.assertIn("day:$2.1/$10", out)
+
+    def test_scope_session_restores_old_chip(self):
+        self._cli.get_budget_scope = lambda: "session"
+        self._sess.record_and_get_daily_spend("other-sess", 4.0, 600_000)
+        out = self._render("this-sess", 3.4, 700_000)
+        self.assertIn("$3.4/$10", out)
+        self.assertNotIn("day:", out)
+
+    def test_hidden_without_budget(self):
+        self._cli.get_budget_config = lambda: None
+        out = self._render("this-sess", 3.4, 700_000)
+        self.assertNotIn("/$", out)
+
+    def test_hidden_no_cost_no_ledger(self):
+        out = self._render("this-sess", None, None)
+        self.assertNotIn("day:", out)
+
+    def test_no_cost_but_others_spent_shows_day_total(self):
+        """Live session has no cost yet, but other sessions spent today
+        — the chip still shows the day total (the cli comment promises
+        this; previously untested)."""
+        self._seed("other-sess", 4.0, 600_000)
+        out = self._render("this-sess", None, None)
+        self.assertIn("day:$4.0/$10", out)
+
+    def test_garbage_duration_never_crashes_render(self):
+        """time.localtime raises OverflowError/OSError for epoch values
+        outside time_t range — a garbage duration like 9e18 ms must
+        degrade to the conservative base, not blank the statusline.
+        (Code-review finding, reproduced before fixing.)"""
+        for bad_dur in (9e18, 1.8e15):
+            out = self._render("weird-sess-{}".format(bad_dur), 2.0, bad_dur)
+            self.assertIn("main", out)  # render survived
+            # Conservative base=cur -> contribution 0 -> chip shows $0
+            # or is present; the essential assertion is no crash.
+
+
+class TestBudgetScopeConfig(unittest.TestCase):
+    """get_budget_scope(): 'daily' default, 'session' honored, garbage
+    and stale cached dicts (pre-v0.12.0, key absent) fall to daily."""
+
+    def test_default_daily(self):
+        from claude_statusline import sessions as sess
+        orig = sess._read_status_config
+        sess._read_status_config = lambda: {"budget": 10.0}
+        try:
+            self.assertEqual(sess.get_budget_scope(), "daily")
+        finally:
+            sess._read_status_config = orig
+
+    def test_session_honored(self):
+        from claude_statusline import sessions as sess
+        orig = sess._read_status_config
+        sess._read_status_config = lambda: {"budget_scope": "session"}
+        try:
+            self.assertEqual(sess.get_budget_scope(), "session")
+        finally:
+            sess._read_status_config = orig
+
+    def test_garbage_falls_to_daily(self):
+        from claude_statusline import sessions as sess
+        orig = sess._read_status_config
+        for bad in ("weekly", 42, None, ["session"]):
+            sess._read_status_config = lambda b=bad: {"budget_scope": b}
+            try:
+                self.assertEqual(sess.get_budget_scope(), "daily")
+            finally:
+                sess._read_status_config = orig
+
+    def test_scope_parsed_from_real_config_file(self):
+        """End-to-end through the ACTUAL file parse in
+        _read_status_config — the unit stubs above never execute the
+        `data.get("budget_scope") == "session"` branch, so a typo
+        there would ship green without this test."""
+        import shutil as shutil_mod
+        from claude_statusline import sessions as sess
+        tmp_claude = tempfile.mkdtemp(prefix="claude-status-scope-")
+        orig_dir = sess._CLAUDE_DIR
+        sess._CLAUDE_DIR = tmp_claude
+        try:
+            with open(os.path.join(tmp_claude, "claude-status-budget.json"),
+                      "w", encoding="utf-8") as f:
+                json.dump({"daily_budget_usd": 10,
+                           "budget_scope": "session"}, f)
+            # Bust the 30s shared config cache so the file is re-read.
+            try:
+                os.remove(sess._cache_path("status_config"))
+            except OSError:
+                pass
+            self.assertEqual(sess.get_budget_scope(), "session")
+            self.assertEqual(sess.get_budget_config(), 10.0)
+        finally:
+            sess._CLAUDE_DIR = orig_dir
+            try:
+                os.remove(sess._cache_path("status_config"))
+            except OSError:
+                pass
+            shutil_mod.rmtree(tmp_claude, ignore_errors=True)
+
+
+class TestCacheDirPermissions(unittest.TestCase):
+    """0o700 hardening on the user cache dir (v0.12.0) — the dir name
+    is predictable and now holds spend records. POSIX-only: Windows
+    chmod only toggles the read-only bit and %TEMP% is per-user."""
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
+    def test_fresh_create_is_0700(self):
+        import stat as stat_mod
+        import shutil as shutil_mod
+        from claude_statusline import sessions as sess
+        tmp_root = tempfile.mkdtemp(prefix="claude-status-perm-")
+        orig_gettempdir = tempfile.gettempdir
+        tempfile.gettempdir = lambda: tmp_root
+        try:
+            d = _prev_cache_dir_fn()  # the REAL _cache_dir
+            self.assertTrue(d.startswith(tmp_root))
+            mode = stat_mod.S_IMODE(os.stat(d).st_mode)
+            self.assertEqual(mode, 0o700)
+        finally:
+            tempfile.gettempdir = orig_gettempdir
+            shutil_mod.rmtree(tmp_root, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
+    def test_existing_dir_repaired_to_0700(self):
+        import stat as stat_mod
+        import shutil as shutil_mod
+        import hashlib as hashlib_mod
+        from claude_statusline import sessions as sess
+        tmp_root = tempfile.mkdtemp(prefix="claude-status-perm-")
+        user_hash = hashlib_mod.md5(
+            os.path.expanduser("~").encode("utf-8", "replace")
+        ).hexdigest()[:8]
+        pre = os.path.join(tmp_root, "claude_sl_{}".format(user_hash))
+        os.makedirs(pre, mode=0o755)
+        os.chmod(pre, 0o755)
+        orig_gettempdir = tempfile.gettempdir
+        tempfile.gettempdir = lambda: tmp_root
+        try:
+            d = _prev_cache_dir_fn()
+            mode = stat_mod.S_IMODE(os.stat(d).st_mode)
+            self.assertEqual(mode, 0o700,
+                             "pre-existing permissive dir must be repaired")
+        finally:
+            tempfile.gettempdir = orig_gettempdir
+            shutil_mod.rmtree(tmp_root, ignore_errors=True)
 
 
 class TestSafeNumFinite(unittest.TestCase):
@@ -1526,13 +1984,22 @@ class TestSessions(unittest.TestCase):
         self.assertEqual(get_session_tool_count("foo\\bar"), 0)
 
     def test_cache_path_is_user_scoped(self):
-        """Cache files should be in a user-specific directory."""
-        from claude_statusline.sessions import _cache_path
-        path = _cache_path("test")
-        # Should contain a hash-based subdirectory, not be flat in /tmp
-        self.assertIn("claude_sl_", path)
-        parent = os.path.basename(os.path.dirname(path))
-        self.assertTrue(parent.startswith("claude_sl_"))
+        """Cache files should be in a user-specific directory. The
+        module-scope redirect (see setUpModule) points _cache_dir at a
+        plain temp dir for isolation, so restore the REAL function just
+        for this assertion — it tests the production path shape."""
+        from claude_statusline import sessions as sessions_mod
+        redirected = sessions_mod._cache_dir
+        assert _prev_cache_dir_fn is not None
+        sessions_mod._cache_dir = _prev_cache_dir_fn
+        try:
+            path = sessions_mod._cache_path("test")
+            # Should contain a hash-based subdirectory, not flat /tmp
+            self.assertIn("claude_sl_", path)
+            parent = os.path.basename(os.path.dirname(path))
+            self.assertTrue(parent.startswith("claude_sl_"))
+        finally:
+            sessions_mod._cache_dir = redirected
 
     def test_get_budget_config_no_file(self):
         from claude_statusline.sessions import get_budget_config
@@ -1665,12 +2132,25 @@ class TestSessions(unittest.TestCase):
 
 class TestBudgetSection(unittest.TestCase):
     def test_budget_warning_red(self):
-        """Budget at 90%+ should show bold red."""
+        """Budget at 90%+ should show bold red — modernized for the
+        v0.12.0 daily semantics: assert the day: chip value AND the
+        actual red color (the original never asserted the color and
+        its $0.95 assertion was satisfied by the adjacent cost chip).
+        The module-scope cache redirect isolates the ledger; no sid is
+        passed, so the in-memory started-today contribution renders."""
         import claude_statusline.cli as cli_mod
+        from claude_statusline import sessions as sessions_mod
         orig = cli_mod.get_budget_config
-
+        orig_record = cli_mod.record_and_get_daily_spend
         cli_mod.get_budget_config = lambda: 1.0
-
+        # Pin the ledger clock to local noon (midnight determinism —
+        # same rationale as TestDailySpendLedger.setUp).
+        lt = time.localtime()
+        noon = time.mktime(
+            (lt.tm_year, lt.tm_mon, lt.tm_mday, 12, 0, 0, 0, 0, -1))
+        cli_mod.record_and_get_daily_spend = (
+            lambda sid, c, d: sessions_mod.record_and_get_daily_spend(
+                sid, c, d, _now=noon))
         try:
             data = {
                 "context_window": {"used_percentage": 30,
@@ -1679,13 +2159,13 @@ class TestBudgetSection(unittest.TestCase):
                 "git_branch": "main",
             }
             result = render(data)
-            # Should contain both current cost and budget formatted
-            self.assertIn("$0.95", result)
+            self.assertIn("day:$0.95/$1", re.sub(r"\x1b\[[0-9;]*m", "", result))
+            self.assertIn(BRIGHT_RED, result)  # 95% >= 90% band
             # Whole-number budgets should display without trailing .0
-            self.assertIn("$1", result)
-            self.assertNotIn("$1.0", result)
+            self.assertNotIn("$1.0", re.sub(r"\x1b\[[0-9;]*m", "", result))
         finally:
             cli_mod.get_budget_config = orig
+            cli_mod.record_and_get_daily_spend = orig_record
 
     def test_budget_not_shown_without_config(self):
         """Without budget config, no budget section should appear."""

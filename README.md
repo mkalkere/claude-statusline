@@ -56,7 +56,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Token Counts | `in:412K out:18K` | Human-readable (K/M) — no squinting at raw numbers |
 | Cache Hit Ratio | `cache:87%` | Of cacheable prompt input, how much actually hit the cache — close to 100% means cache-friendly prompts |
 | Cost | `$0.73` | Session cost in real-time — cents for small, dollars for large |
-| Budget | `$0.73/$10` | Color-coded daily budget tracker (green/yellow/red) |
+| Budget | `day:$7.4/$10` | Color-coded daily budget tracker (green/yellow/red). Sums today's spend across all sessions on this machine (v0.12.0+); set `"budget_scope": "session"` in the config for the old per-session comparison. |
 | Burn Rate | `burn:37K/min` | Tokens/min consumption — unique to claude-status |
 | Cost Rate | `~$3.6/hr` | Projected session cost per hour (session average, includes idle time; the `~` marks it as a projection). Hidden for sessions under a minute. Opt-in via custom theme. |
 | Rate Limits | `5h:34% 7d:18% ~2h` | API usage limits with reset countdown (Pro/Max only) |
@@ -285,7 +285,11 @@ Yes! Fully tested on Windows 11, macOS, and Linux across Python 3.8–3.14.
 Yes — use `--theme custom` with a `~/.claude/claude-status-theme.json` file. Override any color or layout from the built-in themes.
 
 **How does budget monitoring work?**
-Create `~/.claude/claude-status-budget.json` with `{"daily_budget_usd": 10.00}`. The cost indicator turns yellow at 70% and red at 90% of your daily limit.
+Create `~/.claude/claude-status-budget.json` with `{"daily_budget_usd": 10.00}`. The chip renders `day:$7.4/$10` — today's spend summed across all your sessions on this machine — turning yellow at 70% and red at 90% of your daily limit. Three things to know:
+
+- **Per machine.** The total comes from local session records, so it will undercount your real bill if you also run Claude Code on another computer.
+- **Accumulates from the moment you upgrade** to v0.12.0 — on the first day the total may miss sessions from earlier that morning.
+- **Prefer the old behavior?** Versions before v0.12.0 compared only the *current session's* cost against the daily budget. If you calibrated your number as a per-session ceiling, set `"budget_scope": "session"` in the same config file to keep that comparison (the chip then renders without the `day:` prefix).
 
 **What is burn rate?**
 Tokens consumed per minute. Helps you gauge how fast you're using context in a session.

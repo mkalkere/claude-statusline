@@ -7,6 +7,7 @@ Uses file-based caching to avoid expensive filesystem scans on every render.
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -67,13 +68,34 @@ _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 def _cache_dir():
-    """Return a user-scoped cache directory to avoid multi-user collisions."""
+    """Return a user-scoped cache directory to avoid multi-user collisions.
+
+    Created (and repaired) with mode 0o700: the directory name is
+    predictable from a username (md5 of the home path), and
+    ``exist_ok=True`` would silently adopt a directory pre-created by
+    another local user (classic /tmp squat). That mattered less when
+    the dir held only tool counts; since v0.12.0 it also holds
+    per-session daily spend records, so both reads (privacy) and
+    writes (a squatter planting ledger files to control what the
+    budget chip says) are worth hardening. BEST-EFFORT: if the dir is
+    already owned by another user, the chmod fails silently and this
+    protects nothing — the ledger's shared-tempdir guard in
+    record_and_get_daily_spend is the second line of defense for the
+    fallback path. chmod is a no-op-equivalent on Windows, where the
+    temp dir is already per-user.
+    """
     user_hash = hashlib.md5(
         os.path.expanduser("~").encode("utf-8", "replace")
     ).hexdigest()[:8]
     path = os.path.join(tempfile.gettempdir(), "claude_sl_{}".format(user_hash))
     try:
-        os.makedirs(path, exist_ok=True)
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        # makedirs mode is ignored when the dir already exists (and is
+        # masked by umask on create) — enforce explicitly, best-effort.
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
     except OSError:
         return tempfile.gettempdir()
     return path
@@ -705,6 +727,7 @@ def _read_status_config():
         "threshold": None,
         "disabled": [],
         "clickable_links": False,
+        "budget_scope": "daily",
     }
     path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
     try:
@@ -713,6 +736,14 @@ def _read_status_config():
         budget = data.get("daily_budget_usd")
         if budget is not None:
             result["budget"] = float(budget)
+        # Escape hatch for users who calibrated daily_budget_usd as a
+        # per-SESSION ceiling under the pre-v0.12.0 behavior: scope
+        # "session" restores the old chip (session cost vs budget, no
+        # "day:" prefix). Anything other than the literal "session"
+        # falls through to the daily default — the documented
+        # semantics of the config key's own name.
+        if data.get("budget_scope") == "session":
+            result["budget_scope"] = "session"
         threshold = data.get("compaction_threshold_pct")
         if threshold is not None:
             threshold = float(threshold)
@@ -744,6 +775,234 @@ def get_budget_config():
     config = _read_status_config()
     val = config.get("budget")
     return float(val) if val is not None else None
+
+
+def get_budget_scope():
+    """Return "daily" (default) or "session" from budget_scope config.
+
+    .get with a default (not [] indexing) because the 30s shared config
+    cache may hold a dict written by an older claude-status version
+    that predates the key — upgrades must not KeyError for up to 30s.
+    """
+    scope = _read_status_config().get("budget_scope", "daily")
+    return scope if scope == "session" else "daily"
+
+
+def _ledger_path(day, session_id):
+    """Cache-dir path for one session's daily spend ledger file.
+
+    The session_id is hashed (same convention as the activity cache) so
+    raw IDs never become filenames.
+    """
+    sid12 = hashlib.md5(
+        session_id.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return os.path.join(_cache_dir(), "spend_{}_{}.json".format(day, sid12))
+
+
+def _read_ledger(path):
+    """Raw ledger read: parsed dict or None. NO freshness check.
+
+    Deliberately NOT _read_cache: ledger files are records, not
+    caches — _read_cache's TTL would report "no file" after any pause
+    longer than 30s, the writer would then re-capture the attribution
+    base at the current cumulative, and the day total would sawtooth
+    toward zero after every think-break. (Adversarial design review
+    caught this before it shipped; do not "simplify" this back.)
+    """
+    try:
+        with open(path, "r") as f:
+            entry = json.load(f)
+        return entry if isinstance(entry, dict) else None
+    except (OSError, IOError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def record_and_get_daily_spend(session_id, cost, duration_ms, _now=None):
+    """Update this session's daily-spend ledger, return today's total.
+
+    Powers the `budget` section's daily semantics (v0.12.0). One call
+    does writer-then-reader in a single pass so the reader always sees
+    the just-written own-session entry — there is no cross-step
+    ordering problem to work around (both run in this process).
+
+    Ledger model: one file per (local day, session), storing the
+    session's cumulative cost ("cost", monotonic via max) and an
+    attribution base ("base"). The session's contribution to the day
+    is max(0, cost - base):
+
+      - Session STARTED TODAY (start ≈ now - duration_ms falls on
+        today's local date): base = 0 — its whole cumulative belongs
+        to today. This also makes upgrade day honest: a mid-session
+        upgrade shows the session's real spend, not $0.
+      - Session started BEFORE today (spans midnight): base = the
+        cumulative at first sight today, so only growth counts.
+      - Duration missing/garbage: base = cumulative at first sight
+        (conservative: undercounts one turn, never overcounts).
+
+    Known, documented limitations (adversarial review, accepted):
+      - A temp-dir wipe mid-day permanently drops that day's PRIOR
+        spend from the total (the base re-captures); undercount only.
+      - A resumed session whose upstream counter jumps to a HIGHER
+        historical baseline mid-day (same session_id) over-attributes
+        the jump to today. Not detectable from stdin; "never
+        overcounts" holds only absent such a baseline change. The
+        same class covers a --resume of a PRIOR-day conversation
+        where upstream carries the old cumulative cost but resets
+        total_duration_ms: it classifies as started-today and the
+        prior days' spend lands on today.
+      - Two live processes sharing one session_id can transiently
+        regress each other's "cost" via max() races; self-heals on
+        the next write. Totals are per-machine.
+      - A backwards local-date change mis-files spend across days.
+        Within any one day's total it never double-counts, but the
+        same increment can appear in the rolled-back day AND remain in
+        the already-written later-day file once the clock returns —
+        wrong-day placement, bounded by the clock excursion.
+
+    Args:
+        session_id: Raw session id from stdin (""/non-string -> writer
+            skips the file; the live contribution is still computed
+            in memory. Any non-empty string is accepted — _ledger_path
+            hashes it, so no filename validation is needed).
+        cost: Session cumulative cost in USD (already _safe_num'd by
+            _normalize on the cli call path; clamped to >= 0 here).
+        duration_ms: Session duration in ms (already _safe_num'd), used
+            only to decide whether the session started today.
+        _now: Test seam for the current epoch seconds; None = real time.
+
+    Returns:
+        Tuple (total, found_any). total is today's summed spend across
+        this machine's sessions, ALWAYS including the live session's
+        contribution when a cost exists (from its ledger file, or in
+        memory when the sid is unusable, the write failed, or the
+        ledger was skipped for the shared-tempdir fallback). found_any
+        False means no daily signal at all (no ledger entries AND no
+        live cost) — the caller hides the chip.
+    """
+    now = time.time() if _now is None else _now
+    t = time.localtime(now)
+    today = "{:04d}-{:02d}-{:02d}".format(t.tm_year, t.tm_mon, t.tm_mday)
+
+    # Fallback guard: when _cache_dir() degrades to the SHARED temp
+    # root (its makedirs-failed fallback), skip ledger file IO
+    # entirely — writing would put spend records world-readable in
+    # /tmp, and READING would sum spend_* files plantable by any
+    # local user directly into the displayed total. The own-session
+    # in-memory contribution below still works, so the chip degrades
+    # to an honest partial total instead of a poisonable one.
+    cache = _cache_dir()
+    ledger_usable = cache != tempfile.gettempdir()
+
+    def _started_today():
+        # try/except because _safe_num guarantees FINITE, not
+        # time-range-sane: a garbage duration like 9e18 ms puts the
+        # computed epoch outside time_t and localtime raises
+        # OverflowError (or OSError on Windows for pre-1970 values) —
+        # which would escape into render() and blank the whole
+        # statusline. Unclassifiable -> False -> conservative
+        # base = cur (undercount, never crash).
+        if duration_ms is not None and duration_ms >= 0:
+            try:
+                s = time.localtime(now - duration_ms / 1000.0)
+            except (OverflowError, OSError, ValueError):
+                return False
+            return (s.tm_year, s.tm_mon, s.tm_mday) == \
+                   (t.tm_year, t.tm_mon, t.tm_mday)
+        return False
+
+    # --- writer (own session) -----------------------------------------
+    # own_contrib is ALWAYS computed in memory when a cost exists —
+    # even when the sid is unusable or the write fails — so the reader
+    # can guarantee the live session is never silently missing from a
+    # chip labeled "day:". (Silent-failure review: a failed write with
+    # other sessions' files present used to render a day total that
+    # EXCLUDED the live session — day:$2 beside a $99 cost chip.)
+    own_contrib = None
+    own_name = None
+    if cost is not None:
+        cur = max(0.0, float(cost))
+        if ledger_usable and session_id and isinstance(session_id, str):
+            path = _ledger_path(today, session_id)
+            own_name = os.path.basename(path)
+            entry = _read_ledger(path)
+            base = _safe_entry_num(entry, "base") if entry else None
+            prev = _safe_entry_num(entry, "cost") if entry else None
+            if prev is None or base is None:
+                # First sight today (or corrupt entry — recapture
+                # rather than trust garbage). Base per the start-day
+                # rule above.
+                base = 0.0 if _started_today() else cur
+                prev = cur
+                _write_ledger(path, {"cost": cur, "base": base})
+            elif cur > prev:
+                prev = cur
+                _write_ledger(path, {"cost": cur, "base": base})
+            own_contrib = max(0.0, max(prev, cur) - base)
+        else:
+            # No usable sid / ledger unusable: in-memory only, same
+            # attribution rule. Nothing on disk to double-count.
+            base = 0.0 if _started_today() else cur
+            own_contrib = max(0.0, cur - base)
+
+    # --- reader (all sessions, today) ----------------------------------
+    total = 0.0
+    found = False
+    own_seen = False
+    prefix = "spend_{}_".format(today)
+    if ledger_usable:
+        try:
+            for fentry in os.scandir(cache):
+                name = fentry.name
+                if not (name.startswith(prefix) and name.endswith(".json")):
+                    continue
+                entry = _read_ledger(fentry.path)
+                if entry is None:
+                    continue
+                c = _safe_entry_num(entry, "cost")
+                if c is None:
+                    continue
+                b = _safe_entry_num(entry, "base")
+                contrib = max(0.0, c - (b if b is not None else 0.0))
+                if name == own_name:
+                    # Substitution in CONTRIBUTION units (not cumulative
+                    # — the round-1 design-review units-mismatch), for
+                    # the race where our write landed then a sibling
+                    # process regressed the file between write and scan.
+                    contrib = max(contrib, own_contrib or 0.0)
+                    own_seen = True
+                total += contrib
+                found = True
+        except OSError:
+            pass
+    if own_contrib is not None and not own_seen:
+        # Own write failed, sid unusable, or ledger skipped — the live
+        # session still counts, in memory.
+        total += own_contrib
+        found = True
+    return total, found
+
+
+def _safe_entry_num(entry, key):
+    """Finite float from a ledger dict key, else None (garbage-proof)."""
+    try:
+        num = float(entry.get(key))
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _write_ledger(path, value):
+    """Atomic ledger write (tmp + os.replace), best-effort."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(value, f)
+        os.replace(tmp, path)
+    except (OSError, IOError):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def get_compaction_threshold():
