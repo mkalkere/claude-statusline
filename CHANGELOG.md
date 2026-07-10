@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-09
+
+### Changed — ⚠️ the `budget` section's meaning is fixed (and its label changes)
+
+- **The budget chip now compares TODAY'S spend — summed across all your sessions on this machine — against `daily_budget_usd`, and is labeled `day:$7.4/$10`.** Before v0.12.0 it compared only the *current session's* cost against the daily budget: five $3 sessions against a $10/day budget each showed a comfortable green $3.0/$10 while the day was actually at 150% of budget. The config key's own name (`daily_budget_usd`), the README ("daily budget tracker"), and the FAQ ("your daily limit") were always unanimous that the contract is daily; the display was the wrong half. The `day:` prefix is deliberate: it announces the change at the moment of upgrade and permanently disambiguates the chip from the adjacent per-session `cost` chip.
+
+  - **Escape hatch:** if you calibrated `daily_budget_usd` as a per-*session* ceiling under the old behavior, set `"budget_scope": "session"` in `~/.claude/claude-status-budget.json` — the chip reverts to the per-session comparison (no `day:` prefix).
+  - **Day-one note:** totals accumulate from the moment you upgrade; on the first day the chip may undercount sessions from earlier that morning.
+  - **Per machine:** the total is built from local session records; it will undercount your real bill if you also run Claude Code elsewhere. (Documented in the FAQ.)
+
+### Added
+
+- **Per-session daily spend ledger** — one small JSON file per (local day, session) in the user-scoped cache dir, storing the session's cumulative cost (monotonic via `max`) and an attribution base so a session spanning midnight contributes only its post-midnight growth to the new day. Whether a session "started today" is derived from `cost.total_duration_ms` (start ≈ now − duration): started-today sessions get full attribution (this is also what makes upgrade day honest — a mid-session upgrade shows the session's real spend, not $0); older sessions count growth only; missing duration falls back to growth-only (undercounts one turn, never overcounts).
+
+  The design went through two adversarial reviews **before implementation**; choices that trace directly to findings:
+  - **Writer-then-reader in one pass, no substitution rule** — an earlier draft's "substitute live cost if larger" compared a cumulative against a day-contribution (units mismatch) and would have re-inflated midnight-spanning sessions by their full prior-day spend.
+  - **Raw no-TTL ledger reads** (`_read_ledger`) — reusing the 30s-TTL cache reader would have re-captured the attribution base after every pause longer than 30 seconds, sawtoothing the day total toward zero.
+  - **No fallback mode.** The chip's meaning never switches: the live session's *contribution* (per the attribution rules above) is ALWAYS folded into the total — from its ledger file, or computed in memory when the session id is unusable, the write fails, or the ledger is skipped — so a chip labeled `day:` can never silently exclude the session in front of you, and never reverts to per-session semantics with an identical-looking label. When the ledger is empty, the total degrades to the live session's contribution alone: an honest lower bound.
+  - **Clamps both ends** — negative/garbage costs are clamped in the writer and contributions floored at 0 in the reader, so a garbage negative baseline can't manufacture phantom spend.
+  - **Documented, accepted limitations:** totals are per-machine; a temp-dir wipe mid-day permanently drops that day's *prior* spend (undercount only); a resumed session whose upstream counter jumps to a higher historical baseline mid-day over-attributes the jump to today (not detectable from stdin); two live processes sharing one session id can transiently regress each other's ledger entry via `max()` races (self-heals on the next write).
+
+- **`budget_scope` config key** — `"daily"` (default) or `"session"`, read from the existing `claude-status-budget.json` with the same 30s shared cache; unknown values fall through to daily. Reading uses `.get` with a default so a config dict cached by an older version (key absent) can't `KeyError` during the upgrade window.
+
+### Fixed
+
+- **Cache directory hardened to `0o700`** — the user-scoped cache dir name is predictable (md5 of the home path) and `exist_ok=True` would silently adopt a directory pre-created by another local user. That mattered less when the dir held tool counts; now that it holds per-session spend records, both are hardened best-effort: directories the user owns are repaired to `0o700`; a foreign-owned pre-created directory cannot be repaired (the chmod fails and is swallowed), which is why the ledger additionally refuses to operate in the shared-tempdir fallback. Created with `mode=0o700` and re-`chmod`ed if it already exists; no-op-equivalent on Windows where the temp dir is already per-user.
+
+### Notes
+
+- The ledger reuses the existing infrastructure end to end: atomic `tmp + os.replace` writes, the user-scoped cache dir, and the existing 2-day mtime cleanup — today's files are rewritten all day (fresh mtime) and age out naturally after the day passes. No new pruning code.
+- **`--demo` and the setup wizard stub the spend recorder** — an unstubbed preview render on a machine with a real budget config would have written the fake demo cost into the user's REAL daily ledger (monotonic max — it could not self-correct until midnight). Same class of fix at the test-suite level: `setUpModule` now redirects the entire cache dir to a throwaway location, so no test can ever write phantom spend into a maintainer's live chip (the #96 incident pattern, closed at the same chokepoint style).
+- **Garbage durations can't crash the render** — `time.localtime` raises `OverflowError`/`OSError` for epoch values outside time_t range (a duration like `9e18` ms is finite, so `_safe_num` passes it); the started-today classifier now catches these and degrades to the conservative base. Found by review, reproduced before fixing.
+- 655 tests (+31): attribution rules (started-today / midnight-spanning / missing-duration / in-memory no-sid variants), monotonicity, negative-clamp with the exact-value pin, corrupt/garbage/`.tmp`-leftover ledger files, day-boundary and midnight determinism via an injected noon clock, shared-sid interleave self-healing, shared-tempdir poisoning guard, unreachable-cache-dir degrade, garbage-duration crash regression, end-to-end chip rendering with color bands computed on the *total*, the scope escape hatch (unit AND through the real config-file parse), upgrade-day lower-bound, and the `0o700` create/repair pins (POSIX-only; skip on Windows, run on the Linux/macOS CI legs). 653 pass + 2 platform skips on Windows; all 655 on POSIX. Pure stdlib, zero dependencies, as always.
+
 ## [0.11.0] - 2026-07-09
 
 ### Added

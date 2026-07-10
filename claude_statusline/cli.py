@@ -32,8 +32,10 @@ from .sessions import (
     _CLAUDE_DIR, _CLAUDE_DIR_REAL, _VALID_EFFORT_LEVELS,
     _canonical_effort, _count_activity_with_status,
     _read_cache, _write_cache,
-    get_budget_config, get_clickable_links_enabled, get_compaction_threshold,
+    get_budget_config, get_budget_scope, get_clickable_links_enabled,
+    get_compaction_threshold,
     get_disabled_sections, get_effort_level, get_last_assistant_timestamp_ms,
+    record_and_get_daily_spend,
     get_session_activity_count,
     get_session_tool_count, get_today_session_count,
 )
@@ -972,10 +974,50 @@ def _render_sections_named(n, order, theme):
                 )
 
         elif section == "budget":
-            if cost is not None:
-                budget = get_budget_config()
-                if budget is not None and budget > 0:
-                    pct_used = (cost / budget) * 100
+            # v0.12.0: the numerator is TODAY'S spend across all
+            # sessions on this machine (per-session ledger files under
+            # the user cache dir), matching the config key's own name
+            # (daily_budget_usd) and the README's long-standing "daily
+            # budget tracker" promise. Pre-v0.12.0 this compared the
+            # SESSION cost against the DAILY budget — five $3 sessions
+            # against a $10/day budget each showed a green 30% while
+            # the day was 150% over.
+            #
+            # The "day:" label prefix is deliberate and load-bearing:
+            # it announces the semantic change at upgrade, and it
+            # permanently disambiguates this chip from the adjacent
+            # per-session `cost` chip (two unexplained disagreeing
+            # dollar figures would read as a bug).
+            #
+            # There is NO fallback mode. The total is always the ledger
+            # sum (the writer runs first, so the live session is always
+            # included when it has a cost); an empty or unreachable
+            # ledger degrades to the live session's cost rendered as an
+            # HONEST partial day total under the same label — the
+            # meaning never switches, only completeness degrades.
+            # Escape hatch: budget_scope "session" restores the old
+            # per-session chip (no prefix) for users who calibrated
+            # daily_budget_usd as a per-session ceiling.
+            budget = get_budget_config()
+            if budget is not None and budget > 0:
+                if get_budget_scope() == "session":
+                    shown = cost  # None -> hidden below
+                    prefix = ""
+                else:
+                    session_id = n.get("session_id", "")
+                    # record_and_get_daily_spend ALWAYS folds the live
+                    # session's contribution in (in memory when the sid
+                    # is unusable or the write fails), so found=True
+                    # covers every case where there is any daily signal
+                    # — no separate lower-bound branch needed here, and
+                    # none is wanted: a cli-side "show raw cost" backup
+                    # would over-attribute midnight-spanning sessions.
+                    total, found = record_and_get_daily_spend(
+                        session_id, cost, duration)
+                    shown = total if found else None
+                    prefix = "day:"
+                if shown is not None:
+                    pct_used = (shown / budget) * 100
                     if pct_used >= 90:
                         bc = BRIGHT_RED
                     elif pct_used >= 70:
@@ -987,7 +1029,7 @@ def _render_sections_named(n, order, theme):
                         budget_str = "${}".format(int(budget))
                     else:
                         budget_str = fmt_cost(budget)
-                    label = "{}/{}".format(fmt_cost(cost), budget_str)
+                    label = "{}{}/{}".format(prefix, fmt_cost(shown), budget_str)
                     sections.append(colorize(label, bc, BOLD))
 
         elif section == "version":
@@ -2012,12 +2054,21 @@ def cmd_demo():
     """Show demo output for all themes."""
     data = _demo_data()
 
-    # Mock session functions so demo shows tools/sessions sections
+    # Mock session functions so demo shows tools/sessions sections.
+    # The daily-spend recorder MUST be stubbed too: a demo render on a
+    # machine with a real budget config would otherwise write the fake
+    # "demo-session" $0.73 into the user's REAL spend ledger and
+    # inflate their live day: chip until midnight (monotonic max —
+    # cannot self-correct). The stub echoes the demo cost back as the
+    # day total so the budget chip still demos meaningfully.
     import claude_statusline.cli as _self
     _orig_tool_count = _self.get_session_tool_count
     _orig_session_count = _self.get_today_session_count
+    _orig_record_spend = _self.record_and_get_daily_spend
     _self.get_session_tool_count = lambda sid: 42
     _self.get_today_session_count = lambda: 3
+    _self.record_and_get_daily_spend = (
+        lambda sid, c, d: (c, True) if c is not None else (0.0, False))
 
     try:
         print("claude-status v{} — theme demos\n".format(__version__))
@@ -2048,6 +2099,10 @@ def cmd_demo():
             pass
         try:
             _self.get_today_session_count = _orig_session_count
+        except Exception:
+            pass
+        try:
+            _self.record_and_get_daily_spend = _orig_record_spend
         except Exception:
             pass
 
@@ -2404,8 +2459,15 @@ def cmd_setup():
     import claude_statusline.cli as _self
     _orig_tool_count = _self.get_session_tool_count
     _orig_session_count = _self.get_today_session_count
+    # Stub the spend recorder for the same reason as cmd_demo: the
+    # setup wizard runs on exactly the machine where the user just
+    # configured a real budget, and an unstubbed preview render would
+    # write the fake demo cost into their REAL daily ledger.
+    _orig_record_spend = _self.record_and_get_daily_spend
     _self.get_session_tool_count = lambda sid: 42
     _self.get_today_session_count = lambda: 3
+    _self.record_and_get_daily_spend = (
+        lambda sid, c, d: (c, True) if c is not None else (0.0, False))
 
     try:
         print("\n  Preview:")
@@ -2418,6 +2480,10 @@ def cmd_setup():
             pass
         try:
             _self.get_today_session_count = _orig_session_count
+        except Exception:
+            pass
+        try:
+            _self.record_and_get_daily_spend = _orig_record_spend
         except Exception:
             pass
 
