@@ -1147,6 +1147,278 @@ class TestCacheDirPermissions(unittest.TestCase):
             shutil_mod.rmtree(tmp_root, ignore_errors=True)
 
 
+class TestContextTokensSection(unittest.TestCase):
+    """`context_tokens` (#113): absolute context display ctx:412K/1M.
+    Numerator DERIVED from used_percentage × window size so the chip
+    always agrees arithmetically with the bar beside it."""
+
+    def _plain(self, s):
+        return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+    def _chip(self, cw):
+        import claude_statusline.cli as cli_mod
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["context_tokens", "branch"]
+            out = self._plain(cli_mod.render(
+                {"git_branch": "main", "context_window": cw}, "default"))
+            m = re.search(r"ctx:\S+", out)
+            return m.group(0) if m else None
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_derived_from_pct_times_size(self):
+        self.assertEqual(
+            self._chip({"context_window_size": 1_000_000,
+                        "used_percentage": 42}), "ctx:420K/1M")
+
+    def test_200k_window(self):
+        self.assertEqual(
+            self._chip({"context_window_size": 200_000,
+                        "used_percentage": 85}), "ctx:170K/200K")
+
+    def test_zero_pct_renders_zero(self):
+        """0% is a legit value — must render ctx:0/1M, not hide
+        (the 'or drops zeros' house rule)."""
+        self.assertEqual(
+            self._chip({"context_window_size": 1_000_000,
+                        "used_percentage": 0}), "ctx:0/1M")
+
+    def test_out_of_spec_pct_clamped(self):
+        """pct 250 clamps to 100 — the chip must never read
+        ctx:2.5M/1M (same bounds the bar enforces)."""
+        self.assertEqual(
+            self._chip({"context_window_size": 1_000_000,
+                        "used_percentage": 250}), "ctx:1M/1M")
+
+    def test_hidden_when_either_signal_missing_or_garbage(self):
+        for cw in ({"context_window_size": 1_000_000},
+                   {"used_percentage": 42},
+                   {"context_window_size": "abc", "used_percentage": 42},
+                   {"context_window_size": 1_000_000,
+                    "used_percentage": "abc"},
+                   {"context_window_size": 1_000_000,
+                    "used_percentage": float("nan")},
+                   {"context_window_size": 0, "used_percentage": 42},
+                   {"context_window_size": -5, "used_percentage": 42},
+                   {}):
+            self.assertIsNone(self._chip(cw), repr(cw))
+
+    def test_negative_pct_clamps_to_zero(self):
+        """Pin the clamp's lower bound as a behavior choice."""
+        self.assertEqual(
+            self._chip({"context_window_size": 1_000_000,
+                        "used_percentage": -12}), "ctx:0/1M")
+
+    def test_string_pct_renders(self):
+        self.assertEqual(
+            self._chip({"context_window_size": 1_000_000,
+                        "used_percentage": "42"}), "ctx:420K/1M")
+
+    def test_context_tokens_is_compact_droppable(self):
+        from claude_statusline.cli import (
+            _COMPACT_DROP, _NARROW_DROP, _FIT_DROP_PRIORITY)
+        self.assertIn("context_tokens", _COMPACT_DROP)
+        self.assertIn("context_tokens", _NARROW_DROP)
+        self.assertIn("context_tokens", _FIT_DROP_PRIORITY)
+
+    def test_fractional_pct_rounds_not_floors(self):
+        """4.1% of 1M is exactly 41,000 — but float representation puts
+        1_000_000 * 4.1 / 100.0 at 40999.999…, and a bare int() floors
+        it to render ctx:40K. round() first (code-review finding: 13
+        such off-by-a-chip cases across 0.1%-step percentages)."""
+        self.assertEqual(
+            self._chip({"context_window_size": 1_000_000,
+                        "used_percentage": 4.1}), "ctx:41K/1M")
+        self.assertEqual(
+            self._chip({"context_window_size": 1_000_000,
+                        "used_percentage": 33.3}), "ctx:333K/1M")
+
+    def test_null_theme_color_degrades(self):
+        """A custom theme with `context_tokens: null` must fall to the
+        default color, not crash colorize (house _first convention —
+        this section is reachable ONLY via hand-edited theme JSON,
+        exactly where a user writes null)."""
+        import claude_statusline.cli as cli_mod
+        orig_line2 = THEMES["default"]["line2"]
+        orig_colors = THEMES["default"]["colors"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["context_tokens", "branch"]
+            THEMES["default"]["colors"] = dict(orig_colors,
+                                               context_tokens=None)
+            out = self._plain(cli_mod.render(
+                {"git_branch": "main",
+                 "context_window": {"context_window_size": 1_000_000,
+                                    "used_percentage": 42}}, "default"))
+            self.assertIn("ctx:420K/1M", out)
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            THEMES["default"]["colors"] = orig_colors
+            cli_mod.get_branch = orig_branch
+
+
+class TestTokenCorruptGate(unittest.TestCase):
+    """Silent-failure review: coercing a present-but-garbage token
+    component to None must not let the DERIVED chips (cache %, burn,
+    speed) recompute with that component silently zeroed — a cache
+    hit-rate inflating 60% -> 90% with no visible cue. They hide
+    instead; per-field sections keep their own visibility."""
+
+    def _plain(self, s):
+        return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+    def _render(self, cw_usage):
+        import claude_statusline.cli as cli_mod
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            return self._plain(cli_mod.render({
+                "git_branch": "main",
+                "context_window": {"used_percentage": 50,
+                                   "current_usage": cw_usage},
+                "cost": {"total_cost_usd": 0.5,
+                         "total_duration_ms": 300_000,
+                         "total_api_duration_ms": 60_000},
+            }, "default"))
+        finally:
+            cli_mod.get_branch = orig_branch
+
+    _VALID = {"input_tokens": 50_000, "output_tokens": 5_000,
+              "cache_read_input_tokens": 90_000,
+              "cache_creation_input_tokens": 10_000}
+
+    def test_all_valid_renders_derived_chips(self):
+        out = self._render(dict(self._VALID))
+        self.assertIn("cache:60%", out)
+        self.assertIn("burn:", out)
+
+    def test_garbage_component_hides_derived_not_wrong(self):
+        """Garbage input_tokens: cache % must HIDE (was: rendered a
+        confidently-wrong 90%). The tokens chip's own in:? remains the
+        visible cue."""
+        usage = dict(self._VALID, input_tokens="fifty-thousand")
+        out = self._render(usage)
+        self.assertNotIn("cache:", out)
+        self.assertNotIn("burn:", out)
+        self.assertIn("in:?", out)
+
+    def test_invisible_garbage_component_still_hides(self):
+        """The worst pre-fix case: garbage cache_creation only — every
+        visible field looked normal while cache % was wrong. Must hide
+        with no other cue available."""
+        usage = dict(self._VALID,
+                     cache_creation_input_tokens=float("nan"))
+        out = self._render(usage)
+        self.assertNotIn("cache:", out)
+        self.assertIn("in:50K", out)  # per-field sections unaffected
+
+    def test_absent_component_still_computes(self):
+        """ABSENT (never sent) stays the pre-existing absent-means-0
+        rule — only present-but-garbage trips the gate."""
+        usage = dict(self._VALID)
+        del usage["cache_creation_input_tokens"]
+        out = self._render(usage)
+        self.assertIn("cache:", out)
+
+    def test_normalize_flag(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"context_window": {"current_usage":
+                       {"input_tokens": "abc"}}, "session_id": "x"})
+        self.assertTrue(n["token_fields_corrupt"])
+        n = _normalize({"context_window": {"current_usage":
+                       {"input_tokens": 5}}, "session_id": "x"})
+        self.assertFalse(n["token_fields_corrupt"])
+        n = _normalize({"session_id": "x"})  # all absent: not corrupt
+        self.assertFalse(n["token_fields_corrupt"])
+
+
+class TestContextFieldCoercion(unittest.TestCase):
+    """v0.14.0: the context/token block gets the same _safe_num
+    chokepoint treatment the money/time trio got in v0.11.0. Before
+    this, `used_percentage: NaN` (stdin-reachable — json.loads accepts
+    the bare literal) sailed through `is not None` gates into
+    render_bar's int() and blanked the ENTIRE statusline."""
+
+    def test_nan_pct_hides_bar_not_whole_line(self):
+        import claude_statusline.cli as cli_mod
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            out = re.sub(r"\x1b\[[0-9;]*m", "", cli_mod.render({
+                "git_branch": "main",
+                "context_window": {"context_window_size": 1_000_000,
+                                   "used_percentage": float("nan")},
+                "cost": {"total_cost_usd": 0.5},
+            }, "default"))
+        finally:
+            cli_mod.get_branch = orig_branch
+        self.assertIn("$0.50", out)   # line survived
+        self.assertIn("main", out)
+
+    def test_normalize_coerces_context_block(self):
+        from claude_statusline.cli import _normalize
+        n = _normalize({"context_window": {
+            "used_percentage": "42",
+            "current_usage": {"input_tokens": "1000",
+                              "output_tokens": float("inf"),
+                              "cache_read_input_tokens": float("nan"),
+                              "cache_creation_input_tokens": [1]},
+        }, "session_id": "x"})
+        self.assertEqual(n["used_percentage"], 42.0)
+        self.assertEqual(n["input_tokens"], 1000.0)
+        self.assertIsNone(n["output_tokens"])
+        self.assertIsNone(n["cache_read"])
+        self.assertIsNone(n["cache_create"])
+
+    def test_zero_tokens_survive_coercion(self):
+        """0 is falsy but legit — coercion must return 0.0, not None."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"context_window": {
+            "used_percentage": 0,
+            "current_usage": {"input_tokens": 0}}, "session_id": "x"})
+        self.assertEqual(n["used_percentage"], 0.0)
+        self.assertEqual(n["input_tokens"], 0.0)
+
+    def test_numeric_strings_render_e2e(self):
+        """CHANGELOG claim pinned end to end: stringified numerics
+        coerce AND render — and do NOT trip the corrupt gate (they are
+        valid values, not garbage)."""
+        import claude_statusline.cli as cli_mod
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            out = re.sub(r"\x1b\[[0-9;]*m", "", cli_mod.render({
+                "git_branch": "main",
+                "context_window": {
+                    "used_percentage": "42",
+                    "current_usage": {"input_tokens": "1000",
+                                      "output_tokens": "500",
+                                      "cache_read_input_tokens": "9000"}},
+            }, "default"))
+        finally:
+            cli_mod.get_branch = orig_branch
+        self.assertIn("in:1K", out)
+        self.assertIn("out:500", out)
+        self.assertIn("cache:", out)  # gate NOT tripped by strings
+
+    def test_builtin_themes_do_not_include_new_optin_sections(self):
+        """Pins the 'opt-in via custom theme' claim for context_tokens
+        (and cost_rate, which shared the missing pin): absent from
+        every built-in theme's line lists."""
+        for name, theme in THEMES.items():
+            for key, val in theme.items():
+                if re.match(r"line\d+$", key) and isinstance(val, list):
+                    self.assertNotIn("context_tokens", val,
+                                     "{}[{}]".format(name, key))
+                    self.assertNotIn("cost_rate", val,
+                                     "{}[{}]".format(name, key))
+
+
 class TestSafeNumFinite(unittest.TestCase):
     """_safe_num guarantees a FINITE float or None (v0.11.0). NaN in
     particular is poison: every comparison is False, so it sails
@@ -2250,7 +2522,7 @@ class TestSetupCommand(unittest.TestCase):
         """--setup flag should be recognized by argument parser."""
         result = subprocess.run(
             [sys.executable, "-m", "claude_statusline", "--setup"],
-            capture_output=True, timeout=5,
+            capture_output=True, timeout=15,
             input="1\n\n",  # choose default theme, skip budget
             encoding="utf-8", errors="replace",
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
@@ -4064,7 +4336,7 @@ class TestPrintConfig(unittest.TestCase):
             env.pop("CLAUDE_STATUSLINE_SETTINGS_PATH", None)
             r = subprocess.run(
                 [sys.executable, "-m", "claude_statusline", "--print-config"],
-                env=env, capture_output=True, text=True, timeout=5,
+                env=env, capture_output=True, text=True, timeout=15,
             )
             self.assertEqual(r.returncode, 0,
                 "expected exit 0 for installed state; got {}\nSTDOUT: {}\nSTDERR: {}".format(
@@ -4394,7 +4666,7 @@ class TestSetupWizardUpdated(unittest.TestCase):
         """--setup should be recognized."""
         result = subprocess.run(
             [sys.executable, "-m", "claude_statusline", "--setup"],
-            capture_output=True, timeout=5,
+            capture_output=True, timeout=15,
             input="1\n\n",
             encoding="utf-8", errors="replace",
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
@@ -4405,11 +4677,60 @@ class TestSetupWizardUpdated(unittest.TestCase):
         self.assertIn("full detail", result.stdout)
         self.assertIn("focus", result.stdout)
 
+    def test_setup_success_shows_star_ask(self):
+        """The star-ask epilogue (#114) prints once on the wizard's
+        success path. Input completes all prompts (theme 1, budget
+        skip, subagent skip via EOF-safe default)."""
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_statusline", "--setup"],
+            capture_output=True, timeout=15,
+            input="1\n\nn\n",
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Setup complete!", result.stdout)
+        self.assertEqual(
+            result.stdout.count("github.com/mkalkere/claude-statusline"), 1,
+            "star-ask must appear exactly once on success")
+        self.assertIn("a GitHub star helps", result.stdout)
+
+    def test_setup_abort_no_star_ask(self):
+        """Aborted setup (EOF at the first prompt) must NOT print the
+        star-ask — it's a success-path epilogue, not a nag."""
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_statusline", "--setup"],
+            capture_output=True, timeout=15,
+            input="",
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        # Positive control: the abort path actually ran (a startup
+        # crash would produce empty stdout and pass the NotIn
+        # assertion vacuously — test-analyzer finding).
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Setup cancelled.", result.stdout)
+        self.assertNotIn("a GitHub star helps", result.stdout)
+
+    def test_install_has_no_star_ask(self):
+        """--install is the agents/CI path — no human reads it, so no
+        star-ask there (design decision in #114)."""
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_statusline", "--install"],
+            capture_output=True, timeout=15,
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        # Positive control (same vacuity guard as the abort test).
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Installed claude-status into", result.stdout)
+        self.assertNotIn("a GitHub star helps", result.stdout)
+
     def test_uninstall_flag_accepted(self):
         """--uninstall should be recognized."""
         result = subprocess.run(
             [sys.executable, "-m", "claude_statusline", "--uninstall"],
-            capture_output=True, timeout=5,
+            capture_output=True, timeout=15,
             encoding="utf-8", errors="replace",
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )

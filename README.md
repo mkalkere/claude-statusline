@@ -61,6 +61,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Cost Rate | `~$3.6/hr` | Projected session cost per hour (session average, includes idle time; the `~` marks it as a projection). Hidden for sessions under a minute. Opt-in via custom theme. |
 | Rate Limits | `5h:34% 7d:18% ~2h` | API usage limits with reset countdown (Pro/Max only) |
 | Context Size | `(1M)` | Know if you're on a 200K or 1M context window |
+| Context Tokens | `ctx:412K/1M` | Absolute context usage — at 1M windows a percentage hides magnitude (40% ≈ 400K tokens re-billed every turn). Derived from the same signal as the bar (with a configured compaction threshold the bar rescales its fill toward the compaction point; the chip always shows the raw window fraction). Opt-in via custom theme. |
 | Context Warning | `!CTX` | Bold red alert at 85%+ context usage |
 
 ### Line 2 — Session Context
