@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-07-16
+
+### Added
+
+- **Repo-link footer at the end of `--demo` output** ([#116](https://github.com/mkalkere/claude-statusline/issues/116)) — `--demo` is the discovery funnel (the README's first CTA is `uvx claude-status --demo`, reaching people who haven't installed yet), and a repo link at the end of a demo is expected showcase content. Static line: no network, no state, no marker files. Statusline renders, `--install`, and `--print-config` are untouched.
+- **Design note for the record:** star-*detection* ("only ask if they haven't starred") was evaluated and rejected — it would require reading the user's GitHub identity (authenticated API or shelling into their `gh` CLI) and would be this package's first-ever network call, breaking the documented no-daemon/no-network/cannot-leak-data promise (AGENTS.md: "No daemon, no network, no background processes"). That promise outranks growth mechanics.
+
+### Notes
+
+- All remaining `timeout=10` subprocess tests aligned at 15s (same load-dependent flake class fixed for the 5s batch in v0.14.0 — one of the v0.13 e2e tests hit it under load during this release’s verification).
+- 728 tests pass (+1: the demo-footer pin alongside the existing demo assertions). Pure stdlib, zero dependencies, as always.
+
 ## [0.14.0] - 2026-07-16
 
 ### Added

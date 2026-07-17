@@ -2465,6 +2465,16 @@ def cmd_demo():
         print("  all fields (vim + agent + worktree):")
         _print_indented(render(full_data, "default"))
         print()
+        # Repo-link footer (#116): --demo is the discovery funnel (the
+        # README's first CTA is `uvx claude-status --demo`, reaching
+        # people who haven't installed yet). A repo link at the end of
+        # a demo is expected showcase content. Static line — no
+        # network, no state, no marker files; star-DETECTION was
+        # evaluated and rejected (it would need the user's GitHub
+        # identity and would be this package's first network call,
+        # breaking the documented "no network" promise).
+        print("Repo & docs: https://github.com/mkalkere/claude-statusline"
+              " — a star helps others find it")
     finally:
         try:
             _self.get_session_tool_count = _orig_tool_count
