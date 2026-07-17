@@ -182,17 +182,54 @@ def _normalize(data):
     cu = cw.get("current_usage") or {}
     flat_usage = data.get("current_usage") or {}
 
-    out["used_percentage"] = _first(cw.get("used_percentage"), flat_usage.get("used_percentage"))
-    out["input_tokens"] = _first(cu.get("input_tokens"), flat_usage.get("input_tokens"))
-    out["output_tokens"] = _first(cu.get("output_tokens"), flat_usage.get("output_tokens"))
-    out["cache_read"] = _first(
+    # _safe_num on the whole context/token block — same chokepoint
+    # treatment the money/time trio received in v0.11.0, applied here
+    # in v0.14.0 after a probe showed `used_percentage: NaN` (a valid
+    # json.loads literal, so stdin-reachable) sailing through the
+    # `is not None` gates into render_bar's int() and blanking the
+    # entire statusline. Garbage becomes None; every consumer already
+    # treats None as "hide". Numeric strings coerce and render.
+    #
+    # `token_fields_corrupt` preserves the absent-vs-garbage
+    # distinction the coercion would otherwise destroy: the DERIVED
+    # chips (cache %, burn, speed) sum these fields with an
+    # absent-means-0 rule, and silently zeroing a component that
+    # upstream DID send (but garbled) would render confidently-wrong
+    # ratios — a cache hit-rate inflated from 60% to 90% with no
+    # visible cue (silent-failure review, reproduced). Those chips
+    # hide when this flag is set; per-field sections (tokens, bar)
+    # keep their own per-field visibility.
+    def _coerce_token(field, raw):
+        num = _safe_num(raw)
+        if raw is not None and num is None:
+            out["token_fields_corrupt"] = True
+            # Same stderr breadcrumb as the money/time trio's
+            # _num_or_note: present-but-garbage must leave a
+            # diagnostic trail, not vanish silently.
+            print(
+                "claude-status: ignoring non-numeric {} value".format(field),
+                file=sys.stderr,
+            )
+        return num
+
+    out["token_fields_corrupt"] = False
+    out["used_percentage"] = _coerce_token(
+        "used_percentage",
+        _first(cw.get("used_percentage"), flat_usage.get("used_percentage")))
+    out["input_tokens"] = _coerce_token(
+        "input_tokens",
+        _first(cu.get("input_tokens"), flat_usage.get("input_tokens")))
+    out["output_tokens"] = _coerce_token(
+        "output_tokens",
+        _first(cu.get("output_tokens"), flat_usage.get("output_tokens")))
+    out["cache_read"] = _coerce_token("cache_read", _first(
         cu.get("cache_read_input_tokens"),
         flat_usage.get("cache_read_tokens"),
-    )
-    out["cache_create"] = _first(
+    ))
+    out["cache_create"] = _coerce_token("cache_create", _first(
         cu.get("cache_creation_input_tokens"),
         flat_usage.get("cache_create_tokens"),
-    )
+    ))
     out["context_size"] = _first(
         cw.get("context_window_size"),
         flat_usage.get("context_size"),
@@ -681,11 +718,18 @@ def _render_sections_named(n, order, theme):
             )
 
         elif section == "cache":
-            cache_str = fmt_cache_pct(cache_read, total_input)
-            if cache_str:
-                sections.append(
-                    colorize("cache:", tc["label"]) + colorize(cache_str, GREEN)
-                )
+            # Hidden when any token component was present-but-garbage
+            # (token_fields_corrupt): the ratio sums components with an
+            # absent-means-0 rule, and silently zeroing a component
+            # upstream DID send renders a confidently-wrong hit-rate
+            # (60% inflating to 90% with no visible cue — reproduced
+            # in review). An honest absence beats a plausible lie.
+            if not n.get("token_fields_corrupt"):
+                cache_str = fmt_cache_pct(cache_read, total_input)
+                if cache_str:
+                    sections.append(
+                        colorize("cache:", tc["label"]) + colorize(cache_str, GREEN)
+                    )
 
         elif section == "cost" and cost is not None:
             sections.append(colorize(fmt_cost(cost), tc["cost"]))
@@ -783,7 +827,11 @@ def _render_sections_named(n, order, theme):
 
                 sections.append(pr_text)
 
-        elif section == "burn" and total_tokens and duration:
+        elif section == "burn" and total_tokens and duration \
+                and not n.get("token_fields_corrupt"):
+            # corrupt-gate: same rationale as the cache section — a
+            # garbage component silently zeroed in total_tokens would
+            # understate the burn rate with no visible cue.
             rate = fmt_burn_rate(total_tokens, duration)
             if rate != "?":
                 sections.append(
@@ -800,7 +848,11 @@ def _render_sections_named(n, order, theme):
             )
 
         elif section == "speed":
-            speed_str = fmt_speed(total_tokens, api_duration)
+            # corrupt-gate: see the cache section.
+            if n.get("token_fields_corrupt"):
+                speed_str = ""
+            else:
+                speed_str = fmt_speed(total_tokens, api_duration)
             if speed_str:
                 spc = tc.get("speed", CYAN)
                 sections.append(
@@ -863,6 +915,38 @@ def _render_sections_named(n, order, theme):
             if cs:
                 sections.append(colorize(
                     "({})".format(fmt_tokens(int(cs))), BRIGHT_BLACK))
+
+        elif section == "context_tokens":
+            # Absolute context display "ctx:412K/1M" (#113). At 1M
+            # windows a percentage hides magnitude — 40% is ~400K
+            # tokens re-billed every turn. The numerator is DERIVED
+            # (used_percentage × window size), not read from the token
+            # fields: used_percentage is upstream's authoritative
+            # fill signal and already drives the bar and !CTX, so
+            # deriving keeps this chip arithmetically consistent with
+            # the bar beside it (a 42% bar next to a chip reading
+            # 41.2% of the window would look like a bug). The
+            # input/cache token components are ambiguous as a fill
+            # measure — their sum is not the documented fill.
+            # Hidden when either signal is missing/garbage. Percentage
+            # clamped to [0, 100] (same bounds the bar enforces) so an
+            # out-of-spec upstream pct can't render ctx:12M/1M.
+            cs = _safe_num(context_size)
+            p = _safe_num(pct)
+            if cs and cs > 0 and p is not None:
+                p = max(0.0, min(100.0, p))
+                # round(), not bare int(): float representation error
+                # puts e.g. 1_000_000 * 4.1 / 100.0 at 40999.999…, and
+                # flooring renders ctx:40K where the exact value is
+                # 41K (13 such off-by-a-chip cases verified across
+                # 0.1%-step percentages at a 1M window).
+                # _first() for the color so a custom theme setting
+                # `context_tokens: null` degrades to the default
+                # instead of crashing colorize() (house convention).
+                ctc = _first(tc.get("context_tokens"), BRIGHT_BLACK)
+                sections.append(colorize(
+                    "ctx:{}/{}".format(fmt_tokens(int(round(cs * p / 100.0))),
+                                       fmt_tokens(int(cs))), ctc))
 
         elif section == "ctx_warning":
             # Percentage-based warning — works for any context window size
@@ -1256,8 +1340,8 @@ _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
     "sessions", "tools", "activity", "cache_age", "latency", "context_size",
     "session_name", "rate_limits", "output_style", "added_dirs", "effort",
-    "git_worktree", "speed", "cost_rate", "git_state", "commit_age",
-    "cost_breakdown", "pr", "thinking",
+    "git_worktree", "speed", "cost_rate", "context_tokens", "git_state",
+    "commit_age", "cost_breakdown", "pr", "thinking",
 ]
 _NARROW_DROP = _COMPACT_DROP + [
     "cache", "burn", "lines", "budget", "agent", "model",
@@ -2922,6 +3006,9 @@ def cmd_setup():
             print("  Budget saved: ${:.2f}/day".format(budget))
         except OSError as e:
             print("  Warning: could not save budget config: {}".format(e))
+            # Reset so the Step-5 summary doesn't claim a budget that
+            # was never written — a masked-wrong success message.
+            budget = None
 
     # Step 4: Install statusLine config
     print()
@@ -2959,6 +3046,15 @@ def cmd_setup():
     print("Preview all themes: claude-status --demo")
     print("Diagnostics: claude-status --doctor")
     print("Uninstall: claude-status --uninstall")
+    # Star-ask epilogue (#114): printed ONLY here, on the interactive
+    # wizard's success path — never in --install (the agents/CI path,
+    # where no human reads it) and never interleaved with functional
+    # output. Successful installers are the only people who can grow
+    # the project's discoverability; one polite line, no tracking,
+    # no repetition mechanism.
+    print()
+    print("If claude-status is useful to you, a GitHub star helps")
+    print("others find it: https://github.com/mkalkere/claude-statusline")
 
 
 def cmd_doctor():

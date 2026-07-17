@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-07-16
+
+### Added
+
+- **`context_tokens` section** ([#113](https://github.com/mkalkere/claude-statusline/issues/113)) — absolute context display, `ctx:412K/1M`. At 1M-token windows a percentage hides magnitude: 40% means ~400K tokens re-billed on every turn. Opt-in via custom theme, droppable under width pressure.
+
+  - **Derived, not read**: the numerator is `used_percentage × context_window_size` rather than the raw token fields. `used_percentage` is upstream's authoritative fill signal and already drives the bar and `!CTX`, so deriving keeps the chip arithmetically consistent with the bar beside it — a 42% bar next to a chip implying 41.2% would read as a bug. The input/cache token components are ambiguous as a fill measure (their sum is not the documented fill).
+  - Percentage clamped to [0, 100] (the bar's own bounds), so an out-of-spec upstream value can't render `ctx:2.5M/1M`. Hidden when either signal is missing or garbage; `0%` legitimately renders `ctx:0/1M` (zeros are values, not absences).
+
+- **Star-ask epilogue in `--setup`** ([#114](https://github.com/mkalkere/claude-statusline/issues/114)) — one polite line after a successful wizard run pointing at the GitHub repo. Success path only (aborted setup prints nothing extra), `--setup` only (`--install` is the agents/CI path where no human reads output), no tracking, no repetition mechanism.
+
+### Fixed
+
+- **`used_percentage: NaN` blanked the entire statusline.** `json.loads` accepts bare `NaN`, and the context/token fields flowed raw through `_normalize` — NaN passed every `is not None` gate and detonated in `render_bar`'s `int()`. The whole context/token block (`used_percentage`, `input_tokens`, `output_tokens`, `cache_read`, `cache_create`) now gets the same treatment the money/time trio received in v0.11.0 — `_safe_num` coercion at the `_normalize` chokepoint plus the stderr breadcrumb for present-but-garbage values: garbage becomes `None` (section hides), numeric strings coerce and render, zeros survive as zeros. Found by this release's own hidden-when-garbage test matrix — the third time a new feature's test probes have caught a pre-existing stdin-reachable crash (v0.11: cost/duration; v0.13: closed-stdin NameError; now this).
+
+### Notes
+
+- Test-infra: four stale 5-second subprocess timeouts bumped to 15s — the suite now spawns more subprocess tests (the star-ask contract tests), and Windows process cold-start under load intermittently exceeded 5s, intermittently failing an unrelated pre-existing test (three of ten local runs under load). Load-dependent flakes violate the determinism rule regardless of which test they bite.
+- **Derived chips refuse corrupted inputs**: `cache %`, `burn`, and `speed` sum token components with an absent-means-0 rule; coercion would have let a present-but-garbage component be silently zeroed, rendering a confidently-wrong ratio (a cache hit-rate inflating 60% → 90% with no visible cue — reproduced in review). A `token_fields_corrupt` flag now hides those three chips whenever any component was present-but-garbage; genuinely-absent fields keep the longstanding absent-means-0 behavior.
+- **`context_tokens` rounds, not floors** — float representation error puts e.g. `1M × 4.1%` at 40999.999…, and a bare `int()` rendered `ctx:40K` where the exact value is 41K. Also: a custom theme setting `context_tokens: null` now degrades to the default color via `_first()` (house convention) instead of crashing the line, and a failed budget save during `--setup` no longer reports the unsaved budget in the completion summary.
+- 727 tests pass (+23 net; 2 POSIX-only permission pins skip on Windows and run on the Linux/macOS CI legs: derivation/clamp/zero/hidden matrices for the new chip, droppable membership, the NaN-blanks-line regression with the full coercion matrix, and the star-ask's three contract points — exactly-once on success, absent on abort, absent from `--install`). Pure stdlib, zero dependencies, as always.
+
 ## [0.13.0] - 2026-07-09
 
 ### Added
