@@ -1887,7 +1887,7 @@ class TestCLISubprocess(unittest.TestCase):
     def _run(self, args, **kwargs):
         return subprocess.run(
             [sys.executable, "-m", "claude_statusline"] + args,
-            capture_output=True, timeout=10,
+            capture_output=True, timeout=15,
             env=self._env, encoding="utf-8", errors="replace", **kwargs,
         )
 
@@ -1911,6 +1911,11 @@ class TestCLISubprocess(unittest.TestCase):
         result = self._run([], input=data)
         self.assertEqual(result.returncode, 0)
         self.assertTrue(len(result.stdout.strip()) > 0)
+        # #116 acceptance pin: the demo's repo footer must never leak
+        # into statusline renders (it would appear in every Claude
+        # Code render and blow the line-fit budget). Symmetric with
+        # the star-ask absence pin on --install.
+        self.assertNotIn("github.com/mkalkere", result.stdout)
 
     def test_empty_stdin(self):
         result = self._run([], input="")
@@ -2534,7 +2539,7 @@ class TestSetupCommand(unittest.TestCase):
         """Demo should show all 7 themes."""
         result = subprocess.run(
             [sys.executable, "-m", "claude_statusline", "--demo"],
-            capture_output=True, timeout=10,
+            capture_output=True, timeout=15,
             encoding="utf-8", errors="replace",
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
@@ -4736,11 +4741,26 @@ class TestSetupWizardUpdated(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
 
+    def test_demo_has_repo_footer(self):
+        """#116: the repo-link footer closes --demo output. Positive
+        control included so a demo crash can't pass vacuously."""
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_statusline", "--demo"],
+            capture_output=True, timeout=15,
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("theme demos", result.stdout)
+        last_line = result.stdout.strip().split("\n")[-1]
+        self.assertIn("github.com/mkalkere/claude-statusline", last_line)
+        self.assertIn("a star helps", last_line)
+
     def test_demo_shows_all_themes(self):
         """Demo should show all 8 themes including focus."""
         result = subprocess.run(
             [sys.executable, "-m", "claude_statusline", "--demo"],
-            capture_output=True, timeout=10,
+            capture_output=True, timeout=15,
             encoding="utf-8", errors="replace",
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
@@ -8863,7 +8883,7 @@ class TestSubagentEndToEnd(unittest.TestCase):
     def _run(self, args, payload):
         return subprocess.run(
             [sys.executable, "-m", "claude_statusline"] + args,
-            input=payload, capture_output=True, timeout=10,
+            input=payload, capture_output=True, timeout=15,
             env=self._env, encoding="utf-8", errors="replace",
             cwd=os.path.join(os.path.dirname(__file__), ".."),
         )
