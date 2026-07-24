@@ -964,8 +964,24 @@ def _render_sections_named(n, order, theme):
             sections.append(colorize("wt:" + worktree_branch, YELLOW))
 
         elif section == "model" and model_name:
+            # Newer Claude Code builds send the RAW model id as
+            # display_name (observed: "claude-opus-5"), where older
+            # ones sent friendly names ("Opus 4.8 (1M context)").
+            # Shorten only the raw-id shape — _short_model dash-splits
+            # and title-cases, so applying it to a friendly name would
+            # mangle it ("(1M context)" -> "(1M Context)"). The
+            # `claude-` prefix is the discriminator; everything else
+            # renders byte-identical to before (#120).
+            display = model_name
+            if isinstance(display, str) and display.startswith("claude-"):
+                # cap=None: the main line must never truncate a model
+                # name mid-token. _fit_to_width drops the whole
+                # section cleanly when it doesn't fit, and a capped
+                # name would hide variant markers ("…-preview") the
+                # user relies on.
+                display = _short_model(display, cap=None) or model_name
             mc = tc.get("model", BRIGHT_MAGENTA)
-            sections.append(colorize(model_name, mc))
+            sections.append(colorize(display, mc))
 
         elif section == "git_state":
             branch = n["git_branch"] or get_branch()
@@ -1383,6 +1399,65 @@ _FIT_DROP_PRIORITY = _COMPACT_DROP + [
 # back into compact layout.
 _TERM_WIDTH_MIN = 20
 _TERM_WIDTH_MAX = 4000
+
+# Columns held back when fitting each rendered line (#118). The width
+# we detect is the TERMINAL width, but Claude Code renders the status
+# line inside a padded panel, so the usable row is narrower than what
+# we're told. Fitting to the reported width exactly let a full line 2
+# spill past the panel edge, where Claude Code's Ink renderer truncated
+# it mid-token ("effort:xhi…") — losing a whole section and showing an
+# ellipsis we never emitted.
+#
+# The subagent path has reserved a margin since v0.13.0
+# (_SUBAGENT_COLUMNS_MARGIN) for exactly this reason; this back-applies
+# the same discipline to the main lines.
+#
+# Sized deliberately generous rather than minimal: the failure is
+# asymmetric — too small costs a truncated section plus a visible
+# ellipsis, too large costs a couple of columns nobody notices. It also
+# buys headroom for _visible_width's documented width-1 approximation
+# for CJK/emoji (a branch name with wide glyphs under-measures today).
+# The margin SCALES WITH CONFIDENCE, because a margin is insurance
+# against being wrong about the width:
+#
+#   pinned (CLAUDE_STATUSLINE_WIDTH)  -> 0. The user is asserting the
+#       usable width, not reporting a terminal size. Honouring the
+#       override exactly is what makes it a real escape hatch for
+#       anyone who wants edge-to-edge output.
+#   a real probe won                  -> _FIT_SAFETY_MARGIN. We know
+#       the terminal width; we're only covering the panel's chrome.
+#   nothing won (fallback guess)      -> _FIT_SAFETY_MARGIN_UNTRUSTED.
+#       Claude Code 2.1.139+ can run hooks without terminal access, so
+#       the chain may fall back to _COMPACT_LAYOUT_MIN_COLS — a guess
+#       that can overshoot a narrow split pane by tens of columns. On
+#       Claude Code < 2.1.141 a Line 1 overflow silently drops Line 2
+#       entirely, so guessing wide is the expensive direction to be
+#       wrong in. A margin can't rescue a 28-column error, but the
+#       less we trust the number the more headroom we keep.
+_FIT_SAFETY_MARGIN = 4
+_FIT_SAFETY_MARGIN_UNTRUSTED = 8
+
+
+def _fit_margin(width_report):
+    """Columns to hold back when fitting, given the detection report.
+
+    See _FIT_SAFETY_MARGIN for the rationale. Reads the same per-step
+    status strings render() uses for `width_confidence_high`; the
+    explicit-override step is the only one whose winning status says
+    "explicit override", which is what makes it distinguishable from
+    a probe that merely succeeded.
+    """
+    pinned = False
+    confident = False
+    for _label, status in width_report:
+        if "(winner" not in status:
+            continue
+        confident = True
+        if "explicit override" in status:
+            pinned = True
+    if pinned:
+        return 0
+    return _FIT_SAFETY_MARGIN if confident else _FIT_SAFETY_MARGIN_UNTRUSTED
 
 # Common terminfo "cols" defaults that `tput cols` returns when invoked
 # without a controlling TTY. Claude Code 2.1.139+ runs hooks "without
@@ -1877,7 +1952,7 @@ def _visible_width(s):
     """Visible character width of a string after stripping ANSI + OSC 8.
 
     Approximation: counts each remaining code point as width 1. Wide
-    East-Asian characters and emoji are over-counted as 1 instead of 2,
+    East-Asian characters and emoji are under-counted as 1 instead of 2,
     but our statusline glyphs (\u2387 for branch, \u2726 for session,
     bar blocks, etc.) are all single-width — so this matches reality
     for our content. The unicodedata.east_asian_width path is omitted
@@ -2033,6 +2108,7 @@ def render(data, theme_name="default"):
     # as "won't fix") — not something claude-status can override.
     disabled = set(get_disabled_sections())
     raw_lines = []  # list of section-name lists, one per row
+    seen_sections = set()  # enforces render-at-most-once across rows
     i = 1
     while True:
         key = "line{}".format(i)
@@ -2043,6 +2119,17 @@ def render(data, theme_name="default"):
                                      compact_min=compact_min)
         if disabled:
             sections = [s for s in sections if s not in disabled]
+        # A section renders at most ONCE per statusline, first line
+        # wins. Built-in themes satisfy this by construction, but a
+        # CUSTOM theme inherits its base theme's lineN lists for every
+        # line it doesn't itself define (themes.load_custom_theme) — so
+        # a custom theme that overrides only `line2`, copied from a
+        # pre-v0.15.0 default, pairs its old line2 with the rebalanced
+        # line1 and would otherwise render burn/rate_limits/
+        # context_size twice. Also protects hand-written themes that
+        # list a section on two lines by mistake.
+        sections = [s for s in sections if s not in seen_sections]
+        seen_sections.update(sections)
         raw_lines.append(sections)
         i += 1
 
@@ -2056,10 +2143,16 @@ def render(data, theme_name="default"):
     # surviving line2 sections wouldn't be droppable. Sections not in
     # this list (bar, tokens, cost, branch, ctx_warning) are truly
     # essential and never dropped here.
+    # Stage 2 fits to the width MINUS a confidence-scaled margin (see
+    # _FIT_SAFETY_MARGIN). Note stage 1 (_apply_responsive, above)
+    # deliberately buckets on the raw term_width: it is a render-cost
+    # pre-filter choosing which sections are worth computing, while
+    # this stage is the authoritative "does it actually fit" decision.
     lines = []
+    fit_width = max(_TERM_WIDTH_MIN, term_width - _fit_margin(width_report))
     for row in raw_lines:
         named = _render_sections_named(n, row, theme)
-        named = _fit_to_width(named, sep_width, term_width, _FIT_DROP_PRIORITY)
+        named = _fit_to_width(named, sep_width, fit_width, _FIT_DROP_PRIORITY)
         if named:
             lines.append(sep.join(r for _, r in named))
 
@@ -2098,7 +2191,11 @@ _TERMINAL_TASK_STATUSES = frozenset({
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 # Trailing date stamp on model IDs ("claude-sonnet-5-20250707").
-_MODEL_DATE_RE = re.compile(r"-\d{8}$")
+# Trailing "-YYYYMMDD", optionally followed by a bracketed variant
+# marker (real ids appear as "claude-sonnet-4-5-20250929[1m]").
+# The marker is captured so it can be re-appended — dropping it
+# would hide which context variant the session is on.
+_MODEL_DATE_RE = re.compile(r"-\d{8}(\[[^\]]*\])?$")
 
 _SUBAGENT_NAME_MAX = 24         # name segment cap (with ellipsis)
 _SUBAGENT_COLUMNS_DEFAULT = 80  # when columns is garbage after tasks qualified
@@ -2176,8 +2273,8 @@ def _sanitize_row_text(value):
     return text
 
 
-def _short_model(model_id):
-    """Compact display for a task's model id: "claude-sonnet-5-20250707"
+def _short_model(model_id, cap=_SUBAGENT_NAME_MAX):
+    """Compact display for a model id: "claude-sonnet-5-20250707"
     -> "Sonnet 5", "claude-opus-4-8" -> "Opus 4.8". Trailing numeric
     id parts are version components, joined with dots. Unknown shapes
     degrade to the sanitized, dash-split, title-cased raw id.
@@ -2185,12 +2282,27 @@ def _short_model(model_id):
     Control-strip WITHOUT the length cap first: _sanitize_row_text's
     24-char truncation would eat the trailing "-YYYYMMDD" before the
     date regex could strip it ("claude-haiku-4-5-20251001" is 25
-    chars). The cap is applied to the final short form instead."""
+    chars). The cap is applied to the final short form instead.
+
+    `cap` truncates the result with an ellipsis; subagent rows pass the
+    default because their width budget is fixed per row. The MAIN
+    status line must pass cap=None: `_fit_to_width` already drops the
+    whole `model` section when it doesn't fit, and it drops cleanly
+    rather than mid-token. Capping there would (a) hide a variant
+    marker the user relies on ("…-preview" truncated away) and (b)
+    make this project emit the very mid-token "…" that v0.15.0's own
+    diagnosis attributes exclusively to Claude Code's renderer."""
     if not isinstance(model_id, str):
         return ""
     text = _CONTROL_CHARS_RE.sub("", model_id).strip()
     if not text:
         return ""
+    # Strip the trailing date, but KEEP any bracketed variant marker it
+    # carried ("...-20250929[1m]" -> suffix "[1m]"): the marker tells
+    # the user which context variant the session is on, so dropping it
+    # would be silent information loss.
+    date_match = _MODEL_DATE_RE.search(text)
+    variant_suffix = (date_match.group(1) or "") if date_match else ""
     text = _MODEL_DATE_RE.sub("", text)
     if text.startswith("claude-"):
         text = text[len("claude-"):]
@@ -2203,8 +2315,10 @@ def _short_model(model_id):
         short = "{} {}".format(family, ".".join(version))
     else:
         short = family or ".".join(version)
-    if len(short) > _SUBAGENT_NAME_MAX:
-        short = short[:_SUBAGENT_NAME_MAX - 1] + "…"
+    if short and variant_suffix:
+        short += " " + variant_suffix
+    if cap is not None and len(short) > cap:
+        short = short[:cap - 1] + "…"
     return short
 
 
@@ -3264,6 +3378,10 @@ def cmd_doctor():
     detected_cols, width_report = _detect_terminal_width_report()
     print("  TERM:    {}".format(term))
     print("  Columns: {} (shutil naive: {})".format(detected_cols, naive_cols))
+    _margin = _fit_margin(width_report)
+    print("  Fit width: {} (detected {} - safety margin {})".format(
+        max(_TERM_WIDTH_MIN, detected_cols - _margin),
+        detected_cols, _margin))
     cols = detected_cols
     if cols >= _FULL_LAYOUT_MIN_COLS:
         print("  Layout:  full (>= {} cols)".format(_FULL_LAYOUT_MIN_COLS))

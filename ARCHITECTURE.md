@@ -32,7 +32,7 @@ claude_statusline/
 2. **`_normalize(data)`** flattens the nested Claude Code JSON into a flat dict, handling both old and new schema formats
 3. **`_apply_responsive(sections, term_width)`** coarse pre-filter — filters sections based on terminal width buckets (150+/100-149/<100 cols), skipping the heaviest sections on terminals where they won't fit
 4. **`_render_sections_named(normalized, order, theme)`** renders each section name into a `(name, rendered_string)` pair (skipping sections whose data is absent)
-5. **`_fit_to_width(items, sep_width, term_width, drop_priority)`** precise post-render fit — measures actual visible width (stripping ANSI/OSC 8) and drops sections in priority order until the line fits the terminal
+5. **`_fit_to_width(items, sep_width, term_width, drop_priority)`** precise post-render fit — measures actual visible width (stripping ANSI/OSC 8) and drops sections in priority order until the line fits the terminal width minus a confidence-scaled safety margin (`_FIT_SAFETY_MARGIN`; zero when the width is pinned via `CLAUDE_STATUSLINE_WIDTH`, wider when no probe won and the width is a fallback guess) — Claude Code renders the status line inside a padded panel, so the usable row is narrower than the reported terminal width
 6. **`render(data, theme_name)`** orchestrates steps 2–5 and joins surviving sections with themed separators into 1-2 lines
 7. Output is printed to stdout
 
@@ -82,7 +82,7 @@ Two-stage adaptation prevents Line 2 truncation under Claude Code's `wrap:"trunc
 - **100-149 cols**: Compact (drops git_extras, version, cc_version, clock, worktree, sessions, tools, latency, context_size, session_name, rate_limits, output_style, added_dirs, effort, git_worktree, speed, git_state, commit_age)
 - **<100 cols**: Narrow (additionally drops cache, burn, lines, budget, agent, model)
 
-**Stage 2 — precise width-aware fit** (`_fit_to_width`) measures the actual rendered width of each line (stripping invisible ANSI SGR + OSC 8 escapes) and drops sections in `_FIT_DROP_PRIORITY` order — one at a time — until the line fits the terminal. `_FIT_DROP_PRIORITY` extends `_COMPACT_DROP` with last-resort drops (vim, agent, lines, duration, burn, model, cache, budget) so the precise stage can always reach a fitting result, even in the compact band with heavy data.
+**Stage 2 — precise width-aware fit** (`_fit_to_width`) measures the actual rendered width of each line (stripping invisible ANSI SGR + OSC 8 escapes) and drops sections in `_FIT_DROP_PRIORITY` order — one at a time — until the line fits the terminal width minus a confidence-scaled safety margin (`_FIT_SAFETY_MARGIN`; zero when the width is pinned via `CLAUDE_STATUSLINE_WIDTH`, wider when no probe won and the width is a fallback guess) — Claude Code renders the status line inside a padded panel, so the usable row is narrower than the reported terminal width. `_FIT_DROP_PRIORITY` extends `_COMPACT_DROP` with last-resort drops (vim, agent, lines, duration, burn, model, cache, budget) so the precise stage can always reach a fitting result, even in the compact band with heavy data.
 
 Truly essential sections (bar, tokens, cost, branch, ctx_warning) are deliberately omitted from `_FIT_DROP_PRIORITY` and never dropped — losing those would defeat the statusline's purpose.
 

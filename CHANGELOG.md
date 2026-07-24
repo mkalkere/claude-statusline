@@ -5,12 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-07-24
+
+Layout-correctness release, from a user report showing Line 2 cut mid-token (`effort:xhi…`) while Line 1 sat ~70% empty.
+
+### Fixed
+
+- **Line 2 no longer overflows into Claude Code's truncation** ([#118](https://github.com/mkalkere/claude-statusline/issues/118)). The ellipsis in that report was not ours — at the time this project emitted `…` only in subagent rows — it was Claude Code's Ink renderer cutting a line we handed it that was too wide. The width we detect is the *terminal* width, but the status line renders inside a padded panel, so the usable row is narrower. We were fitting to the reported width exactly (line 2 measured 186 columns at a detected 190), leaving nothing for the panel's own chrome.
+
+  Lines are now fitted to `detected_width − _FIT_SAFETY_MARGIN`. The margin is deliberately generous rather than minimal: the failure is asymmetric — too small costs a truncated section plus a visible ellipsis, too large costs a couple of columns nobody notices. It also buys headroom for `_visible_width`'s documented width-1 approximation for CJK/emoji. The margin **scales with confidence**: a width pinned via `CLAUDE_STATUSLINE_WIDTH` gets **no margin at all** (the user is asserting usable width, not reporting a terminal size — that is what makes the override a real edge-to-edge escape hatch); a width a real probe won gets the normal margin; a fallback *guess* gets a wider one, because Claude Code 2.1.139+ can run hooks without terminal access and guessing wide is the expensive direction to be wrong in (on Claude Code < 2.1.141 a Line 1 overflow drops Line 2 entirely).
+
+  **The inconsistency behind the bug:** the subagent path has reserved a margin since v0.13.0 for exactly this reason; the main path never got the same treatment. Now it does.
+
+- **Line 1 can actually fill** ([#119](https://github.com/mkalkere/claude-statusline/issues/119)). Line 1 rendered at a constant 57 visible columns at *every* terminal width (verified 150/170/190/200/220) — not a fit failure but a static composition problem: six themes assigned 6 sections to Line 1 and 25 to Line 2, and two of the six are conditional. Meanwhile Line 2 shed real data: at the reported width `version` was dropped by our own fit logic, while `cc_version` and `clock` survived it only to be cut by Claude Code's truncation (at 170 columns all three were ours).
+
+  `burn`, `rate_limits`, and `context_size` move from Line 2 to Line 1 in the six full themes (`default`, `powerline`, `nord`, `tokyo-night`, `gruvbox`, `rose-pine`). Measured on the reported session at 190 columns: **Line 1 57 → 93, Line 2 186 → 153.** `minimal` and `focus` are deliberately sparse designs and are untouched (pinned by exact-composition tests).
+
+  This also **makes the code match the README**, which has listed Burn Rate, Rate Limits, and Context Size under "Line 1 — Metrics at a Glance" all along. The docs were right; the themes were wrong.
+
+- **Raw model IDs are shortened** ([#120](https://github.com/mkalkere/claude-statusline/issues/120)). Newer Claude Code builds send the raw id as `model.display_name` (observed: `claude-opus-5`), where older builds sent friendly names. Raw ids now render through the existing `_short_model()` — `claude-opus-5` → `Opus 5` — saving columns on a width-starved line. Guarded: `_short_model` dash-splits and title-cases, so it is applied **only** to `claude-`-prefixed values; friendly names like `Opus 4.8 (1M context)` render byte-identical to before (pinned).
+
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
+### Notes
+
+- **Visible change for every user of the six full themes**: three sections move from Line 2 up to Line 1. Nothing is removed and no configuration changes.
+- **Custom themes inherit** their base theme's `lineN` lists for any line they don't define themselves, so a custom theme that overrides only colors — or only one line — sees the same move. A custom theme that overrides *only* `line2`, copied from the pre-v0.15.0 default, would have paired its stale `line2` with the rebalanced `line1` and rendered `burn`/`rate_limits`/`context_size` twice; `render()` now enforces a **render-at-most-once invariant** across rows (first line wins), which also protects hand-written themes that list a section on two lines by mistake.
+- Theme screenshots in the README were regenerated for the new layout.
+- Dynamic overflow promotion (spilling Line 2 sections up when Line 1 has room) is deliberately **not** in this release — it is real new layout logic and is filed as [#121](https://github.com/mkalkere/claude-statusline/issues/121) for a design pass.
+- 746 tests pass (+18: a width-headroom sweep across seven terminal widths, a regression pin reproducing the reported session shape, the three-section promotion, a no-section-on-two-lines invariant across every theme, exact-composition pins for `minimal`/`focus`, and the model shortener's raw-vs-friendly guard). Pure stdlib, zero dependencies, as always.
+
 ## [0.14.1] - 2026-07-16
 
 ### Added
 
 - **Repo-link footer at the end of `--demo` output** ([#116](https://github.com/mkalkere/claude-statusline/issues/116)) — `--demo` is the discovery funnel (the README's first CTA is `uvx claude-status --demo`, reaching people who haven't installed yet), and a repo link at the end of a demo is expected showcase content. Static line: no network, no state, no marker files. Statusline renders, `--install`, and `--print-config` are untouched.
 - **Design note for the record:** star-*detection* ("only ask if they haven't starred") was evaluated and rejected — it would require reading the user's GitHub identity (authenticated API or shelling into their `gh` CLI) and would be this package's first-ever network call, breaking the documented no-daemon/no-network/cannot-leak-data promise (AGENTS.md: "No daemon, no network, no background processes"). That promise outranks growth mechanics.
+
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
 
 ### Notes
 
@@ -31,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`used_percentage: NaN` blanked the entire statusline.** `json.loads` accepts bare `NaN`, and the context/token fields flowed raw through `_normalize` — NaN passed every `is not None` gate and detonated in `render_bar`'s `int()`. The whole context/token block (`used_percentage`, `input_tokens`, `output_tokens`, `cache_read`, `cache_create`) now gets the same treatment the money/time trio received in v0.11.0 — `_safe_num` coercion at the `_normalize` chokepoint plus the stderr breadcrumb for present-but-garbage values: garbage becomes `None` (section hides), numeric strings coerce and render, zeros survive as zeros. Found by this release's own hidden-when-garbage test matrix — the third time a new feature's test probes have caught a pre-existing stdin-reachable crash (v0.11: cost/duration; v0.13: closed-stdin NameError; now this).
+
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
 
 ### Notes
 
@@ -57,6 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Zero side effects**: subagent rendering never touches `_normalize`, git, caches, or the daily-spend ledger — the hook fires once per refresh tick per panel. Pinned by a test.
   - **Install funnel**: `--setup` gains an opt-in question that writes the key (theme-propagated); `--install` prints the ready-to-paste snippet; `--uninstall` removes a claude-status-owned `subagentStatusLine`; `--print-config` gains a 9th `subagent=` line (appended — key=value parsers keep working; exact-8-line-count parsers need a one-line update); `--doctor` reports the hook's config state.
   - Design went through two adversarial reviews before implementation (which set the envelope-only payload discriminator — `tasks: []` is a valid subagent payload; malformed elements can never flip the mode — and the never-empty-content rule) plus the standard four-agent review after.
+
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
 
 ### Notes
 
@@ -91,6 +131,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Cache directory hardened to `0o700`** — the user-scoped cache dir name is predictable (md5 of the home path) and `exist_ok=True` would silently adopt a directory pre-created by another local user. That mattered less when the dir held tool counts; now that it holds per-session spend records, both are hardened best-effort: directories the user owns are repaired to `0o700`; a foreign-owned pre-created directory cannot be repaired (the chmod fails and is swallowed), which is why the ledger additionally refuses to operate in the shared-tempdir fallback. Created with `mode=0o700` and re-`chmod`ed if it already exists; no-op-equivalent on Windows where the temp dir is already per-user.
 
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
 ### Notes
 
 - The ledger reuses the existing infrastructure end to end: atomic `tmp + os.replace` writes, the user-scoped cache dir, and the existing 2-day mtime cleanup — today's files are rewritten all day (fresh mtime) and age out naturally after the day passes. No new pruning code.
@@ -116,6 +159,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`_safe_num` now guarantees a FINITE float or None.** Previously `float("nan")`/`float("inf")` passed through — and NaN is poison downstream: every comparison is False, so it sails through threshold checks and detonates later inside a formatter's `int()`. `json.loads` accepts bare `NaN`/`Infinity`, so this was reachable from stdin. All existing `_safe_num` call sites treat `None` as "hide/skip", so the tightened contract is strictly safer; the one pre-existing explicit `isfinite` guard (cost-category filtering) is retained as documented defense-in-depth. Two concrete crashes and one lie this closes:
   - `rate_limits.five_hour.resets_at: Infinity` previously reached `fmt_countdown`'s `int()` → `OverflowError` (not in its except tuple) → whole line blanked. Now hidden. `fmt_countdown` also gained `OverflowError` in its own except tuple so the hole stays shut even if `_safe_num` ever loosens.
   - `used_percentage: NaN` previously sailed past the `>= 1e6` sanity cap (NaN comparisons are all False) into `min(100, nan)` → Python returns **100** → the statusline rendered a false danger-red `5h:100%` for garbage input. Now hidden — a masked wrong output replaced by an honest absence.
+
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
 
 ### Notes
 
@@ -152,6 +198,9 @@ theme screenshots, current demo data, and PyPI metadata.
 
 - **`context_size` hardening** — the section now gates the window size through `_safe_num` + `isfinite`, so a non-numeric, `NaN`, or `Infinity` `context_window_size` (all reachable via `json.loads`) hides the section instead of throwing into `render()`'s outer catch. The pre-existing behavior for garbage input was also a crash (different exception), so this is strictly an improvement, now pinned by tests.
 
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
 ### Notes
 
 - No behavioral changes for 200K-window sessions beyond the 85%-boundary bar color (previously yellow at exactly 85%, now red — matching the `!CTX` badge that was already firing at that percentage).
@@ -173,6 +222,9 @@ theme screenshots, current demo data, and PyPI metadata.
 
   - **Python 3.8+ safe timestamp parse.** `_parse_iso8601_ms()` swaps a trailing `Z` for `+00:00` before `datetime.fromisoformat()` so it parses the transcript's `2026-07-02T23:00:49.920Z` form on Python 3.8–3.10 (where `fromisoformat` doesn't accept `Z`) as well as 3.11+. A naive timestamp with no offset is assumed UTC rather than crashed on.
 
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
 ### Notes
 
 - **Pure upstream-field consumer**, consistent with `thinking` / `pr`: reads a documented stdin-derived field and degrades gracefully when absent. No new heuristics, no dependency changes, pure stdlib.
@@ -190,6 +242,9 @@ theme screenshots, current demo data, and PyPI metadata.
   1. **`_settings_path()` now honors a `CLAUDE_STATUSLINE_SETTINGS_PATH` env override** (same convention as `CLAUDE_STATUSLINE_WIDTH`). `setUpModule()` points it at a throwaway temp directory for the whole suite run, so even a test that forgets to monkey-patch the function writes there — never to the real file. A non-empty, non-whitespace value wins; a blank value falls through to the real path so a stray empty export can't redirect writes to `""`. This is the single chokepoint every settings read/write flows through.
   2. **Regression guard** — `setUpModule()` snapshots a sha256 of the real settings file before any test runs (tri-state: hex digest / `None` if genuinely absent / a distinct sentinel if present-but-unreadable, so a transient read failure can't mask a later deletion), and `tearDownModule()` asserts it is unchanged after the whole module run. The assertion lives in `tearDownModule` — not a test method — because that provably runs after *every* test, including the uninstall tests that sort alphabetically after any guard method and caused the original incident. `TestSettingsIsolation` pins the two mechanisms: the `_settings_path()` override contract (non-blank wins verbatim; blank/whitespace/unset fall through to the real path) and an end-to-end check that an *unpatched* `cmd_install` writes to the redirect and leaves the real file byte-identical.
 
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
 ### Notes
 
 - Production behavior is **unchanged** for end users — `_settings_path()` only consults the new env var, which is unset in normal use, so it resolves to `~/.claude/settings.json` exactly as before. The override exists for test/CI isolation.
@@ -204,6 +259,9 @@ theme screenshots, current demo data, and PyPI metadata.
 - **PR review-state rendering** ([#99](https://github.com/mkalkere/claude-statusline/issues/99) follow-up) — the `pr` section now renders `pr.review_state` as a short token appended to the PR number: `PR#1234 ok` (approved), `chg` (changes_requested), `rev` (pending), `draft`. The value was already captured and enum-validated in `_normalize()` since v0.6.3 (which deferred rendering to a follow-up); this release adds the renderer with no change to the capture path. The token is appended **outside** the OSC 8 hyperlink envelope so the clickable target stays exactly `PR#N` and the state reads as an adjacent annotation. Per-state color is themeable via `pr_review_<state>` keys (default: green/red/yellow/dim), falling through with `_first()` so a theme setting the key to `null` degrades to the default rather than crashing. Hidden — section degrades to bare `PR#N` — whenever `review_state` is absent or fails the documented enum (`approved`/`pending`/`changes_requested`/`draft`); the lookup is total over every value that survives normalization, so a desync between the validation set and the render map can't `KeyError`. A deliberately ASCII token (not an emoji) keeps it width-1-per-char and renders identically in every terminal, consistent with the rest of the statusline. Opt-in: rides along automatically wherever the `pr` section is already enabled.
 
 - **`thinking` section** — renders a `think` badge from the documented `thinking.enabled` stdin boolean. Surfaces only the affirmative case (`thinking.enabled` strictly `True`): an "off" indicator would be noise on every non-thinking session. `_normalize()` reduces the field to a strict bool via `is True` (not truthiness), so a malformed non-bool like `enabled: 1` does not masquerade as the documented value, and an `isinstance(dict)` guard mirrors every other nested-object read so `thinking: "yes"` (string) can't crash. Pairs naturally with `effort` — both describe how the model is reasoning this session. Color is themeable via the `thinking` key (default magenta). Opt-in via custom theme initially, matching the rollout of `pr` / `cost_breakdown`; may promote to a default-theme section if user feedback is positive.
+
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
 
 ### Notes
 
@@ -228,6 +286,9 @@ theme screenshots, current demo data, and PyPI metadata.
 
   Decision logic lives in two new functions in `cli.py`: `_parse_cc_version()` (converts the stdin `version` string to a comparable 3-tuple, rejecting non-string / garbage / fewer-than-3-parts inputs by returning None) and `_layout_thresholds(data, width_confidence_high)` (returns the threshold pair). `_apply_responsive()` now accepts the thresholds as keyword arguments (with the conservative pair as defaults, so existing callers that pass only `term_width` still get the safe behavior).
 
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
 ### Notes
 
 - **Backward compatibility.** Every existing theme renders identically to v0.6.3 — the 2-line hardcode removal was a *capability* change, not a *behavior* change. Every user on Claude Code older than 2.1.141 also renders identically — the threshold relaxation is gated, not unconditional. The only visible-output change is for users who EITHER opt into a 3+ line theme OR run on Claude Code ≥ 2.1.141 with a high-confidence terminal width and a 100-149 col terminal.
@@ -247,6 +308,9 @@ theme screenshots, current demo data, and PyPI metadata.
   - **`effort.level` enum: `ultra` is now a silent alias for `xhigh`.** v0.6.2 added `ultra` as a 6th accepted level documenting it as the stored value Claude Code emits for `/effort ultracode`. The live effort doc and statusline doc list valid `effort.level` values as `low, medium, high, xhigh, max` only, with an explicit note that ultracode is not a distinct level — it reports as `xhigh`. v0.6.3 keeps `ultra` accepted in the validation set so two real user groups continue to render an effort section after upgrade: (a) anyone whose `~/.claude/settings.json` still has `effortLevel: "ultra"` because v0.6.2 told them it was valid, and (b) anyone whose claude-status disk cache was written by v0.6.2 with that value. The alias is applied at three layers — stdin normalize, settings.json fresh read, and cache-read return — so a stale on-disk cache from a v0.6.2 install renders correctly from the very first render after upgrade with no 30-second window where the user still sees `effort:ultra`. **Visible change: users who previously saw `effort:ultra` will see `effort:xhigh` after upgrading.** Both labels describe the same setting; only the label changes to match the documented enum.
 
 - **`workspace` isinstance guard at `_normalize`** — v0.6.1 added isinstance guards across `agent`, `cost`, `vim`, `github`, and `worktree` (#88, #87, Gemini PR #90 review) but missed `workspace`. A non-dict `workspace` value from an upstream variant would crash `_normalize` with AttributeError on the subsequent `.get()` calls, caught only by `main()`'s outer try/except. v0.6.3 closes the gap so the same defensive pattern is uniform across `_normalize`.
+
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
 
 ### Notes
 
@@ -268,6 +332,9 @@ theme screenshots, current demo data, and PyPI metadata.
 ### Changed
 - Demo data (`--demo`), README, and a test fixture now reference **Opus 4.8 (1M context)** instead of Opus 4.7, reflecting Anthropic's current top model (released 2026-05-28).
 
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
 ### Notes
 - **Backward compatible** — users on Claude Code releases before Opus 4.8 / ultracode see no change. The `ultracode` display label is still correctly rejected as invalid (only the stored value `ultra` is accepted), so validation is not weakened.
 - **Verified non-issues for Opus 4.8**: model `display_name` renders verbatim (no hardcoded model IDs), context window unchanged (1M, same as Opus 4.7), pricing is supplied by Claude Code (`cost.total_cost_usd`; no hardcoded rates), and no new statusline stdin fields shipped in the Claude Code releases bundling Opus 4.8.
@@ -286,6 +353,9 @@ theme screenshots, current demo data, and PyPI metadata.
 - **`cost` normalization now isinstance-guarded** — same defensive pattern as the above. An upstream sending `cost: 1.50` (bare number) instead of `cost: {"total_cost_usd": 1.50}` (dict) would have crashed the new `cost.by_category` extraction; now it falls through cleanly with an empty breakdown.
 - **`vim` normalization now isinstance-guarded** — completing the bug-pattern fix across all `_normalize` sections that had the same exposure. An upstream sending `vim: "NORMAL"` (string) instead of `vim: {"mode": "NORMAL"}` (dict) would have crashed with AttributeError on `.get()`. Flagged by the Gemini code-review bot on PR #90 as the same shape we were fixing for `agent`/`worktree`/`cost`.
 - **Color extraction in the new `pr` and `cost_breakdown` sections** now uses the `_first()` helper rather than `.get()` chained defaults, so a custom theme that explicitly sets a color key to `null` falls through to the default rather than passing `None` to `colorize()` (which would render the string `"None"` instead of crashing). Adopts the existing project pattern from the `effort` section.
+
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
 
 ### Notes
 - **Backward compatible** — every existing theme/section keeps working unchanged. The three new sections (`pr`, `cost_breakdown`, env override behavior) are opt-in. Users on Claude Code releases before v2.1.148 / v2.1.150 see no change; users on newer releases get the new fields surfaced when they opt in via custom theme.
@@ -312,6 +382,9 @@ theme screenshots, current demo data, and PyPI metadata.
 - **`_detect_terminal_width` refactored** into a thin wrapper around `_detect_terminal_width_report`. Public signature unchanged (`(data=None) -> int`) so every existing caller keeps working. The chain now tracks whether any TTY probe succeeded earlier in the chain — that flag drives the stub-rejection heuristic in step 7. Step 5 (process-tree walk) is new; original steps 5/6 (`stty`/`tput`) renumbered to 6/7 in the docstring and the `--doctor` output.
 - **pyproject.toml keywords expanded** to cover competitor-comparison search traffic (`claude-code-statusline`, `agentic`, `ai-agent`, `subagent`, `cost-tracking`, `responsive-layout`, `terminal-width`, `prompt-cache`, `prompt-engineering`, `git-status`, `observability`, `devtool`, `statusbar`, `tokens`, `context-tracking`).
 
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
 ### Notes
 - **Backward compatible** — every existing theme/section keeps working unchanged. The new `activity` section is opt-in via custom theme. The width-detection fix is transparent: users on Claude Code < 2.1.139 see no behavior change; users on 2.1.139+ see correct layouts instead of squeezed 80-col ones.
 - **Clarified `cache:` docstring** — the existing `cache:N%` indicator already computes prompt cache hit ratio (`cache_read / (cache_read + cache_creation + input_tokens)`) because that's what its `total_input` argument is. The docstring previously said "cache efficiency as percentage," which was vague enough to invite a duplicate. The output value is unchanged for every user; only the inline documentation was made precise.
@@ -327,6 +400,9 @@ theme screenshots, current demo data, and PyPI metadata.
 
 ### Added
 - 18 new tests in `TestEffortLevelFromStdin` covering: valid level extraction (low / high / xhigh / max all pass through; medium normalized to "" sentinel), case-insensitivity (`XHIGH` → `xhigh`), unknown-level rejection (`ultrathink` → fall through to settings.json), non-string `effort.level` (int / list / None / bool / nested dict — all rejected cleanly), non-dict `effort` field rejection, absent-effort fallback, end-to-end render preferring stdin over settings.json (verified via "loud stub" that records calls — settings.json read MUST NOT happen when stdin has a valid value), end-to-end render falling back to settings.json when stdin lacks the field, invalid-stdin fall-through to settings.json, stdin-medium hides section AND skips the settings.json fallback (verified via loud stub: `get_effort_level` MUST NOT be called even when stdin says medium), both-medium case, each valid level rendering through the stdin path independently, cache mirror-write on valid stdin, cache NOT-written on invalid stdin, cache write skipped when value unchanged, cache write happens when value changed.
+
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
 
 ### Notes
 - **Backward compatible** — users on older Claude Code (no `effort` field in stdin) see no behavior change. Users on v2.1.119+ get faster effort updates with no config required.
@@ -345,6 +421,9 @@ theme screenshots, current demo data, and PyPI metadata.
 - **Defensive guard against upstream rate_limits bug** ([anthropics/claude-code#52326](https://github.com/anthropics/claude-code/issues/52326), still open) — on a fresh 5h or 7d window with no usage data yet, Claude Code returns the `resets_at` epoch timestamp (~1.7e9) in `used_percentage` instead of 0/null. Previously our `clamp(0,100)` silently turned this into a false `5h:100% (red)` alarm on every fresh session for Pro/Max subscribers. Now values >= 1e6 (the epoch-timestamp pattern, 7+ orders of magnitude above any plausible percentage) are treated as "no data yet" and the section is hidden. Values 101-999999 still flow through to the renderer's clamp(0,100) — these are NOT the bug pattern and could be a future Anthropic "overage" indicator above 100% that we shouldn't pre-emptively hide.
 - 6 new tests in `TestRateLimitsEpochTimestampGuard` covering 5h epoch hidden, 7d epoch hidden, boundary at 100 (legitimate maxed value passes), boundary at 1e6 (just hits the guard), end-to-end render of the bugged value, and that legitimate values pass through.
 
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
 ### Notes
 - Together these two fixes are the most user-visible improvement since v0.5.4 — every claude-status user with a wide terminal will see significantly more sections after upgrading, with no config required.
 - Closes #79.
@@ -358,6 +437,9 @@ theme screenshots, current demo data, and PyPI metadata.
 
 ### Changed
 - Demo data (`--demo`) now uses `Opus 4.7 (1M context)` instead of `Opus 4.6` to reflect Anthropic's current top model.
+
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
 
 ### Notes
 - Other models (Sonnet, Haiku, older Opus releases) fall back to `high` per Anthropic's docs — no behavior change for users on those models. Users on Opus 4.7 with xhigh or max configured will simply start seeing the indicator after upgrading.
@@ -379,6 +461,9 @@ theme screenshots, current demo data, and PyPI metadata.
 - **PyPI keywords broadened** — added `claude-code-plugin`, `coding-agent`, `agent-tooling`, `ai-coding`, `llm-tooling`, `ai-developer-tools` so PyPI search surfaces the project for terms agents and users actually search for.
 - **GitHub repo topics** — added `coding-agent` and `agent-tooling` to the repo (now at the 20-topic GitHub limit).
 
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
 ### Notes
 - The discoverability changes target two audiences: (1) LLM crawlers / answer engines (Perplexity, Phind, ChatGPT/Claude search, Gemini) via `llms.txt` and prominent README placement; (2) coding agents acting on a user's behalf via `AGENTS.md` and `--print-config` for machine-readable state.
 - No behavior changes to the rendered status line itself — this release is purely additive (new flag, new docs, new metadata).
@@ -398,6 +483,9 @@ theme screenshots, current demo data, and PyPI metadata.
 ### Fixed
 - OSC 8 hyperlink regex now matches both string-terminator forms (ST `\x1b\\` and BEL `\x07`) so width measurement stays accurate when text passes through emitters that use BEL.
 
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
 ### Notes
 - Anthropic's underlying `wrap:"truncate"` bug (anthropics/claude-code#28750) remains unaddressed upstream — the issue was closed by stalebot after 30 days of inactivity following the reporter's root-cause trace. Our two-stage layout makes the workaround tighter: instead of dropping the entire compact-bucket of sections at a single width threshold, we measure and drop only what actually doesn't fit.
 - Users who previously saw a sparse Line 2 between the compact and full thresholds will see additional sections automatically. No config change required.
@@ -410,6 +498,9 @@ theme screenshots, current demo data, and PyPI metadata.
 - Added 4 end-to-end regression tests that render with a worst-case heavy payload (realistic workspace, long branch/session name) at 80/100/120 cols and at the full-layout threshold; they assert every line's visible width fits — catches future feature additions that grow Line 2 past the threshold.
 - Default fallback for `shutil.get_terminal_size()` updated from 120 to 100 (compact layout) for non-interactive contexts. Safer default than the old "assume full layout."
 
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
+
 ### Notes
 - Users on terminals between 120 and 229 cols will see fewer Line 2 sections than before. To get the full layout, widen your terminal to 230+ cols.
 - Users who want specific sections to always show regardless of width can use the existing `disabled_sections` config in `~/.claude/claude-status-budget.json` to hide other sections instead.
@@ -419,6 +510,9 @@ theme screenshots, current demo data, and PyPI metadata.
 ### Fixed
 - **Line 2 disappearing — real root cause** — OSC 8 clickable hyperlink escape sequences (added in v0.5.0, #63) add ~180 bytes per link but are invisible to the user. Claude Code's Ink TUI `<Text wrap="truncate">` doesn't recognize OSC 8 sequences — it counts those escape bytes toward line width, miscalculates Line 2 as ~200+ chars wide, and silently drops it. This is independent of Line 1 content. Closes #68.
 - OSC 8 clickable links are now **disabled by default**. Opt in via `"clickable_links": true` in `~/.claude/claude-status-budget.json` for users who run claude-status in a supporting terminal (iTerm2, Kitty, WezTerm) outside of Claude Code.
+
+- **Model names are never truncated mid-token on the main line.** `_short_model()` gained a `cap` parameter; subagent rows keep the per-row cap, the main line passes `cap=None` because `_fit_to_width` already drops the whole section cleanly when it doesn't fit. A bracketed variant marker (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) now survives the date strip instead of being silently dropped — it tells you which context variant the session is on.
+- **`--doctor` reports the effective fit width** (`Fit width: 186 (detected 190 - safety margin 4)`), so a section that vanished after this upgrade is diagnosable rather than mysterious.
 
 ### Notes
 - Anthropic closed the upstream fix request (anthropics/claude-code#28750) as NOT_PLANNED after 30 days of inactivity. This patch is our workaround.

@@ -18,8 +18,8 @@ uvx claude-status --demo    # or: pipx run claude-status --demo
 ![claude-status default theme](https://raw.githubusercontent.com/mkalkere/claude-statusline/main/assets/themes/default.svg)
 
 ```
-Line 1:  [████████░░░░░░░░░░░░] │ in:412K out:18K │ cache:46% │ $0.73 │ burn:66K/min
-Line 2:  5h:34% 7d:18% ~2h │ (1M) │ 12m05s │ +247 -38 │ ⎇ myapp/feat/statusline │ ✦ refactor auth │ Sonnet 5 │ effort:high │ v0.10.0 │ CC:2.1.197 │ 15:30
+Line 1:  [████████░░░░░░░░░░░░] │ in:412K out:18K │ cache:46% │ $0.73 │ burn:66K/min │ 5h:34% 7d:18% ~1h59m │ (1M)
+Line 2:  12m05s │ api:5m12s │ speed:2.6K/s │ +247 -38 │ ⎇ myapp/feat/statusline │ last:5m00s │ tools:42 │ ✦ refactor auth │ Sonnet 5 │ effort:high │ 15:30
 ```
 
 ## 30-Second Setup
