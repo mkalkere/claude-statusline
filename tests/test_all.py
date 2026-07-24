@@ -2996,6 +2996,320 @@ class TestFitToWidth(unittest.TestCase):
         self.assertEqual(names, ["a", "c", "d"])
 
 
+class TestFitSafetyMargin(unittest.TestCase):
+    """#118: lines must fit the reported width MINUS a safety margin.
+
+    Claude Code renders the status line inside a padded panel, so the
+    usable row is narrower than the terminal width it reports. Fitting
+    to the reported width exactly let line 2 spill past the panel edge,
+    where Ink truncated it mid-token ("effort:xhi…") — losing a whole
+    section and showing an ellipsis this project never emits."""
+
+    def _widths(self, out):
+        from claude_statusline.cli import _visible_width
+        return [_visible_width(line) for line in out.split("\n")]
+
+    def _render_at(self, cols, data=None):
+        import claude_statusline.cli as cli_mod
+        old = os.environ.get("CLAUDE_STATUSLINE_WIDTH")
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = str(cols)
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            return cli_mod.render(
+                data if data is not None else cli_mod._demo_data())
+        finally:
+            if old is None:
+                os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+            else:
+                os.environ["CLAUDE_STATUSLINE_WIDTH"] = old
+            cli_mod.get_branch = orig_branch
+
+    def test_headroom_reserved_across_width_sweep(self):
+        from claude_statusline.cli import _FIT_SAFETY_MARGIN
+        for cols in (100, 120, 150, 165, 190, 220, 300):
+            out = self._render_at(cols)
+            for w in self._widths(out):
+                self.assertLessEqual(
+                    w, cols - _FIT_SAFETY_MARGIN,
+                    "at {} cols a line rendered {} wide — margin "
+                    "({}) not reserved".format(cols, w, _FIT_SAFETY_MARGIN))
+
+    def test_margin_is_positive(self):
+        """A zero margin would silently reinstate the bug."""
+        from claude_statusline.cli import _FIT_SAFETY_MARGIN
+        self.assertGreater(_FIT_SAFETY_MARGIN, 0)
+
+    def test_margin_scales_with_confidence(self):
+        """Pinned width is the user asserting usable width -> no margin
+        (this is what makes CLAUDE_STATUSLINE_WIDTH a real escape
+        hatch, which the docs promise). A won probe -> normal margin.
+        A fallback guess -> wider margin, because guessing wide is the
+        expensive direction: on Claude Code < 2.1.141 a line 1 overflow
+        drops line 2 entirely."""
+        from claude_statusline.cli import (
+            _fit_margin, _FIT_SAFETY_MARGIN, _FIT_SAFETY_MARGIN_UNTRUSTED)
+        self.assertEqual(_fit_margin(
+            [("CLAUDE_STATUSLINE_WIDTH env",
+              "190 (winner — explicit override)")]), 0)
+        self.assertEqual(
+            _fit_margin([("stty size", "190 (winner)")]), _FIT_SAFETY_MARGIN)
+        self.assertEqual(
+            _fit_margin([("stty size", "unreachable: OSError")]),
+            _FIT_SAFETY_MARGIN_UNTRUSTED)
+        self.assertGreater(_FIT_SAFETY_MARGIN_UNTRUSTED, _FIT_SAFETY_MARGIN)
+
+    def test_pinned_width_is_honored_edge_to_edge(self):
+        """The documented escape hatch must actually work: a pinned
+        width is used verbatim, not shaved."""
+        from claude_statusline.cli import _visible_width
+        import claude_statusline.cli as cli_mod
+        old = os.environ.get("CLAUDE_STATUSLINE_WIDTH")
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "190"
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            widths = [_visible_width(l)
+                      for l in cli_mod.render(cli_mod._demo_data()).split("\n")]
+            self.assertLessEqual(max(widths), 190)
+            # The "no headroom is forced" half of the contract is
+            # pinned by test_margin_scales_with_confidence (_fit_margin
+            # returns 0 for a pinned width). It can't be asserted from
+            # rendered output here: the demo payload doesn't produce a
+            # line long enough to reach the boundary either way, so a
+            # ">= 186" assertion would fail for a reason unrelated to
+            # the margin.
+        finally:
+            if old is None:
+                os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+            else:
+                os.environ["CLAUDE_STATUSLINE_WIDTH"] = old
+            cli_mod.get_branch = orig_branch
+
+    def test_reported_session_no_longer_packs_to_edge(self):
+        """Regression pin for the exact session shape that was being
+        truncated in the wild: a wide window, long branch, every line-2
+        section populated."""
+        from claude_statusline.cli import _FIT_SAFETY_MARGIN
+        import claude_statusline.cli as cli_mod
+        orig = (cli_mod.get_git_extras, cli_mod.get_git_state,
+                cli_mod.get_last_commit_age_ms)
+        cli_mod.get_git_extras = lambda: {"stash": 0, "ahead": 0, "behind": 0}
+        cli_mod.get_git_state = lambda: ""
+        cli_mod.get_last_commit_age_ms = lambda: 642_000
+        data = {
+            "context_window": {
+                "context_window_size": 1_000_000, "used_percentage": 33,
+                "current_usage": {"input_tokens": 2, "output_tokens": 333,
+                                  "cache_read_input_tokens": 98_000,
+                                  "cache_creation_input_tokens": 2_000}},
+            "cost": {"total_cost_usd": 4508, "total_duration_ms": 498_203_000,
+                     "total_api_duration_ms": 1000,
+                     "total_lines_added": 29174,
+                     "total_lines_removed": 4472},
+            "model": {"display_name": "claude-opus-5"},
+            "git_branch": "trader/HEAD",
+            "output_style": {"name": "default"},
+            "workspace": {"git_worktree": True},
+            "effort": {"level": "xhigh"},
+            "rate_limits": {"five_hour": {"used_percentage": 8},
+                            "seven_day": {"used_percentage": 14}},
+            "version": "2.1.219",
+        }
+        try:
+            for cols in (150, 190):
+                for w in self._widths(self._render_at(cols, data)):
+                    self.assertLessEqual(w, cols - _FIT_SAFETY_MARGIN)
+        finally:
+            (cli_mod.get_git_extras, cli_mod.get_git_state,
+             cli_mod.get_last_commit_age_ms) = orig
+
+
+class TestThemeLineBalance(unittest.TestCase):
+    """#119: the six full themes carry burn/rate_limits/context_size on
+    line1 (matching the README's documented Line 1 table); minimal and
+    focus are deliberately sparse and must stay untouched."""
+
+    _FULL = ("default", "powerline", "nord", "tokyo-night",
+             "gruvbox", "rose-pine")
+
+    def test_full_themes_promote_the_three_sections(self):
+        for name in self._FULL:
+            line1 = THEMES[name]["line1"]
+            for section in ("burn", "rate_limits", "context_size"):
+                self.assertIn(section, line1, "{}.line1".format(name))
+                self.assertNotIn(section, THEMES[name]["line2"],
+                                 "{}.line2".format(name))
+
+    def test_no_section_appears_on_two_lines(self):
+        """A section on both lines would render twice — pin it for every
+        theme, not just the rebalanced ones."""
+        for name, theme in THEMES.items():
+            seen = {}
+            for key, val in theme.items():
+                if re.match(r"line\d+$", key) and isinstance(val, list):
+                    for section in val:
+                        self.assertNotIn(
+                            section, seen,
+                            "{}: {!r} on both {} and {}".format(
+                                name, section, seen.get(section), key))
+                        seen[section] = key
+
+    def test_sparse_themes_untouched(self):
+        """minimal and focus are deliberate designs and were NOT
+        rebalanced. Pinned as exact compositions — note minimal and
+        focus already carried rate_limits on line1 by their own design,
+        so a "must not contain" assertion would be wrong here; what
+        matters is that the rebalance left them byte-identical."""
+        self.assertEqual(
+            THEMES["minimal"]["line1"],
+            ["bar", "tokens", "cost", "rate_limits", "ctx_warning"])
+        self.assertEqual(
+            THEMES["minimal"]["line2"],
+            ["duration", "latency", "branch", "sessions", "session_name",
+             "model", "effort", "clock"])
+        self.assertEqual(
+            THEMES["focus"]["line1"],
+            ["bar", "cost", "rate_limits", "branch", "effort", "clock"])
+        self.assertEqual(THEMES["focus"]["line2"], [])
+        # Neither gained the sections the six full themes were given.
+        for name in ("minimal", "focus"):
+            for section in ("burn", "context_size"):
+                self.assertNotIn(section, THEMES[name]["line1"], name)
+
+    def test_line1_actually_fills_more(self):
+        """The point of the rebalance: line 1 must no longer be frozen
+        at ~57 columns while line 2 overflows."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.cli import _visible_width
+        old = os.environ.get("CLAUDE_STATUSLINE_WIDTH")
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "190"
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            out = cli_mod.render(cli_mod._demo_data())
+            line1 = _visible_width(out.split("\n")[0])
+            self.assertGreater(line1, 70,
+                               "line 1 still under-filled: {}".format(line1))
+        finally:
+            if old is None:
+                os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+            else:
+                os.environ["CLAUDE_STATUSLINE_WIDTH"] = old
+            cli_mod.get_branch = orig_branch
+
+
+class TestMainModelShortening(unittest.TestCase):
+    """#120: raw model ids from newer Claude Code builds get shortened;
+    friendly display names must render byte-identical to before."""
+
+    def _model_text(self, display_name):
+        import claude_statusline.cli as cli_mod
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["model"]
+            out = cli_mod.render(
+                {"git_branch": "main",
+                 "model": {"display_name": display_name}}, "default")
+            return re.sub(r"\x1b\[[0-9;]*m", "", out).split("\n")[-1].strip()
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    def test_raw_ids_shortened(self):
+        self.assertEqual(self._model_text("claude-opus-5"), "Opus 5")
+        self.assertEqual(self._model_text("claude-sonnet-5-20250707"),
+                         "Sonnet 5")
+        self.assertEqual(self._model_text("claude-haiku-4-5-20251001"),
+                         "Haiku 4.5")
+
+    def test_friendly_names_untouched(self):
+        """The mangle guard: _short_model title-cases, so a friendly
+        name must never reach it ("(1M context)" -> "(1M Context)")."""
+        for name in ("Opus 4.8 (1M context)", "Sonnet 5", "Opus 4.8",
+                     "My Custom Model v2"):
+            self.assertEqual(self._model_text(name), name)
+
+    def test_degenerate_display_names(self):
+        """A `claude-`-prefixed value that shortens to nothing falls
+        back to the original rather than blanking the section."""
+        self.assertEqual(self._model_text("claude-"), "claude-")
+
+    def test_main_line_never_truncates_model_with_ellipsis(self):
+        """The main path passes cap=None. Capping here would (a) hide a
+        variant marker and (b) make this project emit the mid-token "…"
+        that v0.15.0's own diagnosis attributes solely to Claude Code's
+        renderer. _fit_to_width drops the whole section cleanly instead."""
+        long_id = "claude-a-very-long-descriptive-model-name-here"
+        self.assertNotIn("…", self._model_text(long_id))
+        self.assertEqual(self._model_text(long_id),
+                         "A Very Long Descriptive Model Name Here")
+
+    def test_variant_marker_preserved(self):
+        """A bracketed variant marker survives the date strip — it tells
+        the user which context variant they're on, so dropping it would
+        be silent information loss."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-sonnet-4-5-20250929[1m]",
+                                      cap=None), "Sonnet 4.5 [1m]")
+        self.assertEqual(_short_model("claude-sonnet-5-20250707",
+                                      cap=None), "Sonnet 5")
+
+    def test_subagent_path_still_capped(self):
+        """The cap default is unchanged for subagent rows, whose width
+        budget is fixed per row."""
+        from claude_statusline.cli import _short_model, _SUBAGENT_NAME_MAX
+        out = _short_model("claude-a-very-long-descriptive-model-name-here")
+        self.assertTrue(out.endswith("…"))
+        self.assertLessEqual(len(out), _SUBAGENT_NAME_MAX)
+
+
+class TestSectionRendersAtMostOnce(unittest.TestCase):
+    """v0.15.0 invariant: a section renders at most once per statusline.
+
+    Custom themes inherit their base theme's lineN lists for any line
+    they don't define, so a custom theme overriding only `line2` — as
+    any copy of the pre-v0.15.0 default would — pairs its old line2
+    with the rebalanced line1 and would otherwise render burn,
+    rate_limits and context_size TWICE."""
+
+    def _plain(self, s):
+        return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+    def test_duplicate_across_lines_renders_once(self):
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        import copy
+        theme = copy.deepcopy(THEMES["default"])
+        # Simulate the inherited-line1 + stale-line2 custom theme.
+        theme["line2"] = ["burn", "rate_limits", "context_size", "duration"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        old = os.environ.get("CLAUDE_STATUSLINE_WIDTH")
+        os.environ["CLAUDE_STATUSLINE_WIDTH"] = "250"
+        try:
+            out = self._plain(cli_mod.render(cli_mod._demo_data(), theme))
+        except TypeError:
+            # render() takes a theme NAME; register the fixture instead.
+            THEMES["_dup_fixture"] = theme
+            try:
+                out = self._plain(
+                    cli_mod.render(cli_mod._demo_data(), "_dup_fixture"))
+            finally:
+                THEMES.pop("_dup_fixture", None)
+        finally:
+            cli_mod.get_branch = orig_branch
+            if old is None:
+                os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+            else:
+                os.environ["CLAUDE_STATUSLINE_WIDTH"] = old
+        self.assertEqual(out.count("burn:"), 1, out)
+        self.assertLessEqual(out.count("(1M)"), 1, out)
+        self.assertEqual(out.count("5h:"), 1, out)
+
+
 class TestRenderFitsTerminalWidth(unittest.TestCase):
     """End-to-end: render() must produce output where each line fits the
     reported terminal width. This is the user-visible contract — Claude

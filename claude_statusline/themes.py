@@ -29,10 +29,11 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget",
+            "burn", "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
-            "burn", "rate_limits", "context_size", "duration", "latency", "speed",
+            "duration", "latency", "speed",
             "lines", "branch", "git_extras", "git_state", "commit_age",
             "tools", "sessions", "session_name",
             "vim", "agent", "worktree", "model", "output_style", "added_dirs",
@@ -140,10 +141,11 @@ THEMES = {
         "bar_left": "",
         "bar_right": "",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget",
+            "burn", "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
-            "burn", "rate_limits", "context_size", "duration", "latency", "speed",
+            "duration", "latency", "speed",
             "lines", "branch", "git_extras", "git_state", "commit_age",
             "tools", "sessions", "session_name",
             "vim", "agent", "worktree", "model", "output_style", "added_dirs",
@@ -196,10 +198,11 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget",
+            "burn", "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
-            "burn", "rate_limits", "context_size", "duration", "latency", "speed",
+            "duration", "latency", "speed",
             "lines", "branch", "git_extras", "git_state", "commit_age",
             "tools", "sessions", "session_name",
             "vim", "agent", "worktree", "model", "output_style", "added_dirs",
@@ -252,10 +255,11 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget",
+            "burn", "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
-            "burn", "rate_limits", "context_size", "duration", "latency", "speed",
+            "duration", "latency", "speed",
             "lines", "branch", "git_extras", "git_state", "commit_age",
             "tools", "sessions", "session_name",
             "vim", "agent", "worktree", "model", "output_style", "added_dirs",
@@ -308,10 +312,11 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget",
+            "burn", "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
-            "burn", "rate_limits", "context_size", "duration", "latency", "speed",
+            "duration", "latency", "speed",
             "lines", "branch", "git_extras", "git_state", "commit_age",
             "tools", "sessions", "session_name",
             "vim", "agent", "worktree", "model", "output_style", "added_dirs",
@@ -364,10 +369,11 @@ THEMES = {
         "bar_left": "[",
         "bar_right": "]",
         "line1": [
-            "bar", "tokens", "cache", "cost", "budget", "ctx_warning",
+            "bar", "tokens", "cache", "cost", "budget",
+            "burn", "rate_limits", "context_size", "ctx_warning",
         ],
         "line2": [
-            "burn", "rate_limits", "context_size", "duration", "latency", "speed",
+            "duration", "latency", "speed",
             "lines", "branch", "git_extras", "git_state", "commit_age",
             "tools", "sessions", "session_name",
             "vim", "agent", "worktree", "model", "output_style", "added_dirs",
