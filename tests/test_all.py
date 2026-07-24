@@ -3010,20 +3010,58 @@ class TestFitSafetyMargin(unittest.TestCase):
         return [_visible_width(line) for line in out.split("\n")]
 
     def _render_at(self, cols, data=None):
+        """Render at a DETECTED width (COLUMNS env — a probe that wins,
+        reported as "(winner)").
+
+        Deliberately NOT CLAUDE_STATUSLINE_WIDTH: a pinned width is the
+        user asserting usable width and correctly receives NO margin,
+        so pinning here would test the opposite of this class's
+        contract. The override is explicitly cleared so it can't leak
+        in from another test and silently disable the margin — which is
+        exactly how an earlier version of this helper passed locally
+        (demo data happened not to reach the boundary) and failed on
+        every CI runner, where a longer branch name pushed a line to
+        162 of a pinned 165."""
         import claude_statusline.cli as cli_mod
-        old = os.environ.get("CLAUDE_STATUSLINE_WIDTH")
-        os.environ["CLAUDE_STATUSLINE_WIDTH"] = str(cols)
+        old_cols = os.environ.get("COLUMNS")
+        old_pin = os.environ.get("CLAUDE_STATUSLINE_WIDTH")
+        os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+        os.environ["COLUMNS"] = str(cols)
         orig_branch = cli_mod.get_branch
         cli_mod.get_branch = lambda: "main"
         try:
             return cli_mod.render(
                 data if data is not None else cli_mod._demo_data())
         finally:
-            if old is None:
-                os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+            if old_cols is None:
+                os.environ.pop("COLUMNS", None)
             else:
-                os.environ["CLAUDE_STATUSLINE_WIDTH"] = old
+                os.environ["COLUMNS"] = old_cols
+            if old_pin is not None:
+                os.environ["CLAUDE_STATUSLINE_WIDTH"] = old_pin
             cli_mod.get_branch = orig_branch
+
+    def test_detected_width_path_is_what_this_class_tests(self):
+        """Guard the helper's premise: COLUMNS must actually win the
+        detection chain, so the margin under test is the probe margin
+        (4) and not the untrusted fallback (8)."""
+        from claude_statusline.cli import (
+            _detect_terminal_width_report, _fit_margin, _FIT_SAFETY_MARGIN)
+        old_cols = os.environ.get("COLUMNS")
+        old_pin = os.environ.get("CLAUDE_STATUSLINE_WIDTH")
+        os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+        os.environ["COLUMNS"] = "165"
+        try:
+            width, report = _detect_terminal_width_report()
+            self.assertEqual(width, 165)
+            self.assertEqual(_fit_margin(report), _FIT_SAFETY_MARGIN)
+        finally:
+            if old_cols is None:
+                os.environ.pop("COLUMNS", None)
+            else:
+                os.environ["COLUMNS"] = old_cols
+            if old_pin is not None:
+                os.environ["CLAUDE_STATUSLINE_WIDTH"] = old_pin
 
     def test_headroom_reserved_across_width_sweep(self):
         from claude_statusline.cli import _FIT_SAFETY_MARGIN
