@@ -3236,6 +3236,28 @@ class TestThemeLineBalance(unittest.TestCase):
                 self.assertNotIn(section, THEMES[name]["line2"],
                                  "{}.line2".format(name))
 
+    def test_full_theme_compositions_are_pinned_exactly(self):
+        """minimal/focus had exact pins; the six FULL themes had only
+        membership checks, so an accidental reorder or a dropped
+        line-2 section would go unnoticed. Pin both lines exactly —
+        all six share one composition by design, and that sameness is
+        itself worth pinning."""
+        expected_line1 = ["bar", "tokens", "cache", "cost", "budget",
+                          "burn", "rate_limits", "context_size",
+                          "ctx_warning"]
+        expected_line2 = ["duration", "latency", "speed", "lines",
+                          "branch", "git_extras", "git_state",
+                          "commit_age", "tools", "sessions",
+                          "session_name", "vim", "agent", "worktree",
+                          "model", "output_style", "added_dirs",
+                          "git_worktree", "effort", "version",
+                          "cc_version", "clock"]
+        for name in self._FULL:
+            self.assertEqual(THEMES[name]["line1"], expected_line1,
+                             "{}.line1".format(name))
+            self.assertEqual(THEMES[name]["line2"], expected_line2,
+                             "{}.line2".format(name))
+
     def test_no_section_appears_on_two_lines(self):
         """A section on both lines would render twice — pin it for every
         theme, not just the rebalanced ones."""
@@ -5869,6 +5891,12 @@ class TestLine2FitsAt120Cols(unittest.TestCase):
         stage or re-raises _FULL_LAYOUT_MIN_COLS to 230 would silently
         lose this section, and the upper-bound width tests above would
         not notice (overflow tests pass either way).
+
+        NOTE (v0.15.0): `rate_limits` moved to line 1, so this no longer
+        exercises *line 2* recovery specifically — the drop/keep
+        property it pins is per-line and still real, but the sibling
+        assertion below on a still-line-2 section is what guards the
+        line-2 path now.
         """
         result = self._render_at_width(180)
         # Rate-limit indicators look like "5h:46%" / "7d:68%" in the
@@ -5881,6 +5909,20 @@ class TestLine2FitsAt120Cols(unittest.TestCase):
             "it should fit — precise stage may have over-dropped or "
             "been disabled."
         )
+
+    def test_line2_section_recovered_at_180_cols(self):
+        """Line-2 counterpart of the recovery pin above, re-anchored on
+        a section that is STILL on line 2 after the v0.15.0 rebalance
+        (`commit_age`). Without this, the recovery property for line 2
+        would be pinned by nothing."""
+        plain = re.sub(r"\x1b\[[0-9;]*m", "",
+                       self._render_at_width(180))
+        lines = plain.split("\n")
+        self.assertGreaterEqual(len(lines), 2, plain)
+        self.assertIn(
+            "last:", lines[1],
+            "commit_age was dropped from line 2 at 180 cols even though "
+            "it should fit — precise stage may have over-dropped.")
 
     def test_rate_limits_dropped_at_120_cols(self):
         """At 120 cols there is no room for rate_limits — the precise
