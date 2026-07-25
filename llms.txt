@@ -54,6 +54,12 @@ Line 1: context bar, tokens (in/out), cache %, cost, budget, burn rate, rate lim
 
 Line 2: duration, API latency, tokens/sec, lines changed, git branch, git extras (stash/sync), git state (merge/rebase/conflict), commit age, tool calls, sessions today, session name, vim mode, agent, worktree, model, output style, added dirs, git worktree, effort level (low/high/xhigh/max), version, CC version, clock
 
+Opt-in sections (added to a custom theme's line list, not in the built-in themes): cost rate (`~$3.6/hr` projected session cost per hour), context tokens (`ctx:412K/1M` absolute context usage), cache age (time since the last assistant turn), thinking, pull request (with review state), cost breakdown (largest non-base `cost.by_category` entry).
+
+## Per-Subagent Status Rows
+
+claude-status also serves Claude Code's `subagentStatusLine` hook from the same binary, rendering a row per running subagent in the agent panel: `[Explore] [###.....] 41% - 23s - Sonnet 5` (task name, per-task context bar and percentage, elapsed time, model). Enable with `"subagentStatusLine": {"type": "command", "command": "claude-status --subagent"}` alongside the existing `statusLine` entry, or answer the prompt in `claude-status --setup`. Per-task model and context fields require Claude Code v2.1.205+; on older versions rows show `[name] 23s`. Output is JSONL (`{"id": ..., "content": ...}`) and every error path emits nothing, so a malformed payload can never corrupt the panel.
+
 ## Effort Levels
 
 Recognized values: `low`, `medium`, `high`, `xhigh`, `max`. The `medium` default is hidden (no `effort:` indicator). `xhigh` and `max` are Opus 4.7 / top-tier — `xhigh` was introduced in Claude Code v2.1.111 (2026-04); `max` is the top of the scale. Other models silently fall back to `high` per Anthropic's docs. Renders as `effort:xhigh` / `effort:max` (bright magenta by default; per-theme `effort_xhigh` and `effort_max` color keys).
@@ -79,7 +85,7 @@ cli.py (entry point, normalization, two-stage layout, rendering) → bar.py (pro
 - Zero external dependencies (pure Python stdlib only — no pip packages)
 - Never crash — degrade gracefully on any malformed input (try/except defense-in-depth around `render()`)
 - File-based caching with TTLs (5s-60s) to avoid subprocess overhead on every render
-- **Two-stage responsive layout** (v0.5.4+): coarse pre-filter by terminal-width bucket (150+/100-149/<100 cols) skips expensive sections on narrow terminals; precise post-render fit then measures actual visible width (stripping ANSI/OSC 8) and drops sections in priority order until each line fits the terminal
+- **Two-stage responsive layout** (v0.5.4+): coarse pre-filter by terminal-width bucket (150+/100-149/<100 cols) skips expensive sections on narrow terminals; precise post-render fit then measures actual visible width (stripping ANSI/OSC 8) and drops sections in priority order until each line fits the terminal width minus a confidence-scaled safety margin (v0.15.0+: zero when the width is pinned via `CLAUDE_STATUSLINE_WIDTH`, small when a probe measured it, larger when it had to be guessed — Claude Code renders the status line inside a padded panel, so the usable row is narrower than the reported terminal width)
 - All numeric fields use `_first()` helper (not `or`) to preserve zero values
 - OSC 8 clickable links disabled by default (Claude Code's Ink TUI miscounts them)
 
