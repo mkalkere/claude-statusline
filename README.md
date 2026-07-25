@@ -92,8 +92,8 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Thinking | `think` | Shown when extended thinking is enabled for the session. Reads `thinking.enabled` from stdin; surfaces only the on state (an off badge would be noise). Opt-in via custom theme. |
 | Pull Request | `PR#86 ok` | Current GitHub PR number when detected, clickable to the PR page via OSC 8. Reads `pr.number` / `pr.url` from stdin (newer Claude Code releases) with `github.pr_number` / `github.pr_url` as a fallback for older releases. When `pr.review_state` is present, a short status token follows the number: `ok` (approved), `chg` (changes requested), `rev` (pending review), `draft`. Opt-in via custom theme. |
 | Cost Breakdown | `mcp:$0.80` | Largest non-base cost category from `cost.by_category` (newer Claude Code releases). Falls back to `other:$N` (sum) when no single category exceeds $0.01 but multiple together do. Opt-in via custom theme. |
-| Version | `v0.10.0` | claude-status version |
-| CC Version | `CC:2.1.197` | Claude Code application version |
+| Version | `v0.15.0` | claude-status version |
+| CC Version | `CC:2.1.219` | Claude Code application version |
 | Clock | `15:30` | Current time |
 
 ### Per-Subagent Status Rows (v0.13.0+)
