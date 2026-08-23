@@ -371,7 +371,16 @@ def _normalize(data):
             return None
         return num_int
 
+    # Track WHICH namespace the number came from: the forge label must
+    # never assert a forge the number didn't come from. `pr.kind` lives
+    # only in the pr.* namespace, so a number sourced from the legacy
+    # github.* fallback renders as a PR even if a stray `kind: "mr"`
+    # sits alongside it. Reachable today: a `pr.number` that is present
+    # but REJECTED by the validator (0, or over the 1e6 cap) silently
+    # falls through to github.pr_number, which would otherwise render
+    # "MR#86" for a number that came from a GitHub-shaped field.
     pr_num = _clean_pr_number(pr_obj.get("number"))
+    pr_num_from_pr_namespace = pr_num is not None
     if pr_num is None:
         pr_num = _clean_pr_number(github_obj.get("pr_number"))
     out["github_pr_number"] = pr_num
@@ -401,6 +410,26 @@ def _normalize(data):
         )
     else:
         out["pr_review_state"] = None
+
+    # Forge kind (Claude Code v2.1.234+, #128). Documented contract,
+    # quoted: "`mr` when `pr` describes a GitLab merge request. Absent
+    # for GitHub pull requests, so scripts written before this field
+    # keep working."
+    #
+    # So the discriminator is presence-of-"mr", NOT a two-value enum —
+    # `kind == "pr"` is never a documented value and must not be relied
+    # on. Anything that is not exactly "mr" (absent, garbage, non-string,
+    # or a future forge we do not know about yet) falls through to the
+    # GitHub label, which is the pre-v0.15.1 behaviour and therefore the
+    # safe default. The docs also state `pr.review_state` and `pr.kind`
+    # "may be independently absent", so neither is inferred from the
+    # other. Stored as a strict bool: the renderer needs a label choice,
+    # not the raw token.
+    raw_kind = pr_obj.get("kind")
+    out["pr_is_merge_request"] = (
+        pr_num_from_pr_namespace and
+        isinstance(raw_kind, str) and raw_kind.strip().lower() == "mr"
+    )
 
     # Repo identity: the workspace.repo shape composes host/owner/name
     # explicitly; the github.repo shape is a single "owner/name"
@@ -784,9 +813,10 @@ def _render_sections_named(n, order, theme):
                     )
 
         elif section == "pr":
-            # GitHub PR context (Claude Code v2.1.148+). Renders the
-            # PR number as a clickable link to pr_url when available;
-            # falls back to plain text. Hidden when no PR is detected.
+            # Pull/merge request context (Claude Code v2.1.148+).
+            # Renders the number as a clickable link to pr_url when
+            # available; falls back to plain text. Hidden when none is
+            # detected.
             pr_number = n.get("github_pr_number")
             pr_url = n.get("github_pr_url")
             if pr_number:
@@ -794,7 +824,19 @@ def _render_sections_named(n, order, theme):
                 # theme that explicitly sets `pr: null` falls through
                 # to CYAN rather than passing None to colorize().
                 pr_color = _first(tc.get("pr"), CYAN)
-                pr_text = colorize("PR#{}".format(pr_number), pr_color)
+                # "MR#" only for a GitLab merge request (pr.kind ==
+                # "mr", v2.1.234+); "PR#" for GitHub and for every
+                # unknown/absent kind. _normalize reduces the field to
+                # a strict bool, so no forge token reaches the label.
+                # forge_label, not `label`: the review-token block
+                # below binds its own `label` from _PR_REVIEW_DISPLAY
+                # ~25 lines down. Distinct meanings must not share a
+                # name in one block — a future edit that moved this
+                # into the review branch would silently emit the review
+                # token as the forge label.
+                forge_label = "MR" if n.get("pr_is_merge_request") else "PR"
+                pr_text = colorize(
+                    "{}#{}".format(forge_label, pr_number), pr_color)
                 if pr_url:
                     pr_text = _osc8_link(pr_url, pr_text)
 
@@ -803,8 +845,8 @@ def _render_sections_named(n, order, theme):
                 # emoji glyph keeps it width-1-per-char and renders in
                 # every terminal — same conservative choice the project
                 # makes elsewhere. Appended OUTSIDE the OSC 8 link so
-                # the clickable target stays exactly "PR#N" and the
-                # state reads as an adjacent annotation.
+                # the clickable target stays exactly the "PR#N"/"MR#N"
+                # label and the state reads as an adjacent annotation.
                 #
                 # _normalize gates the value against _PR_REVIEW_STATES,
                 # and TestPRReviewState asserts that set equals the
@@ -820,10 +862,10 @@ def _render_sections_named(n, order, theme):
                 review = n.get("pr_review_state")
                 entry = _PR_REVIEW_DISPLAY.get(review) if review else None
                 if entry:
-                    label, default_color = entry
+                    state_label, default_color = entry
                     state_color = _first(tc.get("pr_review_" + review),
                                          default_color)
-                    pr_text = pr_text + " " + colorize(label, state_color)
+                    pr_text = pr_text + " " + colorize(state_label, state_color)
 
                 sections.append(pr_text)
 

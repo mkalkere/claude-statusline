@@ -8172,6 +8172,177 @@ class TestGitHubPRSection(unittest.TestCase):
             cli_mod.get_branch = orig_branch
 
 
+class TestPRForgeKind(unittest.TestCase):
+    """`pr.kind` (Claude Code v2.1.234+, #128): the section renders
+    MR#N for a GitLab merge request and PR#N otherwise.
+
+    Upstream contract, quoted: "`mr` when `pr` describes a GitLab merge
+    request. Absent for GitHub pull requests, so scripts written before
+    this field keep working." The discriminator is therefore
+    presence-of-"mr" — `kind == "pr"` is NOT a documented value and must
+    never be required. The docs also state that `pr.review_state` and
+    `pr.kind` "may be independently absent", so neither is inferred
+    from the other.
+    """
+
+    def _plain(self, output):
+        no_ansi = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        return re.sub(r"\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)", "", no_ansi)
+
+    def _render(self, pr):
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            THEMES["default"]["line2"] = ["pr", "branch"]
+            return self._plain(cli_mod.render(
+                {"pr": pr, "git_branch": "main"}, "default"))
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+
+    # --- normalization -------------------------------------------------
+
+    def test_normalize_mr_only_for_exact_token(self):
+        from claude_statusline.cli import _normalize
+        for raw in ("mr", "MR", " mr ", "Mr"):
+            n = _normalize({"pr": {"number": 1, "kind": raw},
+                            "session_id": "x"})
+            self.assertIs(n["pr_is_merge_request"], True,
+                          "kind={!r}".format(raw))
+
+    def test_normalize_rejects_everything_else(self):
+        """Absent, the undocumented "pr" token, unknown forges, and
+        non-strings all fall through to the GitHub label — the
+        pre-v0.15.1 behaviour, which is the safe default."""
+        from claude_statusline.cli import _normalize
+        # The values CONTAINING "mr" are load-bearing: without them a
+        # loosened `"mr" in raw.lower()` check passes the whole suite
+        # (note "merge_request" does NOT contain "mr" — m-e-r-g-e — so
+        # it cannot discriminate on its own).
+        for bad in (_SENTINEL, "pr", "PR", "gerrit", "", 42, True,
+                    ["mr"], {"kind": "mr"}, None, "merge_request",
+                    "gitlab_mr", "mr_request", "mrx", "submr", "MR!",
+                    "mr/42"):
+            pr = {"number": 1}
+            if bad is not _SENTINEL:
+                pr["kind"] = bad
+            n = _normalize({"pr": pr, "session_id": "x"})
+            self.assertIs(n["pr_is_merge_request"], False,
+                          "kind={!r} must not be an MR".format(bad))
+
+    def test_normalize_absent_pr_object(self):
+        """No pr object at all must still yield a strict bool, not a
+        KeyError or None — the renderer reads it unconditionally."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"session_id": "x"})
+        self.assertIs(n["pr_is_merge_request"], False)
+
+    # --- rendering -----------------------------------------------------
+
+    def test_renders_mr_label(self):
+        out = self._render({"number": 42, "kind": "mr"})
+        self.assertIn("MR#42", out)
+        self.assertNotIn("PR#42", out)
+
+    def test_renders_pr_label_when_kind_absent(self):
+        out = self._render({"number": 42})
+        self.assertIn("PR#42", out)
+        self.assertNotIn("MR#42", out)
+
+    def test_review_token_unchanged_for_merge_requests(self):
+        """MR review states reuse the same enum, so the token rendering
+        must be identical — only the label differs."""
+        for state, token in (("approved", "ok"), ("pending", "rev"),
+                             ("changes_requested", "chg"),
+                             ("draft", "draft")):
+            out = self._render({"number": 7, "kind": "mr",
+                                "review_state": state})
+            self.assertIn("MR#7 {}".format(token), out,
+                          "state={!r}".format(state))
+
+    def test_review_token_unchanged_for_pull_requests(self):
+        """Regression guard: the GitHub path must stay byte-identical
+        to pre-v0.15.1 output."""
+        out = self._render({"number": 7, "review_state": "approved"})
+        self.assertIn("PR#7 ok", out)
+
+    def test_kind_ignored_when_number_from_legacy_namespace(self):
+        """Provenance gate: `pr.kind` lives only in the pr.* namespace,
+        so a number sourced from the legacy github.* fallback must NOT
+        be labelled MR. Silent-failure review reproduced this: a
+        `pr.number` that is present but REJECTED by the validator (0,
+        or above the 1e6 cap) falls through to github.pr_number, which
+        rendered "MR#86" for a GitHub-shaped number."""
+        from claude_statusline.cli import _normalize
+        for pr in ({"kind": "mr"},
+                   {"kind": "mr", "number": 0},
+                   {"kind": "mr", "number": 9999999}):
+            n = _normalize({"pr": pr, "github": {"pr_number": 86},
+                            "session_id": "x"})
+            self.assertEqual(n["github_pr_number"], 86, repr(pr))
+            self.assertIs(n["pr_is_merge_request"], False,
+                          "number came from github.* — must not be MR: "
+                          "{!r}".format(pr))
+
+    def test_kind_honored_when_number_from_pr_namespace(self):
+        """The positive half of the provenance gate — without this the
+        gate could be satisfied by always returning False."""
+        from claude_statusline.cli import _normalize
+        n = _normalize({"pr": {"kind": "mr", "number": 5},
+                        "github": {"pr_number": 86}, "session_id": "x"})
+        self.assertEqual(n["github_pr_number"], 5)
+        self.assertIs(n["pr_is_merge_request"], True)
+
+    def test_mr_without_url_renders_plain(self):
+        """clickable_links defaults to False, so the plain-text path is
+        what most users actually see."""
+        out = self._render({"number": 42, "kind": "mr"})
+        self.assertIn("MR#42", out)
+
+    def test_osc8_target_excludes_review_token_for_both_kinds(self):
+        """The clickable target stays exactly the label; the review
+        token is appended OUTSIDE the link envelope. Pinned for both
+        forges so the MR label cannot drift inside it."""
+        import claude_statusline.cli as cli_mod
+        from claude_statusline.themes import THEMES
+        orig_line2 = THEMES["default"]["line2"]
+        orig_branch = cli_mod.get_branch
+        orig_links = cli_mod.get_clickable_links_enabled
+        # _osc8_link short-circuits on the NO_COLOR module flag BEFORE
+        # consulting get_clickable_links_enabled, and that flag is read
+        # from the environment at import. Without pinning it this test
+        # fails under NO_COLOR=1, which is set in many CI images.
+        orig_nc = cli_mod._colors_mod._NO_COLOR
+        cli_mod._colors_mod._NO_COLOR = False
+        cli_mod.get_branch = lambda: "main"
+        cli_mod.get_clickable_links_enabled = lambda: True
+        try:
+            THEMES["default"]["line2"] = ["pr", "branch"]
+            for kind, label in (("mr", "MR"), (None, "PR")):
+                pr = {"number": 9, "url": "https://example.com/9",
+                      "review_state": "approved"}
+                if kind:
+                    pr["kind"] = kind
+                raw = cli_mod.render({"pr": pr, "git_branch": "main"},
+                                     "default")
+                inner = re.search(
+                    r"\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)(.*?)"
+                    r"\x1b\]8;;(?:\x07|\x1b\\)", raw, re.S)
+                self.assertIsNotNone(
+                    inner, "no OSC 8 envelope for {}".format(label))
+                linked = re.sub(r"\x1b\[[0-9;]*m", "", inner.group(1))
+                self.assertEqual(linked, "{}#9".format(label))
+                self.assertNotIn("ok", linked)
+        finally:
+            THEMES["default"]["line2"] = orig_line2
+            cli_mod.get_branch = orig_branch
+            cli_mod.get_clickable_links_enabled = orig_links
+            cli_mod._colors_mod._NO_COLOR = orig_nc
+
+
 class TestPRReviewState(unittest.TestCase):
     """`pr.review_state` (documented stdin enum: approved / pending /
     changes_requested / draft) is captured since v0.6.3 and rendered as

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-08-23
+
+### Fixed
+
+- **GitLab merge requests rendered as `PR#42`** ([#128](https://github.com/mkalkere/claude-statusline/issues/128)) — Claude Code v2.1.234 added GitLab merge request support via a new `pr.kind` field. The `pr` section now renders `MR#42` for a merge request and `PR#42` otherwise.
+
+  The upstream contract, quoted from the statusline docs: *"`mr` when `pr` describes a GitLab merge request. Absent for GitHub pull requests, so scripts written before this field keep working."* The discriminator is therefore **presence of `mr`**, not a two-value enum — `kind == "pr"` is not a documented value and is never relied on. Anything that is not exactly `mr` (absent, a non-string, garbage) falls through to the GitHub label — the pre-v0.15.1 behaviour, and the safe default for those cases. A *present but unrecognised* forge is a weaker case: the docs say `kind` is absent for GitHub, so an unknown value means "some forge that is not GitHub", and labelling it `PR#` is the tolerable default rather than a strictly safe one. It was kept because the badge exists to identify and link (the OSC 8 target is correct either way), `PR` reads as a generic term of art, and a bare `#42` would be ambiguous with issue numbers for every user today. The docs also state that `pr.review_state` and `pr.kind` "may be independently absent", so neither is inferred from the other.
+
+  **Note for GitLab users:** the review token means something different on a merge request. Claude Code maps an MR to `approved` when GitLab reports it *mergeable*, so `ok` on an `MR#` reflects mergeable state rather than a human approval. The token vocabulary is deliberately shared — a divergent GitLab spelling would be worse — but the meaning differs.
+
+  Everything else about the section is unchanged: the review-state token (`ok` / `chg` / `rev` / `draft`) reuses the same enum for both forges, the token stays outside the OSC 8 link envelope so the clickable target remains exactly the label, and colors and drop priority are untouched. The GitHub path is byte-identical to v0.15.0 (verified by differential rendering across the review-state, URL-presence, and namespace-fallback combinations) and covered by a regression test.
+
+### Notes
+
+- 759 tests pass (+13: the `mr` token match including case and whitespace variants; rejection of absent/`pr`/unknown-forge/non-string kinds plus tokens that merely *contain* "mr" (`gitlab_mr`, `mrx`, `mr/42`) so a loosened substring match cannot slip through; a strict-bool guarantee when no `pr` object exists at all; both provenance directions (a number from the legacy `github.*` namespace is never labelled MR, while a `pr.*` number with `kind: "mr"` is); both labels rendered end to end including the plain-text no-URL path; review-token parity across all four states for merge requests; a GitHub regression guard; and an OSC 8 envelope pin asserting the clickable target excludes the review token for both forges). Pure stdlib, zero dependencies, as always.
+- Verified against the official statusline documentation on 2026-08-23 rather than a secondhand report; the exact wording of the `pr.kind` contract is quoted in the issue.
+
 ## [0.15.0] - 2026-07-24
 
 Layout-correctness release, from a user report showing Line 2 cut mid-token (`effort:xhi…`) while Line 1 sat ~70% empty.
