@@ -3389,6 +3389,74 @@ class TestMainModelShortening(unittest.TestCase):
         self.assertEqual(_short_model("claude-sonnet-5-20250707",
                                       cap=None), "Sonnet 5")
 
+    def test_undated_variant_marker_keeps_version_dots(self):
+        """An id with a marker but NO date stamp. The marker used to be
+        split off only together with a date, so here it stayed glued to
+        the last version part and the version lost its dots."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-opus-5-5[1m]", cap=None),
+                         "Opus 5.5 [1m]")
+        self.assertEqual(_short_model("claude-fable-5-1[1m]", cap=None),
+                         "Fable 5.1 [1m]")
+        # Single-part version: nothing to join, marker still verbatim.
+        self.assertEqual(_short_model("claude-opus-5[1m]", cap=None),
+                         "Opus 5 [1m]")
+        # End to end through the model section.
+        self.assertEqual(self._model_text("claude-opus-5-5[1m]"),
+                         "Opus 5.5 [1m]")
+
+    def test_variant_marker_is_not_title_cased(self):
+        """The marker is re-appended verbatim. Left attached to the id
+        it went through the title-casing and came out as "[1M]"."""
+        from claude_statusline.cli import _short_model
+        out = _short_model("claude-opus-5-5[1m]", cap=None)
+        self.assertTrue(out.endswith(" [1m]"), out)
+        self.assertNotIn("[1M]", out)
+
+    def test_version_dots_survive_a_variant_tail(self):
+        """A non-numeric suffix after the version must not stop the
+        version parts from being dot-joined (#123)."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-opus-4-5-1m", cap=None),
+                         "Opus 4.5 1M")
+        self.assertEqual(_short_model("claude-opus-4-5-thinking", cap=None),
+                         "Opus 4.5 Thinking")
+        # A date stamp is still stripped rather than read as a tail.
+        self.assertEqual(_short_model("claude-haiku-4-5-20251001", cap=None),
+                         "Haiku 4.5")
+
+    def test_only_the_first_numeric_run_is_the_version(self):
+        """Numbers that come back after the tail belong to the tail —
+        they are not folded into the version."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-opus-4-5-v2-1", cap=None),
+                         "Opus 4.5 V2 1")
+
+    def test_version_first_ids_render_family_first(self):
+        """Ids that lead with the version (#123) read the same way
+        round as every other id."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-3-5-sonnet-20241022",
+                                      cap=None), "Sonnet 3.5")
+        self.assertEqual(_short_model("claude-3-opus-20240229", cap=None),
+                         "Opus 3")
+        self.assertEqual(_short_model("claude-3-5-sonnet-v2", cap=None),
+                         "Sonnet 3.5 V2")
+
+    def test_ids_without_a_family_or_a_version(self):
+        """Degenerate shapes keep degrading instead of raising: a bare
+        version, no numeric part at all, and nothing left once the
+        prefix and marker are gone."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-2-1", cap=None), "2.1")
+        self.assertEqual(_short_model("mystery-model", cap=None),
+                         "Mystery Model")
+        self.assertEqual(_short_model("claude-[1m]", cap=None), "")
+        self.assertEqual(_short_model("[1m]", cap=None), "")
+        # ...and the main line falls back to the raw value, as it does
+        # for any id that shortens to nothing.
+        self.assertEqual(self._model_text("claude-[1m]"), "claude-[1m]")
+
     def test_subagent_path_still_capped(self):
         """The cap default is unchanged for subagent rows, whose width
         budget is fixed per row."""
@@ -9310,6 +9378,14 @@ class TestSubagentRender(unittest.TestCase):
         self.assertIn("41%", body)
         self.assertIn("23s", body)
         self.assertIn("Sonnet 5", body)
+
+    def test_row_model_with_undated_variant_marker(self):
+        """Rows shorten the raw task model id, so an undated id with a
+        variant marker must come out dot-joined here too (#123)."""
+        rows = self._rows({"columns": 100, "tasks": [
+            self._task(model="claude-opus-5-5[1m]")]})
+        body = self._plain(rows[0]["content"])
+        self.assertTrue(body.endswith("Opus 5.5 [1m]"), body)
 
     def test_id_type_preserved(self):
         """Int id echoes as int — stringifying could break upstream

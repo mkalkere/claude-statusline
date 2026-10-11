@@ -2232,12 +2232,15 @@ _TERMINAL_TASK_STATUSES = frozenset({
 # URL sanitizer above).
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
-# Trailing date stamp on model IDs ("claude-sonnet-5-20250707").
-# Trailing "-YYYYMMDD", optionally followed by a bracketed variant
-# marker (real ids appear as "claude-sonnet-4-5-20250929[1m]").
-# The marker is captured so it can be re-appended — dropping it
-# would hide which context variant the session is on.
-_MODEL_DATE_RE = re.compile(r"-\d{8}(\[[^\]]*\])?$")
+# Bracketed variant marker closing a model id (real ids appear as
+# "claude-sonnet-4-5-20250929[1m]" and, undated, "claude-opus-5-5[1m]").
+# Split off first and re-appended verbatim — dropping it would hide
+# which context variant the session is on.
+_MODEL_VARIANT_RE = re.compile(r"\[[^\]]*\]$")
+
+# Trailing "-YYYYMMDD" date stamp on model IDs
+# ("claude-sonnet-5-20250707"), matched once the variant marker is off.
+_MODEL_DATE_RE = re.compile(r"-\d{8}$")
 
 _SUBAGENT_NAME_MAX = 24         # name segment cap (with ellipsis)
 _SUBAGENT_COLUMNS_DEFAULT = 80  # when columns is garbage after tasks qualified
@@ -2317,9 +2320,13 @@ def _sanitize_row_text(value):
 
 def _short_model(model_id, cap=_SUBAGENT_NAME_MAX):
     """Compact display for a model id: "claude-sonnet-5-20250707"
-    -> "Sonnet 5", "claude-opus-4-8" -> "Opus 4.8". Trailing numeric
-    id parts are version components, joined with dots. Unknown shapes
-    degrade to the sanitized, dash-split, title-cased raw id.
+    -> "Sonnet 5", "claude-opus-4-8" -> "Opus 4.8". The first run of
+    consecutive numeric id parts is the version, joined with dots;
+    whatever follows it is a variant tail ("claude-opus-4-5-thinking"
+    -> "Opus 4.5 Thinking"). An id that LEADS with its version
+    ("claude-3-5-sonnet-20241022") renders family-first like the rest
+    ("Sonnet 3.5"). Ids with no numeric part degrade to the sanitized,
+    dash-split, title-cased raw id.
 
     Control-strip WITHOUT the length cap first: _sanitize_row_text's
     24-char truncation would eat the trailing "-YYYYMMDD" before the
@@ -2339,24 +2346,44 @@ def _short_model(model_id, cap=_SUBAGENT_NAME_MAX):
     text = _CONTROL_CHARS_RE.sub("", model_id).strip()
     if not text:
         return ""
-    # Strip the trailing date, but KEEP any bracketed variant marker it
-    # carried ("...-20250929[1m]" -> suffix "[1m]"): the marker tells
-    # the user which context variant the session is on, so dropping it
-    # would be silent information loss.
-    date_match = _MODEL_DATE_RE.search(text)
-    variant_suffix = (date_match.group(1) or "") if date_match else ""
+    # Split off the bracketed variant marker BEFORE anything else and
+    # re-append it verbatim at the end ("...[1m]" -> suffix "[1m]"):
+    # it tells the user which context variant the session is on, so
+    # dropping it would be silent information loss, and leaving it
+    # attached glues it to the last id part, which then stops reading
+    # as a version number ("5[1m]" is not a digit).
+    variant_match = _MODEL_VARIANT_RE.search(text)
+    variant_suffix = ""
+    if variant_match:
+        variant_suffix = variant_match.group(0)
+        text = text[:variant_match.start()]
     text = _MODEL_DATE_RE.sub("", text)
     if text.startswith("claude-"):
         text = text[len("claude-"):]
     parts = [p for p in text.split("-") if p]
-    version = []
-    while parts and parts[-1].isdigit():
-        version.insert(0, parts.pop())
-    family = " ".join(parts).title()
-    if family and version:
-        short = "{} {}".format(family, ".".join(version))
+    # The version is the FIRST run of consecutive numeric parts, not
+    # the trailing one: a trailing-only scan gives up at the first
+    # non-numeric suffix and leaves the version space-separated.
+    start = next((i for i, p in enumerate(parts) if p.isdigit()), None)
+    if start is None:
+        family, version, tail = parts, [], []
     else:
-        short = family or ".".join(version)
+        end = start
+        while end < len(parts) and parts[end].isdigit():
+            end += 1
+        family, version, tail = parts[:start], parts[start:end], parts[end:]
+        if not family and tail:
+            # Version-first id: the family is the part after the
+            # version, and anything beyond it is the variant tail.
+            family, tail = tail[:1], tail[1:]
+    words = []
+    if family:
+        words.append(" ".join(family).title())
+    if version:
+        words.append(".".join(version))
+    if tail:
+        words.append(" ".join(tail).title())
+    short = " ".join(words)
     if short and variant_suffix:
         short += " " + variant_suffix
     if cap is not None and len(short) > cap:
