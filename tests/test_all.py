@@ -9074,6 +9074,11 @@ class TestCacheAgeSection(unittest.TestCase):
         # the responsive layout (it lives in _COMPACT_DROP).
         self._orig_cols = os.environ.get("COLUMNS")
         os.environ["COLUMNS"] = "300"
+        # The width override outranks COLUMNS, and a user config that
+        # disables the section must not reach these tests.
+        self._orig_width = os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+        self._orig_disabled = cli_mod.get_disabled_sections
+        cli_mod.get_disabled_sections = lambda: []
         # Clear the cache_age cache each test (5s TTL cross-contamination).
         try:
             cache_dir = sessions_mod._cache_dir()
@@ -9087,10 +9092,13 @@ class TestCacheAgeSection(unittest.TestCase):
     def tearDown(self):
         THEMES["default"]["line2"] = self._orig_line2
         self._cli_mod.get_branch = self._orig_branch
+        self._cli_mod.get_disabled_sections = self._orig_disabled
         if self._orig_cols is None:
             os.environ.pop("COLUMNS", None)
         else:
             os.environ["COLUMNS"] = self._orig_cols
+        if self._orig_width is not None:
+            os.environ["CLAUDE_STATUSLINE_WIDTH"] = self._orig_width
         for d in self._dirs:
             self._shutil_mod.rmtree(d, ignore_errors=True)
 
@@ -9222,8 +9230,9 @@ class TestCacheAgeSection(unittest.TestCase):
 
     def test_ttl_boundaries_are_exact(self):
         """Cold from the lifetime itself, not a millisecond before."""
-        for ttl, ms in (("5m", 300_000), ("1h", 3_600_000),
-                        ("30m", 1_800_000), ("2h", 7_200_000)):
+        for ttl, ms in (("1m", 60_000), ("5m", 300_000),
+                        ("30m", 1_800_000), ("1h", 3_600_000),
+                        ("2h", 7_200_000), ("24h", 86_400_000)):
             self.assertTrue(self._is_warn(ms, {"ttl": ttl}), ttl)
             self.assertFalse(self._is_warn(ms - 1, {"ttl": ttl}), ttl)
 
@@ -9235,6 +9244,9 @@ class TestCacheAgeSection(unittest.TestCase):
         self.assertTrue(self._is_warn(600_000, {"expires_at": self.NOW}))
         self.assertFalse(
             self._is_warn(600_000, {"expires_at": self.NOW + 1}))
+        # Sub-second expiries are not rounded away.
+        self.assertFalse(
+            self._is_warn(600_000, {"expires_at": self.NOW + 0.5}))
 
     def test_expires_at_needs_no_ttl(self):
         self.assertFalse(
@@ -9263,9 +9275,15 @@ class TestCacheAgeSection(unittest.TestCase):
         # Exactly at the turn is stale too.
         self.assertFalse(
             self._is_warn(10_000, {"ttl": "1h", "expires_at": stale}))
-        # Ignored means the next signal decides, in both directions.
+        # Half a second after the turn is not stale.
+        self.assertTrue(self._is_warn(
+            10_000, {"ttl": "1h", "expires_at": stale + 0.5}))
+        # Ignored means the next signal decides, in both directions...
         self.assertTrue(
             self._is_warn(400_000, {"expires_at": self.NOW - 500}))
+        # ...including "not warm on a caching session".
+        self.assertTrue(self._is_warn(3_000, {
+            "expires_at": stale, "warm": False, "caching_observed": True}))
 
     def test_expiry_too_far_ahead_is_not_trusted(self):
         """Further ahead than the longest lifetime accepted (a day) is
@@ -9275,6 +9293,8 @@ class TestCacheAgeSection(unittest.TestCase):
             self._is_warn(600_000, {"expires_at": self.NOW + day + 1}))
         self.assertFalse(
             self._is_warn(600_000, {"expires_at": self.NOW + day}))
+        self.assertTrue(
+            self._is_warn(600_000, {"expires_at": self.NOW + day + 0.5}))
         # A millisecond-sized value (the field is in SECONDS) reads as
         # a date tens of thousands of years away.
         ms_value = (self.NOW + 1800) * 1000
@@ -9296,6 +9316,15 @@ class TestCacheAgeSection(unittest.TestCase):
         self.assertFalse(self._is_warn(30_000, {
             "ttl": "1h", "expires_at": None,
             "warm": True, "caching_observed": True}))
+
+    def test_warm_true_does_not_override_the_age_rules(self):
+        """warm is only ever a reason to warn. A True that arrives
+        without a usable expiry does not hold the chip in the normal
+        color past the lifetime."""
+        self.assertTrue(self._is_warn(
+            600_000, {"warm": True, "caching_observed": True}))
+        self.assertTrue(self._is_warn(3_600_000, {
+            "ttl": "1h", "warm": True, "caching_observed": True}))
 
     def test_not_warm_without_observed_caching_falls_through(self):
         """Without caching_observed True, "not warm" cannot be told
@@ -9322,8 +9351,8 @@ class TestCacheAgeSection(unittest.TestCase):
             600_000, {"ttl": "5m", "expires_at": None}))
 
     def test_malformed_prompt_cache_keeps_the_five_minute_default(self):
-        """Every malformed shape must behave exactly like an absent
-        field: warn at 10 minutes, not at 30 seconds."""
+        """Every empty or malformed shape must behave exactly like an
+        absent field: warn at 10 minutes, not at 30 seconds."""
         shapes = (
             "junk", None, 42, [], {},
             {"ttl": "25h"}, {"ttl": 3600}, {"ttl": ["1h"]}, {"ttl": None},
@@ -9354,6 +9383,13 @@ class TestCacheAgeSection(unittest.TestCase):
             warm = self._is_warn(30_000, raw=True)
             self.assertIn(CYAN, warm)
             self.assertNotIn(RED, warm)
+            # An explicit null falls back to the default colors.
+            colors["cache_age"] = None
+            colors["cache_age_warn"] = None
+            self.assertIn(YELLOW, self._is_warn(600_000, raw=True))
+            warm = self._is_warn(30_000, raw=True)
+            self.assertIn(BRIGHT_BLACK, warm)
+            self.assertNotIn("None", warm)
         finally:
             for k in ("cache_age", "cache_age_warn"):
                 colors.pop(k, None)
@@ -9481,6 +9517,10 @@ class TestPromptCacheNormalize(unittest.TestCase):
         self.assertEqual(
             self._n({"expires_at": 99_999_999_999})[
                 "prompt_cache_expires_ms"], 99_999_999_999_000)
+        # Fractional seconds survive the conversion.
+        self.assertEqual(
+            self._n({"expires_at": 1738429200.5})[
+                "prompt_cache_expires_ms"], 1738429200500)
         for bad in (0, -1, True, "soon", 1e11, 1738429200000,
                     float("nan"), float("inf"), 10 ** 400):
             self.assertIsNone(
@@ -9523,6 +9563,7 @@ class TestPromptCacheNormalize(unittest.TestCase):
         line per field, naming it."""
         for field, bad in (("ttl", "25h"), ("ttl", 3600),
                            ("expires_at", "soon"), ("expires_at", 0),
+                           ("expires_at", 1e11),
                            ("hit_ratio", 91), ("hit_ratio", True),
                            ("misses", "lots"), ("misses", -3),
                            ("warm", "no"), ("caching_observed", 1)):
@@ -9625,6 +9666,8 @@ class TestCacheHitSection(unittest.TestCase):
         would print 28%."""
         self.assertEqual(self._chip({"hit_ratio": 0.29}), "hit:29%")
         self.assertEqual(self._chip({"hit_ratio": 0.576}), "hit:58%")
+        # ...and it rounds down as well as up.
+        self.assertEqual(self._chip({"hit_ratio": 0.574}), "hit:57%")
 
     def test_never_rounds_up_to_a_perfect_score(self):
         self.assertEqual(self._chip({"hit_ratio": 0.9996, "misses": 1}),

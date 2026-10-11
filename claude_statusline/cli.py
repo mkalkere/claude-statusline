@@ -629,14 +629,17 @@ def _normalize(data):
             _pc_note("")
         pc_obj = {}
 
-    def _pc_num(key, low, high, low_inclusive=True):
+    def _pc_num(key, low, high, inclusive=True):
         raw = pc_obj.get(key)
         if raw is None:
             return None
         num = None if isinstance(raw, bool) else _safe_num(raw)
         if num is not None:
-            above = num >= low if low_inclusive else num > low
-            if not (above and num <= high):
+            if inclusive:
+                in_range = low <= num <= high
+            else:
+                in_range = low < num < high
+            if not in_range:
                 num = None
         if num is None:
             _pc_note(key)
@@ -664,10 +667,9 @@ def _normalize(data):
         if pc_ttl_ms is None:
             _pc_note("ttl")
     out["prompt_cache_ttl_ms"] = pc_ttl_ms
-    pc_expires = _pc_num("expires_at", 0, 1e11, low_inclusive=False)
+    pc_expires = _pc_num("expires_at", 0, 1e11, inclusive=False)
     out["prompt_cache_expires_ms"] = (
-        pc_expires * 1000
-        if pc_expires is not None and pc_expires < 1e11 else None
+        pc_expires * 1000 if pc_expires is not None else None
     )
     out["prompt_cache_hit_ratio"] = _pc_num("hit_ratio", 0, 1)
     pc_misses = _pc_num("misses", 0, float("inf"))
