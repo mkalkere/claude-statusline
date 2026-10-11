@@ -54,13 +54,21 @@ CTX_WARNING_THRESHOLD_PCT = 85
 # sees.
 _CACHE_AGE_WARN_MS = 5 * 60 * 1000
 
-# Documented values of prompt_cache.ttl -> lifetime in milliseconds.
-# Anything else (a future lifetime, garbage) is not guessed at: it
-# maps to None and the cache_age fallback above applies.
-_PROMPT_CACHE_TTL_MS = {
-    "5m": 5 * 60 * 1000,
-    "1h": 60 * 60 * 1000,
-}
+# prompt_cache.ttl is documented as "5m" or "1h". The pattern accepts
+# any whole number of minutes or hours so a lifetime added upstream
+# later is read rather than silently replaced by the 5-minute guess
+# above — the exact mistake #131 fixed for "1h". Capped at
+# _PROMPT_CACHE_MAX_TTL_MS: beyond a day it is not a lifetime we can
+# vouch for, and the same cap bounds how far ahead an expiry may sit.
+_PROMPT_CACHE_TTL_RE = re.compile(r"([1-9][0-9]{0,3})([mh])")
+_PROMPT_CACHE_TTL_UNIT_MS = {"m": 60 * 1000, "h": 60 * 60 * 1000}
+_PROMPT_CACHE_MAX_TTL_MS = 24 * 60 * 60 * 1000
+
+# Largest miss count rendered in full by `cache_hit`; above it the chip
+# shows "999+". A count is unbounded on stdin, and an absurd one would
+# otherwise widen the chip until the fit logic evicts every other
+# section on the line.
+_CACHE_MISS_DISPLAY_MAX = 999
 
 # Documented review states for pr.review_state (statusline doc enum
 # as of 2026-06-04). Used by _normalize to membership-check the
@@ -141,7 +149,10 @@ def _safe_num(val):
         return None
     try:
         num = float(val)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: json.loads returns arbitrary-precision ints,
+        # and float() of one beyond the double range raises instead of
+        # returning inf.
         return None
     return num if math.isfinite(num) else None
 
@@ -586,9 +597,7 @@ def _normalize(data):
     # versions). Every field is validated on its own and collapses to
     # None when missing or malformed, so each consumer degrades
     # independently:
-    #   ttl              "5m" / "1h" -> lifetime in ms (isinstance
-    #                    first: an unhashable value would raise from
-    #                    the dict lookup)
+    #   ttl              "5m" / "1h" -> lifetime in ms
     #   expires_at       epoch SECONDS -> ms. Documented as null when
     #                    the last response reported no cache tokens.
     #                    Bounded like task start times: >= 1e11 would
@@ -596,39 +605,77 @@ def _normalize(data):
     #   hit_ratio        0..1; documented as null while no tokens have
     #                    been counted. Out-of-range is garbage, hidden
     #   misses           non-negative count
-    #   caching_observed strict bool, None when absent. False means
-    #                    caching is off or not reported, which is NOT
-    #                    the same as a 0% hit ratio
+    #   warm,            strict bools, None when absent. They are kept
+    #   caching_observed tri-state because False and "not sent" mean
+    #                    different things to the consumers
     # Bools are rejected for the numeric fields (bool is an int
     # subclass, and `true` is neither a timestamp nor a ratio).
-    pc_obj = data.get("prompt_cache")
-    pc_obj = pc_obj if isinstance(pc_obj, dict) else {}
+    #
+    # Present-but-unusable values leave the same one-line stderr
+    # breadcrumb as the token and money fields: every one of these
+    # hides or changes a chip, and "my cache_hit chip vanished" must
+    # not be undiagnosable. Absent fields and the documented nulls
+    # (expires_at, hit_ratio) stay silent.
+    def _pc_note(field):
+        print(
+            "claude-status: ignoring unusable prompt_cache{} value".format(
+                "." + field if field else ""),
+            file=sys.stderr,
+        )
 
-    def _pc_num(key):
+    pc_obj = data.get("prompt_cache")
+    if not isinstance(pc_obj, dict):
+        if pc_obj is not None:
+            _pc_note("")
+        pc_obj = {}
+
+    def _pc_num(key, low, high, low_inclusive=True):
         raw = pc_obj.get(key)
-        return None if isinstance(raw, bool) else _safe_num(raw)
+        if raw is None:
+            return None
+        num = None if isinstance(raw, bool) else _safe_num(raw)
+        if num is not None:
+            above = num >= low if low_inclusive else num > low
+            if not (above and num <= high):
+                num = None
+        if num is None:
+            _pc_note(key)
+        return num
+
+    def _pc_bool(key):
+        raw = pc_obj.get(key)
+        if raw is None or isinstance(raw, bool):
+            return raw
+        _pc_note(key)
+        return None
 
     pc_ttl = pc_obj.get("ttl")
-    out["prompt_cache_ttl_ms"] = (
-        _PROMPT_CACHE_TTL_MS.get(pc_ttl) if isinstance(pc_ttl, str) else None
-    )
-    pc_expires = _pc_num("expires_at")
+    pc_ttl_ms = None
+    if pc_ttl is not None:
+        # isinstance first: the regex needs a str, and stdin can carry
+        # any JSON type here.
+        ttl_match = (_PROMPT_CACHE_TTL_RE.fullmatch(pc_ttl)
+                     if isinstance(pc_ttl, str) else None)
+        if ttl_match:
+            pc_ttl_ms = (int(ttl_match.group(1))
+                         * _PROMPT_CACHE_TTL_UNIT_MS[ttl_match.group(2)])
+            if pc_ttl_ms > _PROMPT_CACHE_MAX_TTL_MS:
+                pc_ttl_ms = None
+        if pc_ttl_ms is None:
+            _pc_note("ttl")
+    out["prompt_cache_ttl_ms"] = pc_ttl_ms
+    pc_expires = _pc_num("expires_at", 0, 1e11, low_inclusive=False)
     out["prompt_cache_expires_ms"] = (
         pc_expires * 1000
-        if pc_expires is not None and 0 < pc_expires < 1e11 else None
+        if pc_expires is not None and pc_expires < 1e11 else None
     )
-    pc_ratio = _pc_num("hit_ratio")
-    out["prompt_cache_hit_ratio"] = (
-        pc_ratio if pc_ratio is not None and 0 <= pc_ratio <= 1 else None
-    )
-    pc_misses = _pc_num("misses")
+    out["prompt_cache_hit_ratio"] = _pc_num("hit_ratio", 0, 1)
+    pc_misses = _pc_num("misses", 0, float("inf"))
     out["prompt_cache_misses"] = (
-        int(pc_misses) if pc_misses is not None and pc_misses >= 0 else None
+        int(pc_misses) if pc_misses is not None else None
     )
-    pc_observed = pc_obj.get("caching_observed")
-    out["prompt_cache_observed"] = (
-        pc_observed if isinstance(pc_observed, bool) else None
-    )
+    out["prompt_cache_warm"] = _pc_bool("warm")
+    out["prompt_cache_observed"] = _pc_bool("caching_observed")
 
     # Output style
     style_obj = data.get("output_style")
@@ -1146,11 +1193,21 @@ def _render_sections_named(n, order, theme):
             # The chip switches to a warning color once the cache has
             # gone cold (#131), decided from the best signal present:
             #   1. prompt_cache.expires_at — upstream's own answer;
-            #      cold once the clock reaches it.
-            #   2. prompt_cache.ttl — the real lifetime ("5m"/"1h");
-            #      cold once the age reaches it.
-            #   3. neither (older Claude Code, or malformed) — the
-            #      _CACHE_AGE_WARN_MS guess, as before.
+            #      cold once the clock reaches it. Trusted only when it
+            #      falls after the last turn (an expiry older than the
+            #      turn it would describe is a stale payload) and no
+            #      further ahead than the longest lifetime we accept.
+            #   2. warm is False while caching_observed is True — the
+            #      session caches, and the last response wrote or read
+            #      no cache tokens, so there is no warm cache however
+            #      recent the turn. This is the documented meaning of a
+            #      null expires_at. Without caching_observed we cannot
+            #      tell "no cache" from "provider doesn't report it",
+            #      so that case falls through rather than warn forever.
+            #   3. prompt_cache.ttl — the real lifetime; cold once the
+            #      age reaches it.
+            #   4. none of the above (older Claude Code, or malformed)
+            #      — the _CACHE_AGE_WARN_MS guess, as before.
             # A flat 5 minutes is wrong for a 1-hour cache: the chip
             # warned for 55 minutes while the cache was still warm.
             #
@@ -1169,8 +1226,15 @@ def _render_sections_named(n, order, theme):
                     age_ms = now_ms - ts_ms
                     if age_ms >= 0:
                         expires_ms = n.get("prompt_cache_expires_ms")
+                        if expires_ms is not None and not (
+                                ts_ms < expires_ms
+                                <= now_ms + _PROMPT_CACHE_MAX_TTL_MS):
+                            expires_ms = None
                         if expires_ms is not None:
                             cold = now_ms >= expires_ms
+                        elif (n.get("prompt_cache_warm") is False
+                                and n.get("prompt_cache_observed") is True):
+                            cold = True
                         else:
                             cold = age_ms >= _first(
                                 n.get("prompt_cache_ttl_ms"),
@@ -1200,7 +1264,8 @@ def _render_sections_named(n, order, theme):
             #
             # The percentage is rounded, not floored (0.29 * 100 is
             # 28.999... in floating point), but never rounds UP to
-            # 100%: a session with misses must not read as perfect.
+            # 100%: a ratio below 1 must not read as perfect. The miss
+            # count is capped for display (_CACHE_MISS_DISPLAY_MAX).
             if n.get("prompt_cache_observed") is not False:
                 ratio = n.get("prompt_cache_hit_ratio")
                 misses = n.get("prompt_cache_misses")
@@ -1215,8 +1280,12 @@ def _render_sections_named(n, order, theme):
                                    _first(tc.get("cache_hit"), GREEN))
                     )
                 if misses:
+                    if misses > _CACHE_MISS_DISPLAY_MAX:
+                        miss_text = "{}+".format(_CACHE_MISS_DISPLAY_MAX)
+                    else:
+                        miss_text = str(misses)
                     parts.append(colorize(
-                        "miss:{}".format(misses),
+                        "miss:" + miss_text,
                         _first(tc.get("cache_miss"), YELLOW)))
                 if parts:
                     sections.append(" ".join(parts))
