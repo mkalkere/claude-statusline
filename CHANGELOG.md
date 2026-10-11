@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
-- 775 tests pass (+16). Twelve of the new tests fail against the v0.15.1 shortener; the other four pin behaviour this release leaves alone (the exact `claude-` prefix match, tolerance of doubled or trailing dashes, seven- and nine-digit parts not being dates) or guard the cost of the marker split on malformed input. The existing subagent-cap test now asserts exact values at, under and over the cap instead of a length bound. Pure stdlib, zero dependencies, as always.
+- 776 tests pass (+17). Thirteen of the new tests fail against the v0.15.1 shortener; the other four pin behaviour this release leaves alone (the exact `claude-` prefix match, tolerance of doubled or trailing dashes, seven- and nine-digit parts not being dates) or guard the cost of the marker split on malformed input. The existing subagent-cap test now asserts exact values at and over the cap instead of a length bound. Pure stdlib, zero dependencies, as always.
 - Provider-style ids are not specially handled: a namespace prefix in front of `claude-` is still shown, and an `@` or `:` separator still keeps the parts either side of it from being read as numbers.
 
 ## [0.15.1] - 2026-08-23

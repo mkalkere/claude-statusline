@@ -2368,20 +2368,24 @@ def _short_model(model_id, cap=_SUBAGENT_NAME_MAX):
     for part in text.split("-"):
         if not part:
             continue
-        if part.isascii() and part.isdigit():
-            if len(part) != _MODEL_DATE_LEN:
-                numeric_run.append(part)
+        numeric = part.isascii() and part.isdigit()
+        is_date = numeric and len(part) == _MODEL_DATE_LEN
+        if numeric and not is_date:
+            numeric_run.append(part)
             continue
+        # A date ends the run it interrupts like any other part does:
+        # the numbers either side of it are not one version.
         if numeric_run:
             version_first = version_first or not words
             words.append(".".join(numeric_run))
             numeric_run = []
-        words.append(part.title())
+        if not is_date:
+            words.append(part.title())
     if numeric_run:
         words.append(".".join(numeric_run))
     # Version-first id: put the family (the part after the version) in
     # front, so every id reads family, version, variant.
-    if version_first:
+    if version_first and len(words) > 1:
         words[0], words[1] = words[1], words[0]
     short = " ".join(words)
     if short and variant_suffix:

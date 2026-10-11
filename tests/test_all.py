@@ -3380,9 +3380,9 @@ class TestMainModelShortening(unittest.TestCase):
                          "A Very Long Descriptive Model Name Here")
 
     def test_variant_marker_preserved(self):
-        """A bracketed variant marker survives the date strip — it tells
-        the user which context variant they're on, so dropping it would
-        be silent information loss."""
+        """A bracketed variant marker survives alongside a date stamp —
+        it tells the user which context variant they're on, so dropping
+        it would be silent information loss."""
         from claude_statusline.cli import _short_model
         self.assertEqual(_short_model("claude-sonnet-4-5-20250929[1m]",
                                       cap=None), "Sonnet 4.5 [1m]")
@@ -3413,7 +3413,7 @@ class TestMainModelShortening(unittest.TestCase):
         (left attached to the id it came out as "[1M]"), not lowered,
         inner spaces intact, and not limited to one spelling."""
         from claude_statusline.cli import _short_model
-        for marker in ("[1m]", "[1M]", "[200k]", "[1m beta]"):
+        for marker in ("[1m]", "[1M]", "[200k]", "[1m beta]", "[x]"):
             self.assertEqual(
                 _short_model("claude-opus-5-5" + marker, cap=None),
                 "Opus 5.5 " + marker)
@@ -3427,6 +3427,14 @@ class TestMainModelShortening(unittest.TestCase):
         self.assertEqual(_short_model("claude-opus-5-5[1m]x", cap=None),
                          "Opus 5 5[1M]X")
         self.assertEqual(_short_model("[[1m]]", cap=None), "[[1M]]")
+        # An opening bracket with no closing one, a "]" earlier in the
+        # id, and a closing bracket with no opening one.
+        self.assertEqual(_short_model("claude-opus-5[1m", cap=None),
+                         "Opus 5[1M")
+        self.assertEqual(_short_model("claude-a]-5[1m", cap=None),
+                         "A] 5[1M")
+        self.assertEqual(_short_model("claude-opus-5]", cap=None),
+                         "Opus 5]")
 
     def test_variant_marker_edge_shapes(self):
         """Whitespace in front of the marker must not block the version
@@ -3445,10 +3453,10 @@ class TestMainModelShortening(unittest.TestCase):
         raising. The bound is orders of magnitude above the linear
         cost, so it only trips on a return to that behaviour."""
         from claude_statusline.cli import _short_model
-        start = time.time()
+        start = time.perf_counter()
         _short_model("claude-opus-4-5" + "[" * 400_000, cap=None)
         _short_model("claude-" + "[" * 400_000 + "]", cap=None)
-        self.assertLess(time.time() - start, 5.0)
+        self.assertLess(time.perf_counter() - start, 5.0)
 
     def test_version_dots_survive_a_variant_tail(self):
         """A non-numeric suffix after the version must not stop the
@@ -3496,6 +3504,13 @@ class TestMainModelShortening(unittest.TestCase):
         self.assertEqual(_short_model("claude-opus-4-5-19991231", cap=None),
                          "Opus 4.5")
 
+    def test_date_stamp_does_not_bridge_two_numeric_runs(self):
+        """Dropping a date must not join the numbers either side of it
+        into one version — "4" and "5" around a date are not "4.5"."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-opus-4-20250514-5", cap=None),
+                         "Opus 4 5")
+
     def test_only_an_eight_digit_part_is_a_date(self):
         """Seven or nine digits, or eight digits glued to something
         else, are ordinary numeric parts."""
@@ -3522,6 +3537,16 @@ class TestMainModelShortening(unittest.TestCase):
         self.assertEqual(
             _short_model("claude-3-5-sonnet-v2-1[1m]", cap=None),
             "Sonnet 3.5 V2 1 [1m]")
+        # A later numeric run does not undo the swap...
+        self.assertEqual(
+            _short_model("claude-3-5-sonnet-2-preview", cap=None),
+            "Sonnet 3.5 2 Preview")
+        # ...a date right after the version still counts as "something
+        # follows" only when a real part does...
+        self.assertEqual(_short_model("claude-3-20241022-sonnet", cap=None),
+                         "Sonnet 3")
+        # ...and a version with nothing after it has nothing to swap.
+        self.assertEqual(_short_model("claude-3-20241022", cap=None), "3")
 
     def test_only_ascii_digits_count_as_numeric(self):
         """str.isdigit() also accepts characters such as superscripts.
