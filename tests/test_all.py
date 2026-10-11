@@ -3398,20 +3398,57 @@ class TestMainModelShortening(unittest.TestCase):
                          "Opus 5.5 [1m]")
         self.assertEqual(_short_model("claude-fable-5-1[1m]", cap=None),
                          "Fable 5.1 [1m]")
-        # Single-part version: nothing to join, marker still verbatim.
+        # Single-part version: nothing to join, marker still kept.
         self.assertEqual(_short_model("claude-opus-5[1m]", cap=None),
                          "Opus 5 [1m]")
+        # No numeric part at all.
+        self.assertEqual(_short_model("claude-opus[1m]", cap=None),
+                         "Opus [1m]")
         # End to end through the model section.
         self.assertEqual(self._model_text("claude-opus-5-5[1m]"),
                          "Opus 5.5 [1m]")
 
-    def test_variant_marker_is_not_title_cased(self):
-        """The marker is re-appended verbatim. Left attached to the id
-        it went through the title-casing and came out as "[1M]"."""
+    def test_variant_marker_is_kept_verbatim(self):
+        """The marker is re-appended exactly as sent: not title-cased
+        (left attached to the id it came out as "[1M]"), not lowered,
+        inner spaces intact, and not limited to one spelling."""
         from claude_statusline.cli import _short_model
-        out = _short_model("claude-opus-5-5[1m]", cap=None)
-        self.assertTrue(out.endswith(" [1m]"), out)
-        self.assertNotIn("[1M]", out)
+        for marker in ("[1m]", "[1M]", "[200k]", "[1m beta]"):
+            self.assertEqual(
+                _short_model("claude-opus-5-5" + marker, cap=None),
+                "Opus 5.5 " + marker)
+
+    def test_variant_marker_must_close_the_id(self):
+        """Only a bracket pair that ends the id is a marker. Anything
+        else stays in the id text and is handled like any other part."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-opus[x]-5-5[1m]", cap=None),
+                         "Opus[X] 5.5 [1m]")
+        self.assertEqual(_short_model("claude-opus-5-5[1m]x", cap=None),
+                         "Opus 5 5[1M]X")
+        self.assertEqual(_short_model("[[1m]]", cap=None), "[[1M]]")
+
+    def test_variant_marker_edge_shapes(self):
+        """Whitespace in front of the marker must not block the version
+        join or double the separator, and an empty marker says nothing
+        so it is dropped."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-opus-4-5 [1m]", cap=None),
+                         "Opus 4.5 [1m]")
+        self.assertEqual(_short_model("claude-opus-5-5[]", cap=None),
+                         "Opus 5.5")
+
+    def test_unclosed_brackets_stay_cheap(self):
+        """A long run of unclosed "[" must not make the marker split
+        super-linear: a pattern-based split stalls for seconds on a
+        six-figure input, and a stall hangs the status line rather than
+        raising. The bound is orders of magnitude above the linear
+        cost, so it only trips on a return to that behaviour."""
+        from claude_statusline.cli import _short_model
+        start = time.time()
+        _short_model("claude-opus-4-5" + "[" * 400_000, cap=None)
+        _short_model("claude-" + "[" * 400_000 + "]", cap=None)
+        self.assertLess(time.time() - start, 5.0)
 
     def test_version_dots_survive_a_variant_tail(self):
         """A non-numeric suffix after the version must not stop the
@@ -3421,16 +3458,54 @@ class TestMainModelShortening(unittest.TestCase):
                          "Opus 4.5 1M")
         self.assertEqual(_short_model("claude-opus-4-5-thinking", cap=None),
                          "Opus 4.5 Thinking")
-        # A date stamp is still stripped rather than read as a tail.
-        self.assertEqual(_short_model("claude-haiku-4-5-20251001", cap=None),
-                         "Haiku 4.5")
 
-    def test_only_the_first_numeric_run_is_the_version(self):
-        """Numbers that come back after the tail belong to the tail —
-        they are not folded into the version."""
+    def test_every_numeric_run_is_dot_joined(self):
+        """Each run of consecutive numeric parts is joined on its own;
+        a non-numeric part in between keeps two runs apart."""
         from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-opus-4-5-6", cap=None),
+                         "Opus 4.5.6")
+        self.assertEqual(_short_model("claude-opus-4-10", cap=None),
+                         "Opus 4.10")
+        self.assertEqual(
+            _short_model("claude-opus-4-5-preview-2-1", cap=None),
+            "Opus 4.5 Preview 2.1")
+        # "v2" is not numeric, so it neither joins nor is joined.
         self.assertEqual(_short_model("claude-opus-4-5-v2-1", cap=None),
                          "Opus 4.5 V2 1")
+        self.assertEqual(_short_model("claude-opus-1m-4-5", cap=None),
+                         "Opus 1M 4.5")
+        self.assertEqual(_short_model("claude-opus-0", cap=None), "Opus 0")
+
+    def test_date_stamp_is_dropped_wherever_it_sits(self):
+        """An all-numeric part of exactly eight digits is a date stamp.
+        It is dropped at the end of the id, in the middle, and at the
+        front — never dot-joined into the version, where it would read
+        as a real three-part version number."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-haiku-4-5-20251001", cap=None),
+                         "Haiku 4.5")
+        self.assertEqual(
+            _short_model("claude-opus-4-5-20251101-thinking", cap=None),
+            "Opus 4.5 Thinking")
+        self.assertEqual(
+            _short_model("claude-3-5-sonnet-20241022-v2", cap=None),
+            "Sonnet 3.5 V2")
+        self.assertEqual(_short_model("claude-20251101-opus-4-5", cap=None),
+                         "Opus 4.5")
+        self.assertEqual(_short_model("claude-opus-4-5-19991231", cap=None),
+                         "Opus 4.5")
+
+    def test_only_an_eight_digit_part_is_a_date(self):
+        """Seven or nine digits, or eight digits glued to something
+        else, are ordinary numeric parts."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-opus-4-5-1234567", cap=None),
+                         "Opus 4.5.1234567")
+        self.assertEqual(_short_model("claude-opus-4-5-123456789", cap=None),
+                         "Opus 4.5.123456789")
+        self.assertEqual(_short_model("claude-opus-4-520251001", cap=None),
+                         "Opus 4.520251001")
 
     def test_version_first_ids_render_family_first(self):
         """Ids that lead with the version (#123) read the same way
@@ -3442,28 +3517,80 @@ class TestMainModelShortening(unittest.TestCase):
                          "Opus 3")
         self.assertEqual(_short_model("claude-3-5-sonnet-v2", cap=None),
                          "Sonnet 3.5 V2")
+        self.assertEqual(_short_model("claude-0-0-opus", cap=None),
+                         "Opus 0.0")
+        self.assertEqual(
+            _short_model("claude-3-5-sonnet-v2-1[1m]", cap=None),
+            "Sonnet 3.5 V2 1 [1m]")
+
+    def test_only_ascii_digits_count_as_numeric(self):
+        """str.isdigit() also accepts characters such as superscripts.
+        They are not version numbers: no dot-join, no family swap."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-opus-²-5", cap=None),
+                         "Opus ² 5")
+        self.assertEqual(_short_model("claude-²-sonnet", cap=None),
+                         "² Sonnet")
 
     def test_ids_without_a_family_or_a_version(self):
         """Degenerate shapes keep degrading instead of raising: a bare
         version, no numeric part at all, and nothing left once the
-        prefix and marker are gone."""
+        prefix, marker and date are gone."""
         from claude_statusline.cli import _short_model
         self.assertEqual(_short_model("claude-2-1", cap=None), "2.1")
+        self.assertEqual(_short_model("claude-3", cap=None), "3")
         self.assertEqual(_short_model("mystery-model", cap=None),
                          "Mystery Model")
-        self.assertEqual(_short_model("claude-[1m]", cap=None), "")
-        self.assertEqual(_short_model("[1m]", cap=None), "")
+        for empty in ("claude-[1m]", "[1m]", "claude-20250101"):
+            self.assertEqual(_short_model(empty, cap=None), "", empty)
         # ...and the main line falls back to the raw value, as it does
         # for any id that shortens to nothing.
         self.assertEqual(self._model_text("claude-[1m]"), "claude-[1m]")
+        self.assertEqual(self._model_text("claude-20250101"),
+                         "claude-20250101")
+
+    def test_prefix_strip_is_exact(self):
+        """Only a leading, lower-case "claude-" is the prefix."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(_short_model("claude-claude-5", cap=None),
+                         "Claude 5")
+        self.assertEqual(_short_model("Claude-opus-5", cap=None),
+                         "Claude Opus 5")
+        self.assertEqual(_short_model("claudeopus-5", cap=None),
+                         "Claudeopus 5")
+
+    def test_separators_and_padding_are_tolerated(self):
+        """Doubled or trailing dashes, surrounding whitespace and
+        control characters do not change the result."""
+        from claude_statusline.cli import _short_model
+        for raw in ("claude-opus--5", "claude-opus-5-", " claude-opus-5 ",
+                    "claude-opus\x1b-5"):
+            self.assertEqual(_short_model(raw, cap=None), "Opus 5", raw)
 
     def test_subagent_path_still_capped(self):
         """The cap default is unchanged for subagent rows, whose width
-        budget is fixed per row."""
+        budget is fixed per row: cut to the cap with the last character
+        replaced by an ellipsis, and only when the name is OVER it."""
         from claude_statusline.cli import _short_model, _SUBAGENT_NAME_MAX
-        out = _short_model("claude-a-very-long-descriptive-model-name-here")
-        self.assertTrue(out.endswith("…"))
-        self.assertLessEqual(len(out), _SUBAGENT_NAME_MAX)
+        self.assertEqual(_SUBAGENT_NAME_MAX, 24)
+        self.assertEqual(
+            _short_model("claude-a-very-long-descriptive-model-name-here"),
+            "A Very Long Descriptive…")
+        # Exactly at the cap: untouched.
+        self.assertEqual(_short_model("claude-abcdefghijklmnopqrstuv-5"),
+                         "Abcdefghijklmnopqrstuv 5")
+        # One over: cut.
+        self.assertEqual(_short_model("claude-abcdefghijklmnopqrstuvw-5"),
+                         "Abcdefghijklmnopqrstuvw…")
+
+    def test_cap_applies_to_the_marker_too(self):
+        """The cap is a hard width limit for the row, so it is applied
+        after the marker is appended — a long enough name can push the
+        marker past it."""
+        from claude_statusline.cli import _short_model
+        self.assertEqual(
+            _short_model("claude-sonnet-4-5-thinking-extended-20250929[1m]"),
+            "Sonnet 4.5 Thinking Ext…")
 
 
 class TestSectionRendersAtMostOnce(unittest.TestCase):

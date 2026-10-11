@@ -2232,15 +2232,10 @@ _TERMINAL_TASK_STATUSES = frozenset({
 # URL sanitizer above).
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
-# Bracketed variant marker closing a model id (real ids appear as
-# "claude-sonnet-4-5-20250929[1m]" and, undated, "claude-opus-5-5[1m]").
-# Split off first and re-appended verbatim — dropping it would hide
-# which context variant the session is on.
-_MODEL_VARIANT_RE = re.compile(r"\[[^\]]*\]$")
-
-# Trailing "-YYYYMMDD" date stamp on model IDs
-# ("claude-sonnet-5-20250707"), matched once the variant marker is off.
-_MODEL_DATE_RE = re.compile(r"-\d{8}$")
+# Length of the "YYYYMMDD" date stamp carried by model IDs
+# ("claude-sonnet-5-20250707"). An all-numeric id part of exactly this
+# length is a date, never a version component.
+_MODEL_DATE_LEN = 8
 
 _SUBAGENT_NAME_MAX = 24         # name segment cap (with ellipsis)
 _SUBAGENT_COLUMNS_DEFAULT = 80  # when columns is garbage after tasks qualified
@@ -2320,17 +2315,19 @@ def _sanitize_row_text(value):
 
 def _short_model(model_id, cap=_SUBAGENT_NAME_MAX):
     """Compact display for a model id: "claude-sonnet-5-20250707"
-    -> "Sonnet 5", "claude-opus-4-8" -> "Opus 4.8". The first run of
-    consecutive numeric id parts is the version, joined with dots;
-    whatever follows it is a variant tail ("claude-opus-4-5-thinking"
-    -> "Opus 4.5 Thinking"). An id that LEADS with its version
+    -> "Sonnet 5", "claude-opus-4-8" -> "Opus 4.8". Each run of
+    consecutive numeric id parts is joined with dots, so a version
+    keeps its dots whatever follows it ("claude-opus-4-5-thinking" ->
+    "Opus 4.5 Thinking"). An id that LEADS with its version
     ("claude-3-5-sonnet-20241022") renders family-first like the rest
-    ("Sonnet 3.5"). Ids with no numeric part degrade to the sanitized,
+    ("Sonnet 3.5"). Date stamps are dropped wherever they sit, and a
+    closing bracketed variant marker is kept verbatim ("...[1m]" ->
+    "... [1m]"). Ids with no numeric part degrade to the sanitized,
     dash-split, title-cased raw id.
 
     Control-strip WITHOUT the length cap first: _sanitize_row_text's
-    24-char truncation would eat the trailing "-YYYYMMDD" before the
-    date regex could strip it ("claude-haiku-4-5-20251001" is 25
+    24-char truncation would eat the trailing "-YYYYMMDD" before it
+    could be recognised as a date ("claude-haiku-4-5-20251001" is 25
     chars). The cap is applied to the final short form instead.
 
     `cap` truncates the result with an ellipsis; subagent rows pass the
@@ -2346,43 +2343,46 @@ def _short_model(model_id, cap=_SUBAGENT_NAME_MAX):
     text = _CONTROL_CHARS_RE.sub("", model_id).strip()
     if not text:
         return ""
-    # Split off the bracketed variant marker BEFORE anything else and
-    # re-append it verbatim at the end ("...[1m]" -> suffix "[1m]"):
-    # it tells the user which context variant the session is on, so
-    # dropping it would be silent information loss, and leaving it
-    # attached glues it to the last id part, which then stops reading
-    # as a version number ("5[1m]" is not a digit).
-    variant_match = _MODEL_VARIANT_RE.search(text)
+    # Split off the closing bracketed variant marker BEFORE anything
+    # else and re-append it verbatim at the end: it tells the user
+    # which context variant the session is on, so dropping it would be
+    # silent information loss, and leaving it attached glues it to the
+    # last id part, which then stops reading as a number ("5[1m]").
+    # Plain string scans rather than a regex: an unanchored bracket
+    # pattern goes quadratic on a long run of unclosed "[". An empty
+    # "[]" carries nothing and is dropped.
     variant_suffix = ""
-    if variant_match:
-        variant_suffix = variant_match.group(0)
-        text = text[:variant_match.start()]
-    text = _MODEL_DATE_RE.sub("", text)
+    if text.endswith("]"):
+        open_at = text.rfind("[")
+        if open_at != -1 and "]" not in text[open_at:-1]:
+            if len(text) - open_at > 2:
+                variant_suffix = text[open_at:]
+            text = text[:open_at].rstrip()
     if text.startswith("claude-"):
         text = text[len("claude-"):]
-    parts = [p for p in text.split("-") if p]
-    # The version is the FIRST run of consecutive numeric parts, not
-    # the trailing one: a trailing-only scan gives up at the first
-    # non-numeric suffix and leaves the version space-separated.
-    start = next((i for i, p in enumerate(parts) if p.isdigit()), None)
-    if start is None:
-        family, version, tail = parts, [], []
-    else:
-        end = start
-        while end < len(parts) and parts[end].isdigit():
-            end += 1
-        family, version, tail = parts[:start], parts[start:end], parts[end:]
-        if not family and tail:
-            # Version-first id: the family is the part after the
-            # version, and anything beyond it is the variant tail.
-            family, tail = tail[:1], tail[1:]
+    # ASCII digits only: str.isdigit() alone also accepts characters
+    # such as superscripts, which are not version numbers.
     words = []
-    if family:
-        words.append(" ".join(family).title())
-    if version:
-        words.append(".".join(version))
-    if tail:
-        words.append(" ".join(tail).title())
+    numeric_run = []
+    version_first = False
+    for part in text.split("-"):
+        if not part:
+            continue
+        if part.isascii() and part.isdigit():
+            if len(part) != _MODEL_DATE_LEN:
+                numeric_run.append(part)
+            continue
+        if numeric_run:
+            version_first = version_first or not words
+            words.append(".".join(numeric_run))
+            numeric_run = []
+        words.append(part.title())
+    if numeric_run:
+        words.append(".".join(numeric_run))
+    # Version-first id: put the family (the part after the version) in
+    # front, so every id reads family, version, variant.
+    if version_first:
+        words[0], words[1] = words[1], words[0]
     short = " ".join(words)
     if short and variant_suffix:
         short += " " + variant_suffix
