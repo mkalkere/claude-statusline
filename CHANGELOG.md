@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2] - 2026-10-11
+
+### Fixed
+
+- **Model versions lost their dots when the id carried anything after the version** ([#123](https://github.com/mkalkere/claude-statusline/issues/123)). The shortener only collected a *trailing* run of numeric id parts, so any suffix after the version stopped it and the version parts fell through as separate words. The case that makes this visible today is an undated id with a bracketed variant marker: `claude-opus-5-5[1m]` rendered as `Opus 5 5[1M]` — no dot, and the marker title-cased along with the rest. It now renders `Opus 5.5 [1m]`, the same shape the dated form (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) has had since v0.15.0.
+
+  The version is now the *first* run of consecutive numeric parts, and whatever follows is a variant tail:
+
+  | id | before | now |
+  |---|---|---|
+  | `claude-opus-5-5[1m]` | `Opus 5 5[1M]` | `Opus 5.5 [1m]` |
+  | `claude-opus-4-5-1m` | `Opus 4 5 1M` | `Opus 4.5 1M` |
+  | `claude-opus-4-5-thinking` | `Opus 4 5 Thinking` | `Opus 4.5 Thinking` |
+  | `claude-3-5-sonnet-20241022` | `3 5 Sonnet` | `Sonnet 3.5` |
+  | `claude-3-opus-20240229` | `3 Opus` | `Opus 3` |
+
+  The last two rows are ids that lead with their version. They now read family-first like every other id, which settles the open question in the issue: an id whose first part is numeric has its version first, so the two orderings never have to be guessed apart.
+
+  The bracketed marker is split off before anything else and re-appended verbatim, with or without a date stamp in front of it. Affects subagent rows, and the main line when Claude Code sends a raw id as `model.display_name`. Friendly display names are still never passed through the shortener, and ids with no numeric part render exactly as before.
+
+### Notes
+
+- 766 tests pass (+7: the undated-marker case on both the shortener and the main line, the marker staying un-title-cased, dot-joining ahead of a variant tail, the first-numeric-run rule, version-first ids, the degenerate shapes, and a subagent row carrying an undated marker). All seven fail against the v0.15.1 shortener. Pure stdlib, zero dependencies, as always.
+
 ## [0.15.1] - 2026-08-23
 
 ### Fixed
