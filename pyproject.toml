@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-status"
-version = "0.15.2"
+version = "0.16.0"
 description = "Beautiful, informative status line for Claude Code — zero dependencies, cross-platform"
 readme = "README.md"
 license = {text = "MIT"}
@@ -21,7 +21,7 @@ keywords = [
     "cost-tracking", "burn-rate", "rate-limit", "session-monitor",
     "claude-code-plugin", "coding-agent", "agent-tooling", "agentic",
     "ai-agent", "subagent", "ai-coding", "llm-tooling",
-    "ai-developer-tools", "prompt-engineering", "prompt-cache",
+    "ai-developer-tools", "prompt-engineering", "prompt-cache", "cache-hit-rate",
     "responsive-layout", "terminal-width", "git-status",
     "observability", "devtool", "context-usage", "usage-tracking",
 ]

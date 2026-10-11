@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-10-11
+
+Prompt-cache release. Claude Code v2.1.251 started sending a `prompt_cache` object on stdin with the session's real cache lifetime, expiry and hit statistics; this release reads it. Nothing changes on older Claude Code versions.
+
+### Fixed
+
+- **`cache_age` warned after 5 minutes even when the cache lasts an hour** ([#131](https://github.com/mkalkere/claude-statusline/issues/131)). The section turns to a warning color once the prompt cache has "likely gone cold", and that was a fixed 5-minute guess. Prompt caches are not always 5 minutes — the statusline docs describe `prompt_cache.ttl` as *"Cache lifetime of the current cached prefix: `"5m"` or `"1h"`"* — so on a 1-hour cache the chip showed the warning for 55 minutes while the cache was still warm.
+
+  "Cold" is now decided from the best signal present:
+
+  1. `prompt_cache.expires_at` — documented as *"When the cached prefix leaves its TTL and goes cold, in epoch seconds"*. The chip warns once the clock reaches it.
+  2. Otherwise `prompt_cache.ttl` — the chip warns once the age reaches that lifetime.
+  3. Otherwise the 5-minute assumption, exactly as before. This is what applies on Claude Code older than v2.1.251, before the session's first API response, and whenever the field is missing or malformed.
+
+  The displayed age is unchanged; only the point at which the color changes moved. `expires_at` is documented as `null` when the last response reported no cache tokens, in which case step 2 applies. A value too large to be epoch seconds is ignored rather than trusted, since it would read as a date far in the future and silence the warning for good.
+
+### Added
+
+- **`cache_hit` section** ([#132](https://github.com/mkalkere/claude-statusline/issues/132)) — `hit:91% miss:2`. The session-wide prompt-cache hit ratio, followed by the number of cache misses in a warning color when there have been any. A miss, in the docs' words, is a request *"that re-processed content the cache already held"* with no compaction or tool-result clearing to explain it — the expensive event, and one nothing on the status line showed before. The existing `cache` section is different: it describes the last request only.
+
+  Opt-in: add `cache_hit` to a line in a custom theme (`~/.claude/claude-status-theme.json`). It is not part of the built-in themes, matching how `cache_age`, `thinking`, `pr`, `cost_rate` and `context_tokens` were introduced. Colors can be overridden with the `cache_hit` and `cache_miss` theme keys. Dropped early under width pressure, alongside `cache_age`.
+
+  Details worth knowing:
+
+  - Hidden when `prompt_cache.caching_observed` is `false`. The docs define that as *"prompt caching is off, or your provider or gateway doesn't report it"*, and the zero ratio that accompanies it would otherwise render as `hit:0%` — "not reported" presented as "nothing hit".
+  - The percentage is rounded, and never rounds up to `100%`: a ratio of 0.9996 shows `99%`.
+  - `miss:` appears only for a non-zero count, and renders on its own when no ratio is available yet.
+  - Counts the main conversation only — subagent requests are not included upstream.
+
+### Changed
+
+- The `_parse_start_time_ms` docstring no longer says the subagent `startTime` format is undocumented: the docs now give it as *"milliseconds since the Unix epoch"*. The tolerant parser (ISO-8601, epoch seconds, epoch milliseconds) is kept as is for payloads from older Claude Code builds. No behaviour change.
+
+### Notes
+
+- 807 tests pass (+31): the `cache_age` threshold under a 1-hour and a 5-minute lifetime, `expires_at` overriding both lifetime and age in each direction, the documented `null`, sixteen malformed shapes each proven to behave like an absent field at both a warm and a cold age, and a millisecond-sized expiry being refused; per-field validation of the `prompt_cache` block (documented payload, absent/non-dict, zeros kept as data, bounds, bools rejected, numeric strings, one bad field not affecting the others); and the `cache_hit` section end to end (both parts, each alone, rounding, the 100% cap, every hidden path, the `caching_observed` veto, colors and null theme keys, opt-in status, drop lists). Pure stdlib, zero dependencies, as always.
+- Field names and semantics were read from the official statusline documentation on 2026-10-11 and are quoted above rather than paraphrased. No live `prompt_cache` payload was captured for this release; the handling is built from the documented contract and is defensive about every field.
+- Not consumed in this release: `rate_limits.spend_limit` (applies only behind a spend-limited gateway) and the subagent `agentType` field.
+
 ## [0.15.2] - 2026-10-11
 
 ### Fixed

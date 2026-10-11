@@ -79,7 +79,8 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Git Worktree | `gwt` | Indicator when inside a native git worktree |
 | Tool Calls | `tools:42` | Number of tool calls in current session |
 | Activity | `act:3` | Live tool-call counter for the current assistant turn — resets on each user prompt (opt-in; reads transcript tail, 5s cache, hidden when zero) |
-| Cache Age | `cache_age:4m12s` | Time since the last assistant turn — a cue for how long a task has run and whether the ~5-min prompt cache is still warm. Warning color past 5 min. Reads the last assistant message timestamp from the transcript tail (opt-in; 5s cache, hidden when unavailable). |
+| Cache Age | `cache_age:4m12s` | Time since the last assistant turn — a cue for how long a task has run and whether the prompt cache is still warm. Switches to a warning color once the cache has gone cold: on Claude Code v2.1.251+ that follows the session's real cache expiry or lifetime (5 minutes or 1 hour) from `prompt_cache` on stdin; on older versions it assumes 5 minutes. Reads the last assistant message timestamp from the transcript tail (opt-in; 5s cache, hidden when unavailable). |
+| Cache Hit | `hit:91% miss:2` | Session-wide prompt-cache hit ratio, plus the number of cache misses (requests that re-processed content the cache already held) in a warning color when there are any. Differs from Cache above, which describes the last request only. Reads `prompt_cache.hit_ratio` / `prompt_cache.misses` from stdin (Claude Code v2.1.251+); hidden on older versions and when caching is off or not reported. Opt-in via custom theme. |
 | Sessions Today | `sessions:3` | How many sessions you've started today |
 | Session Name | `✦ refactor auth` | Custom session name (via `--name` or `/rename`) |
 | Vim Mode | `NORMAL` | Blue for NORMAL, green for INSERT |
@@ -92,7 +93,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Thinking | `think` | Shown when extended thinking is enabled for the session. Reads `thinking.enabled` from stdin; surfaces only the on state (an off badge would be noise). Opt-in via custom theme. |
 | Pull Request | `PR#86 ok` / `MR#42 ok` | Current pull request (GitHub) or merge request (GitLab) number when detected, clickable to its page via OSC 8. Renders `MR#` when Claude Code reports `pr.kind` as `mr` (v2.1.234+), `PR#` otherwise. Reads `pr.number` / `pr.url` from stdin (newer Claude Code releases) with `github.pr_number` / `github.pr_url` as a fallback for older releases. When `pr.review_state` is present, a short status token follows the number: `ok` (approved), `chg` (changes requested), `rev` (pending review), `draft`. For GitLab merge requests `ok` reflects that GitLab reports the MR *mergeable*, which is not the same as a human approval. Opt-in via custom theme. |
 | Cost Breakdown | `mcp:$0.80` | Largest non-base cost category from `cost.by_category` (newer Claude Code releases). Falls back to `other:$N` (sum) when no single category exceeds $0.01 but multiple together do. Opt-in via custom theme. |
-| Version | `v0.15.2` | claude-status version |
+| Version | `v0.16.0` | claude-status version |
 | CC Version | `CC:2.1.219` | Claude Code application version |
 | Clock | `15:30` | Current time |
 

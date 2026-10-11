@@ -54,7 +54,7 @@ Line 1: context bar, tokens (in/out), cache %, cost, budget, burn rate, rate lim
 
 Line 2: duration, API latency, tokens/sec, lines changed, git branch, git extras (stash/sync), git state (merge/rebase/conflict), commit age, tool calls, sessions today, session name, vim mode, agent, worktree, model, output style, added dirs, git worktree, effort level (low/high/xhigh/max), version, CC version, clock
 
-Opt-in sections (added to a custom theme's line list, not in the built-in themes): cost rate (`~$3.6/hr` projected session cost per hour), context tokens (`ctx:412K/1M` absolute context usage), cache age (time since the last assistant turn), thinking, pull request (with review state), cost breakdown (largest non-base `cost.by_category` entry).
+Opt-in sections (added to a custom theme's line list, not in the built-in themes): cost rate (`~$3.6/hr` projected session cost per hour), context tokens (`ctx:412K/1M` absolute context usage), cache age (time since the last assistant turn; warns once the prompt cache has gone cold), cache hit (`hit:91% miss:2` session prompt-cache hit ratio and misses), thinking, pull request (with review state), cost breakdown (largest non-base `cost.by_category` entry).
 
 ## Per-Subagent Status Rows
 
@@ -74,7 +74,7 @@ Recognized values: `low`, `medium`, `high`, `xhigh`, `max`. The `medium` default
 
 ## StatusLine JSON Fields (from Claude Code stdin)
 
-model.id, model.display_name, cwd, workspace.current_dir, workspace.project_dir, workspace.added_dirs, workspace.git_worktree, cost.total_cost_usd, cost.total_duration_ms, cost.total_api_duration_ms, cost.total_lines_added, cost.total_lines_removed, context_window.used_percentage, context_window.remaining_percentage, context_window.context_window_size, context_window.current_usage.*, exceeds_200k_tokens, rate_limits.five_hour.used_percentage, rate_limits.five_hour.resets_at, rate_limits.seven_day.used_percentage, rate_limits.seven_day.resets_at, session_id, session_name, transcript_path, version, output_style.name, vim.mode, agent.name, worktree.name, worktree.path, worktree.branch, effort.level (v2.1.119+), thinking.enabled (v2.1.119+, not currently rendered)
+model.id, model.display_name, cwd, workspace.current_dir, workspace.project_dir, workspace.added_dirs, workspace.git_worktree, cost.total_cost_usd, cost.total_duration_ms, cost.total_api_duration_ms, cost.total_lines_added, cost.total_lines_removed, context_window.used_percentage, context_window.remaining_percentage, context_window.context_window_size, context_window.current_usage.*, exceeds_200k_tokens, rate_limits.five_hour.used_percentage, rate_limits.five_hour.resets_at, rate_limits.seven_day.used_percentage, rate_limits.seven_day.resets_at, session_id, session_name, transcript_path, version, output_style.name, vim.mode, agent.name, worktree.name, worktree.path, worktree.branch, effort.level (v2.1.119+), thinking.enabled (v2.1.119+, not currently rendered), prompt_cache.ttl, prompt_cache.expires_at, prompt_cache.hit_ratio, prompt_cache.misses, prompt_cache.caching_observed (v2.1.251+)
 
 ## Architecture
 
