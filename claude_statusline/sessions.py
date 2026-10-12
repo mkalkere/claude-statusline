@@ -716,7 +716,8 @@ def _read_status_config():
     """Read ~/.claude/claude-status-budget.json once, cache all values.
 
     Returns:
-        Dict with 'budget', 'threshold', 'disabled', and 'clickable_links'.
+        Dict with 'budget', 'threshold', 'disabled', 'clickable_links',
+        'budget_scope' and 'spill'.
     """
     cached = _read_cache("status_config")
     if cached is not None:
@@ -728,11 +729,21 @@ def _read_status_config():
         "disabled": [],
         "clickable_links": False,
         "budget_scope": "daily",
+        "spill": None,
     }
     path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        # Read first, before the float() conversions below: one of
+        # those raising on a malformed neighbour (a budget of "abc")
+        # must not silently discard an explicit opt-out.
+        # Tri-state: a literal true/false overrides the theme's own
+        # setting; anything else (absent, null, "yes", 1) leaves the
+        # theme in charge.
+        spill = data.get("spill_overflow")
+        if isinstance(spill, bool):
+            result["spill"] = spill
         budget = data.get("daily_budget_usd")
         if budget is not None:
             result["budget"] = float(budget)
@@ -1129,6 +1140,50 @@ def get_disabled_sections():
     """
     config = _read_status_config()
     return config.get("disabled", [])
+
+
+def get_spill_override():
+    """Read the user's override for moving overflow sections up a row.
+
+    Expected format: {"spill_overflow": false} (or true)
+    Uses 30s cache shared with budget/compaction config.
+
+    Returns:
+        True or False when the config file says so explicitly, None
+        when it does not (the theme's own "spill" setting then applies).
+    """
+    config = _read_status_config()
+    value = config.get("spill")
+    return value if isinstance(value, bool) else None
+
+
+def read_spill_setting_raw():
+    """The `spill_overflow` value exactly as written, for --doctor.
+
+    Bypasses the shared config cache and the bool check on purpose:
+    the point is to show the user what is in the file, including a
+    value that get_spill_override() ignores (a quoted "false", a 0).
+
+    Returns:
+        (state, value). `state` is "absent" when there is no config
+        file or no such key, "unreadable" when the file exists but is
+        not a JSON object this module can parse (in which case NONE of
+        its settings apply, whatever it appears to say), and "present"
+        with the raw value otherwise.
+    """
+    path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
+    if not os.path.isfile(path):
+        return "absent", None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError, RecursionError):
+        return "unreadable", None
+    if not isinstance(data, dict):
+        return "unreadable", None
+    if "spill_overflow" not in data:
+        return "absent", None
+    return "present", data["spill_overflow"]
 
 
 def get_clickable_links_enabled():

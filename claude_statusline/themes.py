@@ -20,9 +20,14 @@ import os
 
 from . import colors
 
+# Theme key "spill": when True, a section that does not fit on its own
+# row may be shown on a row above that has room (see cli._spill_dropped
+# for the rules). Set on the six full themes. `minimal` and `focus` are
+# sparse by design and leave it unset, which means off.
 THEMES = {
     "default": {
         "name": "default",
+        "spill": True,
         "separator": " │ ",
         "bar_filled": "█",
         "bar_empty": "░",
@@ -135,6 +140,7 @@ THEMES = {
     },
     "powerline": {
         "name": "powerline",
+        "spill": True,
         "separator": " \ue0b0 ",
         "bar_filled": "█",
         "bar_empty": "░",
@@ -192,6 +198,7 @@ THEMES = {
     },
     "nord": {
         "name": "nord",
+        "spill": True,
         "separator": " │ ",
         "bar_filled": "█",
         "bar_empty": "░",
@@ -249,6 +256,7 @@ THEMES = {
     },
     "tokyo-night": {
         "name": "tokyo-night",
+        "spill": True,
         "separator": " │ ",
         "bar_filled": "█",
         "bar_empty": "░",
@@ -306,6 +314,7 @@ THEMES = {
     },
     "gruvbox": {
         "name": "gruvbox",
+        "spill": True,
         "separator": " │ ",
         "bar_filled": "█",
         "bar_empty": "░",
@@ -363,6 +372,7 @@ THEMES = {
     },
     "rose-pine": {
         "name": "rose-pine",
+        "spill": True,
         "separator": " │ ",
         "bar_filled": "█",
         "bar_empty": "░",
@@ -541,6 +551,10 @@ def load_custom_theme():
     base = THEMES.get(base_name, THEMES["default"])
     theme = copy.deepcopy(base)
     theme["name"] = "custom"
+    # A custom layout is deliberate, so sections never move between its
+    # rows unless the file asks for it — the base theme's setting is
+    # NOT inherited. Strict bool: only a literal `true` opts in.
+    theme["spill"] = user.get("spill") is True
 
     # Override simple keys
     for key in ("separator", "bar_filled", "bar_empty", "bar_left", "bar_right"):

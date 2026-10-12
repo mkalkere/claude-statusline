@@ -74,7 +74,7 @@ Cache files are:
 
 ### Responsive Layout
 
-Two-stage adaptation prevents Line 2 truncation under Claude Code's `wrap:"truncate"` Ink behavior (anthropics/claude-code#28750) while still showing as much detail as the terminal can hold.
+Staged adaptation (two stages always, a third on wide terminals) prevents Line 2 truncation under Claude Code's `wrap:"truncate"` Ink behavior (anthropics/claude-code#28750) while still showing as much detail as the terminal can hold.
 
 **Stage 1 — coarse pre-filter** (`_apply_responsive`) picks an eligible section list by terminal-width bucket. Sections in `_COMPACT_DROP` are skipped before rendering on terminals where they won't fit, avoiding the cost of git subprocess calls and file scans on narrow terminals:
 
@@ -86,6 +86,10 @@ Two-stage adaptation prevents Line 2 truncation under Claude Code's `wrap:"trunc
 
 Truly essential sections (bar, tokens, cost, branch, ctx_warning) are deliberately omitted from `_FIT_DROP_PRIORITY` and never dropped — losing those would defeat the statusline's purpose.
 
+**Stage 3 — overflow spill** (`_spill_dropped`, gated by `_spill_enabled`) shows sections stage 2 dropped on a row above that has room. Stages 1 and 2 treat each row on its own, which left Line 1 with unused columns while Line 2 shed sections. Candidates are tried in reverse drop order (most important first); each goes to the nearest row above with room and is appended after that row's native sections. The row a section came from is left exactly as stage 2 produced it — stage 3 only ever adds to rows above. It never moves a section down, never fills a row stage 2 left empty, never exceeds the fitted width, never moves a section in `_SPILL_HOME_ONLY` (the branch's companions and the unlabelled sections), and on a row that receives a section moves that row's context warning to the end. It is a pure function of the payload and the width — no state is kept between renders.
+
+Stage 3 runs only when all three hold: the relaxed-layout gate passes (`_relaxed_layout_gate`: Claude Code 2.1.141+ and a width a real probe reported), the terminal is at least `_SPILL_MIN_COLS` (160) wide, and spill is on — the theme's `spill` flag (true on the six full themes, unset on `minimal` / `focus`, and reset to false for custom themes unless the theme file sets it), or the `spill_overflow` override in `claude-status-budget.json`. `--doctor` reports the override as written and the width conditions.
+
 ## Themes
 
 Each theme is a dict with:
@@ -94,6 +98,7 @@ Each theme is a dict with:
 - `bar_filled`, `bar_empty`, `bar_left`, `bar_right` — progress bar characters
 - `bar_width` — bar character width (default: 20, focus: 12)
 - `line1`, `line2` — ordered lists of section names to render
+- `spill` — optional; `True` lets stage 3 move overflow sections up a row (see Responsive Layout)
 - `colors` — dict mapping color keys to ANSI escape codes
 
 Custom themes override any keys from a base theme via `~/.claude/claude-status-theme.json`.
@@ -103,7 +108,7 @@ Custom themes override any keys from a base theme via `~/.claude/claude-status-t
 | File | Purpose |
 |------|---------|
 | `~/.claude/settings.json` | Claude Code settings, includes `statusLine` config |
-| `~/.claude/claude-status-budget.json` | Daily budget limit and compaction threshold |
+| `~/.claude/claude-status-budget.json` | Daily budget limit, compaction threshold, disabled sections, clickable links, overflow-spill override |
 | `~/.claude/claude-status-theme.json` | Custom theme overrides |
 | `~/.claude/sessions/*.json` | Session metadata (startedAt, pid, entrypoint) |
 | `~/.claude/projects/<slug>/*.jsonl` | Session conversation data (tool call counting) |

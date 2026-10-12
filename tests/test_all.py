@@ -9021,14 +9021,20 @@ _OMIT_PC = object()
 
 
 class _FixedClock(object):
-    """Stand-in for the `time` module with a frozen time(); everything
-    else passes through to the real module."""
+    """Stand-in for the `time` module with a frozen clock: time()
+    returns the fixed instant and a strftime() with no explicit time
+    formats that same instant (in UTC, so the result does not depend
+    on the machine's timezone). Everything else passes through to the
+    real module."""
 
     def __init__(self, now):
         self._now = now
 
     def time(self):
         return self._now
+
+    def strftime(self, fmt, t=None):
+        return time.strftime(fmt, time.gmtime(self._now) if t is None else t)
 
     def __getattr__(self, name):
         return getattr(time, name)
@@ -10263,6 +10269,898 @@ class TestMainDiagnostics(unittest.TestCase):
         decode error and escaped as a traceback."""
         out, _ = self._main("[" * 100000)
         self.assertEqual(out, "?\n")
+
+
+class TestSpillDropped(unittest.TestCase):
+    """#121, stage 3 in isolation: _spill_dropped on synthetic rows.
+    Each section's text is as many characters as its stated width, so
+    every case shows its own arithmetic. Separator width 3, as in the
+    themes."""
+
+    SEP = 3
+    PRIORITY = ["p0", "p1", "p2", "p3", "git_extras", "lines"]
+
+    def _sec(self, name, width):
+        return (name, name[0] * width)
+
+    def _spill(self, rows, target, priority=None):
+        from claude_statusline.cli import _spill_dropped
+        out = _spill_dropped(rows, self.SEP, target,
+                             self.PRIORITY if priority is None else priority)
+        return [[name for name, _ in row] for row in out]
+
+    def test_nothing_dropped_changes_nothing(self):
+        a, b = self._sec("a", 10), self._sec("b", 10)
+        rows = [([a], [a]), ([b], [b])]
+        self.assertEqual(self._spill(rows, 100), [["a"], ["b"]])
+
+    def test_moves_up_and_is_appended_after_the_host_sections(self):
+        h1, h2 = self._sec("h1", 10), self._sec("h2", 10)
+        a, p1 = self._sec("a", 30), self._sec("p1", 6)
+        # Host is 10 + 3 + 10 = 23 wide; with p1 it is 23 + 3 + 6 = 32.
+        rows = [([h1, h2], [h1, h2]), ([p1, a], [a])]
+        self.assertEqual(self._spill(rows, 32), [["h1", "h2", "p1"], ["a"]])
+        self.assertEqual(self._spill(rows, 31), [["h1", "h2"], ["a"]])
+
+    def test_the_home_row_is_left_exactly_as_the_fit_made_it(self):
+        """A dropped section is never put back on its own row, even
+        when it would fit: re-inserting made sections swap rows every
+        time the home row's width moved by a column or two."""
+        h, a, p1 = self._sec("h", 5), self._sec("a", 5), self._sec("p1", 5)
+        rows = [([h], [h]), ([a, p1], [a])]
+        self.assertEqual(self._spill(rows, 40), [["h", "p1"], ["a"]])
+        # With no row above, it simply stays dropped.
+        self.assertEqual(self._spill([([a, p1], [a])], 40), [["a"]])
+
+    def test_never_moves_down(self):
+        a, p1, b = self._sec("a", 10), self._sec("p1", 10), self._sec("b", 3)
+        rows = [([a, p1], [a]), ([b], [b])]
+        self.assertEqual(self._spill(rows, 100), [["a"], ["b"]])
+
+    def test_nearest_row_above_wins(self):
+        top, mid = self._sec("t", 5), self._sec("m", 5)
+        a, p1 = self._sec("a", 30), self._sec("p1", 5)
+        rows = [([top], [top]), ([mid], [mid]), ([a, p1], [a])]
+        self.assertEqual(self._spill(rows, 30),
+                         [["t"], ["m", "p1"], ["a"]])
+        # ...and the next one up is used when the nearest is full.
+        wide_mid = self._sec("m", 28)
+        rows = [([top], [top]), ([wide_mid], [wide_mid]), ([a, p1], [a])]
+        self.assertEqual(self._spill(rows, 30),
+                         [["t", "p1"], ["m"], ["a"]])
+
+    def test_an_empty_row_is_never_filled(self):
+        """A row the fit left empty stays empty. Stage 3 must not add
+        a row the layout did not have."""
+        a, p1 = self._sec("a", 30), self._sec("p1", 5)
+        rows = [([], []), ([a, p1], [a])]
+        self.assertEqual(self._spill(rows, 100), [[], ["a"]])
+        # An empty row in between is skipped, not a barrier.
+        h = self._sec("h", 5)
+        rows = [([h], [h]), ([], []), ([a, p1], [a])]
+        self.assertEqual(self._spill(rows, 100), [["h", "p1"], [], ["a"]])
+
+    def test_home_only_sections_are_never_moved(self):
+        from claude_statusline.cli import _SPILL_HOME_ONLY
+        self.assertEqual(_SPILL_HOME_ONLY, frozenset({
+            "git_extras", "git_state", "worktree", "git_worktree",
+            "commit_age", "lines", "duration", "vim", "agent"}))
+        h, a = self._sec("h", 5), self._sec("a", 30)
+        for name in sorted(_SPILL_HOME_ONLY):
+            g = self._sec(name, 5)
+            rows = [([h], [h]), ([a, g], [a])]
+            self.assertEqual(
+                self._spill(rows, 100, priority=[name, "p1"]),
+                [["h"], ["a"]], name)
+        # Control: an ordinary section in the same spot does move.
+        p1 = self._sec("p1", 5)
+        rows = [([h], [h]), ([a, p1], [a])]
+        self.assertEqual(self._spill(rows, 100), [["h", "p1"], ["a"]])
+
+    def test_every_home_only_name_is_a_real_droppable_section(self):
+        """A typo in the set would silently exempt nothing."""
+        from claude_statusline.cli import (
+            _SPILL_HOME_ONLY, _FIT_DROP_PRIORITY)
+        for name in _SPILL_HOME_ONLY:
+            self.assertIn(name, _FIT_DROP_PRIORITY)
+
+    def test_most_important_candidate_is_placed_first(self):
+        """Room for one of two: the one later in the drop order (the
+        more important) gets it, whatever their position on the row."""
+        # Host 18 wide: one more (3 + 6) makes 27, a second makes 36.
+        h, a = self._sec("h", 18), self._sec("a", 30)
+        p1, p3 = self._sec("p1", 6), self._sec("p3", 6)
+        for home in ([p1, p3, a], [p3, p1, a]):
+            rows = [([h], [h]), (home, [a])]
+            self.assertEqual(self._spill(rows, 30)[0], ["h", "p3"])
+
+    def test_equal_priority_goes_to_the_higher_row_first(self):
+        """Same section name dropped from two rows, room for one."""
+        h = self._sec("h", 18)
+        a, b = self._sec("a", 30), self._sec("b", 30)
+        first, second = ("p1", "111111"), ("p1", "222222")
+        rows = [([h], [h]), ([a, first], [a]), ([b, second], [b])]
+        from claude_statusline.cli import _spill_dropped
+        out = _spill_dropped(rows, self.SEP, 30, self.PRIORITY)
+        # Row 1's copy reaches row 0; row 2's finds row 1 full.
+        self.assertEqual(out[0], [h, first])
+        self.assertEqual(out[1], [a])
+
+    def test_a_candidate_that_fits_nowhere_does_not_block_the_next(self):
+        h, a = self._sec("h", 10), self._sec("a", 30)
+        big, small = self._sec("p3", 40), self._sec("p1", 6)
+        rows = [([h], [h]), ([big, small, a], [a])]
+        self.assertEqual(self._spill(rows, 30), [["h", "p1"], ["a"]])
+
+    def test_guests_are_ordered_by_home_row_then_position(self):
+        h = self._sec("h", 2)
+        a, b = self._sec("a", 40), self._sec("b", 40)
+        p0, p1, p2, p3 = (self._sec(n, 2) for n in ("p0", "p1", "p2", "p3"))
+        rows = [([h], [h]), ([p3, a, p0], [a]), ([p2, b, p1], [b])]
+        self.assertEqual(self._spill(rows, 40)[0],
+                         ["h", "p3", "p0", "p2", "p1"])
+
+    def test_context_warning_stays_last_on_its_row(self):
+        """The context warning is an alert: guests go in front of it,
+        not after it."""
+        bar, warn = self._sec("bar", 10), ("ctx_warning", "!CTX")
+        a, p1, p2 = self._sec("a", 30), self._sec("p1", 4), self._sec("p2", 4)
+        rows = [([bar, warn], [bar, warn]), ([p1, a, p2], [a])]
+        self.assertEqual(self._spill(rows, 40),
+                         [["bar", "p1", "p2", "ctx_warning"], ["a"]])
+        # A row without one is unaffected.
+        rows = [([bar], [bar]), ([p1, a, p2], [a])]
+        self.assertEqual(self._spill(rows, 40), [["bar", "p1", "p2"], ["a"]])
+
+    def test_a_row_that_receives_nothing_is_not_reordered(self):
+        """Keeping the warning last is about not burying it behind
+        guests. A theme that puts it first on a row keeps it first
+        when nothing moves onto that row — top row or bottom row."""
+        warn, bar = ("ctx_warning", "!CTX"), self._sec("bar", 10)
+        a, p1 = self._sec("a", 30), self._sec("p1", 50)
+        # p1 is too wide to go anywhere: no row receives a guest.
+        rows = [([warn, bar], [warn, bar]), ([a, p1], [a])]
+        self.assertEqual(self._spill(rows, 40),
+                         [["ctx_warning", "bar"], ["a"]])
+        # The bottom row can never receive one, so it is never touched.
+        rows = [([bar], [bar]), ([warn, a, p1], [warn, a])]
+        self.assertEqual(self._spill(rows, 40),
+                         [["bar"], ["ctx_warning", "a"]])
+        # ...and once a guest does arrive, the warning goes last.
+        small = self._sec("p1", 4)
+        rows = [([warn, bar], [warn, bar]), ([a, small], [a])]
+        self.assertEqual(self._spill(rows, 40),
+                         [["bar", "p1", "ctx_warning"], ["a"]])
+
+    def test_a_dropped_section_outside_the_priority_list_stays_dropped(self):
+        h, a, x = self._sec("h", 2), self._sec("a", 5), self._sec("x", 2)
+        rows = [([h], [h]), ([a, x], [a])]
+        self.assertEqual(self._spill(rows, 100), [["h"], ["a"]])
+
+    def test_a_name_listed_twice_in_the_priority_uses_its_first_rank(self):
+        """`worktree` appears twice in the real drop order; the fit
+        acts on the first occurrence, and so does this."""
+        h, a = self._sec("h", 18), self._sec("a", 30)
+        p0, p1 = self._sec("p0", 6), self._sec("p1", 6)
+        rows = [([h], [h]), ([p0, p1, a], [a])]
+        # p0 ranks first (index 0) despite the later duplicate, so p1
+        # is the more important of the two and takes the one slot.
+        self.assertEqual(
+            self._spill(rows, 30, priority=["p0", "p1", "p0"])[0],
+            ["h", "p1"])
+
+    def test_measures_visible_width_not_string_length(self):
+        from claude_statusline.cli import _spill_dropped
+        h, a = self._sec("h", 20), self._sec("a", 30)
+        colored = ("p1", "\x1b[32m" + "x" * 7 + "\x1b[0m")   # 7 visible
+        rows = [([h], [h]), ([a, colored], [a])]
+        out = _spill_dropped(rows, self.SEP, 30, self.PRIORITY)
+        self.assertEqual([n for n, _ in out[0]], ["h", "p1"])
+        out = _spill_dropped(rows, self.SEP, 29, self.PRIORITY)
+        self.assertEqual([n for n, _ in out[0]], ["h"])
+        # An OSC 8 hyperlink wrapper is invisible as well.
+        linked = ("p1", "\x1b]8;;https://example.com/pull/1\x1b\\"
+                        + "x" * 7 + "\x1b]8;;\x1b\\")
+        rows = [([h], [h]), ([a, linked], [a])]
+        out = _spill_dropped(rows, self.SEP, 30, self.PRIORITY)
+        self.assertEqual([n for n, _ in out[0]], ["h", "p1"])
+
+    def test_properties_hold_over_random_layouts(self):
+        """4,000 seeded random layouts, with `kept` produced by the
+        real per-row fit. Seeded, so the run is identical every time."""
+        import random
+        from claude_statusline.cli import (
+            _spill_dropped, _fit_to_width, _visible_width, _SPILL_HOME_ONLY)
+        rng = random.Random(121)
+        fixed = sorted(_SPILL_HOME_ONLY)
+        priority = ["p0", "p1", "p2", "p3"] + fixed
+        names = ["e0", "e1", "ctx_warning"] + priority
+        moved_any = dropped_any = False
+        for _ in range(4000):
+            target = rng.randint(12, 60)
+            # As in a real render, a section belongs to one row only:
+            # deal the names out across the rows.
+            row_count = rng.randint(1, 4)
+            dealt = [[] for _ in range(row_count)]
+            for name in rng.sample(names, rng.randint(0, len(names))):
+                dealt[rng.randrange(row_count)].append(name)
+            rows = []
+            for picked in dealt:
+                named = [(n, n[0] * rng.randint(1, 14)) for n in picked]
+                rows.append((named, _fit_to_width(
+                    named, self.SEP, target, priority)))
+            out = _spill_dropped(rows, self.SEP, target, priority)
+            self.assertEqual(len(out), len(rows))
+            row_widths = [
+                sum(_visible_width(text) for _, text in row)
+                + self.SEP * max(0, len(row) - 1) for row in out]
+            placed = set(item for (_, kept), row in zip(rows, out)
+                         for item in row if item not in kept)
+            for index, ((named, kept), row) in enumerate(zip(rows, out)):
+                natives = [item for item in row if item in kept]
+                guests = [item for item in row if item not in kept]
+                moved_any = moved_any or bool(guests)
+                dropped_any = dropped_any or len(kept) < len(named)
+                # Nothing the fit kept is lost, and nothing is added
+                # to a row the fit left empty.
+                self.assertEqual(sorted(natives), sorted(kept))
+                if not kept:
+                    self.assertEqual(row, [])
+                if not guests:
+                    # Untouched rows come back exactly as they went in.
+                    self.assertEqual(row, kept)
+                else:
+                    # The row's own sections keep their order, with
+                    # only the warning moved behind the guests.
+                    own = [i for i in kept if i[0] != "ctx_warning"]
+                    self.assertEqual(row[:len(own)], own)
+                    if any(i[0] == "ctx_warning" for i in kept):
+                        self.assertEqual(row[-1][0], "ctx_warning")
+                # Maximal: a movable section that is still dropped
+                # fits on no non-empty row above its own.
+                for item in named:
+                    if (item in kept or item in placed
+                            or item[0] in _SPILL_HOME_ONLY
+                            or item[0] not in priority):
+                        continue
+                    for host in range(index):
+                        if out[host]:
+                            self.assertGreater(
+                                row_widths[host] + self.SEP
+                                + _visible_width(item[1]), target)
+                for guest in guests:
+                    self.assertNotIn(guest[0], _SPILL_HOME_ONLY)
+                    # It came from a lower row, where it was dropped.
+                    self.assertTrue(any(
+                        guest in lower_named and guest not in lower_kept
+                        for lower_named, lower_kept in rows[index + 1:]))
+                if guests:
+                    self.assertLessEqual(row_widths[index], target)
+        # Not vacuous: the layouts did drop and did move sections.
+        self.assertTrue(dropped_any)
+        self.assertTrue(moved_any)
+
+
+class TestSpillEnabled(unittest.TestCase):
+    """#121: the three gates on stage 3."""
+
+    def setUp(self):
+        import claude_statusline.cli as cli_mod
+        self._cli = cli_mod
+        self._orig = cli_mod.get_spill_override
+        cli_mod.get_spill_override = lambda: None
+
+    def tearDown(self):
+        self._cli.get_spill_override = self._orig
+
+    def _enabled(self, theme=None, width=200, relaxed=True):
+        return self._cli._spill_enabled(
+            {"spill": True} if theme is None else theme, width, relaxed)
+
+    def test_on_when_every_gate_passes(self):
+        self.assertTrue(self._enabled())
+
+    def test_needs_the_relaxed_layout_gate(self):
+        """Older Claude Code, or a guessed width: a Line 1 overflow
+        there costs the user Line 2, so Line 1 is left alone."""
+        self.assertFalse(self._enabled(relaxed=False))
+
+    def test_width_floor(self):
+        self.assertFalse(self._enabled(width=159))
+        self.assertTrue(self._enabled(width=160))
+        self.assertEqual(self._cli._SPILL_MIN_COLS, 160)
+
+    def test_theme_flag_is_a_strict_true(self):
+        for off in ({}, {"spill": False}, {"spill": None}, {"spill": 1},
+                    {"spill": "true"}):
+            self.assertFalse(self._enabled(theme=off), repr(off))
+
+    def test_config_override_beats_the_theme_both_ways(self):
+        self._cli.get_spill_override = lambda: False
+        self.assertFalse(self._enabled(theme={"spill": True}))
+        self._cli.get_spill_override = lambda: True
+        self.assertTrue(self._enabled(theme={}))
+        # Every custom theme carries an explicit False; the override
+        # must win over that too.
+        self.assertTrue(self._enabled(theme={"spill": False}))
+
+    def test_config_override_cannot_bypass_the_safety_gates(self):
+        self._cli.get_spill_override = lambda: True
+        self.assertFalse(self._enabled(relaxed=False))
+        self.assertFalse(self._enabled(width=159))
+
+    def test_built_in_themes(self):
+        """On for the six full themes; the two sparse ones leave it
+        unset."""
+        on = {name for name, theme in THEMES.items()
+              if theme.get("spill") is True}
+        self.assertEqual(on, {"default", "powerline", "nord", "tokyo-night",
+                              "gruvbox", "rose-pine"})
+        for sparse in ("minimal", "focus"):
+            self.assertNotIn("spill", THEMES[sparse])
+
+    def test_relaxed_gate_is_one_decision(self):
+        """The spill gate and the layout thresholds come from the same
+        function, so they cannot disagree."""
+        from claude_statusline.cli import (
+            _relaxed_layout_gate, _layout_thresholds,
+            _FULL_LAYOUT_MIN_COLS, _FULL_LAYOUT_MIN_COLS_RELAXED)
+        for version in ("2.1.141", "2.1.197", "3.0.0", "2.1.140", "1.0.0",
+                        "", None, 7, "garbage"):
+            for confident in (True, False):
+                data = {"version": version}
+                gate = _relaxed_layout_gate(data, confident)
+                self.assertIsInstance(gate, bool)
+                full, _ = _layout_thresholds(data, confident)
+                self.assertEqual(
+                    full, _FULL_LAYOUT_MIN_COLS_RELAXED if gate
+                    else _FULL_LAYOUT_MIN_COLS, (version, confident))
+        self.assertTrue(_relaxed_layout_gate({"version": "2.1.141"}, True))
+        self.assertFalse(_relaxed_layout_gate({"version": "2.1.141"}, False))
+        self.assertFalse(_relaxed_layout_gate({"version": "2.1.140"}, True))
+        for not_a_dict in (None, "2.1.197", ["2.1.197"], 7):
+            self.assertFalse(_relaxed_layout_gate(not_a_dict, True))
+
+
+class TestSpillConfig(unittest.TestCase):
+    """#121: the two user-facing switches — `spill_overflow` in the
+    config file and `spill` in a custom theme file — and what --doctor
+    says about them."""
+
+    def setUp(self):
+        from claude_statusline import sessions as sessions_mod
+        self._sessions = sessions_mod
+        self._dir = tempfile.mkdtemp(prefix="claude-status-spillcfg-")
+        self._saved = (sessions_mod._CLAUDE_DIR, sessions_mod._read_cache,
+                       sessions_mod._write_cache)
+        sessions_mod._CLAUDE_DIR = self._dir
+        sessions_mod._read_cache = lambda *a, **k: None
+        sessions_mod._write_cache = lambda *a, **k: None
+
+    def tearDown(self):
+        (self._sessions._CLAUDE_DIR, self._sessions._read_cache,
+         self._sessions._write_cache) = self._saved
+        import shutil as shutil_mod
+        shutil_mod.rmtree(self._dir, ignore_errors=True)
+
+    def _write(self, config_text):
+        path = os.path.join(self._dir, "claude-status-budget.json")
+        if config_text is None:
+            if os.path.exists(path):
+                os.remove(path)
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(config_text)
+
+    def _override(self, config_text):
+        self._write(config_text)
+        return self._sessions.get_spill_override()
+
+    def test_explicit_true_and_false(self):
+        self.assertIs(self._override('{"spill_overflow": true}'), True)
+        self.assertIs(self._override('{"spill_overflow": false}'), False)
+
+    def test_everything_else_leaves_the_theme_in_charge(self):
+        for text in (None, "{}", '{"spill_overflow": null}',
+                     '{"spill_overflow": "false"}', '{"spill_overflow": 0}',
+                     '{"spill_overflow": 1}', '{"spill_overflow": []}',
+                     "[]", "not json", ""):
+            self.assertIsNone(self._override(text), repr(text))
+
+    def test_parser_stores_only_a_real_bool(self):
+        """The parsed config is cached to disk and shared; a non-bool
+        must not be written into it in the first place."""
+        for text, expected in (('{"spill_overflow": "false"}', None),
+                               ('{"spill_overflow": 1}', None),
+                               ('{"spill_overflow": false}', False),
+                               ('{"spill_overflow": true}', True)):
+            self._write(text)
+            self.assertIs(self._sessions._read_status_config()["spill"],
+                          expected, text)
+
+    def test_an_invalid_neighbour_does_not_discard_the_opt_out(self):
+        """A budget that cannot be parsed aborts the rest of the file.
+        An explicit `false` must already have been read by then."""
+        self.assertIs(self._override(
+            '{"daily_budget_usd": "abc", "spill_overflow": false}'), False)
+        self.assertIs(self._override(
+            '{"compaction_threshold_pct": [], "spill_overflow": true}'),
+            True)
+
+    def test_setting_survives_the_real_config_cache(self):
+        """The parsed config is written to and read back from the
+        shared on-disk cache; the setting must round-trip through it."""
+        cache_dir = os.path.join(self._dir, "cache")
+        os.makedirs(cache_dir)
+        orig_cache_dir = self._sessions._cache_dir
+        self._sessions._cache_dir = lambda: cache_dir
+        real_read, real_write = self._saved[1], self._saved[2]
+        self._sessions._read_cache = real_read
+        self._sessions._write_cache = real_write
+        try:
+            self._write('{"spill_overflow": false}')
+            self.assertIs(self._sessions.get_spill_override(), False)
+            # The file changes; the second read is served by the cache.
+            self._write('{"spill_overflow": true}')
+            self.assertIs(self._sessions.get_spill_override(), False)
+            self.assertTrue(any(
+                name.startswith("status_config")
+                for name in os.listdir(cache_dir)))
+        finally:
+            self._sessions._cache_dir = orig_cache_dir
+
+    def test_stale_cached_config_without_the_key(self):
+        """A config cached by an older version has no "spill" entry;
+        that must read as "not set", not raise."""
+        orig = self._sessions._read_status_config
+        try:
+            for cached in ({"budget": None}, {"spill": None},
+                           {"spill": "yes"}, {"spill": 1}):
+                self._sessions._read_status_config = lambda c=cached: c
+                self.assertIsNone(self._sessions.get_spill_override(),
+                                  repr(cached))
+            self._sessions._read_status_config = lambda: {"spill": False}
+            self.assertIs(self._sessions.get_spill_override(), False)
+        finally:
+            self._sessions._read_status_config = orig
+
+    def test_raw_setting_for_doctor(self):
+        raw = self._sessions.read_spill_setting_raw
+        for text, expected in (
+                (None, ("absent", None)), ("{}", ("absent", None)),
+                ('{"daily_budget_usd": 5}', ("absent", None)),
+                ("[]", ("unreadable", None)),
+                ("not json", ("unreadable", None)),
+                ('{"spill_overflow": false,}', ("unreadable", None)),
+                ("\ufeff" + '{"spill_overflow": false}',
+                 ("unreadable", None)),
+                ("[" * 100000, ("unreadable", None)),
+                ('{"spill_overflow": false}', ("present", False)),
+                ('{"spill_overflow": true}', ("present", True)),
+                ('{"spill_overflow": "false"}', ("present", "false")),
+                ('{"spill_overflow": null}', ("present", None)),
+                ('{"spill_overflow": 0}', ("present", 0))):
+            self._write(text)
+            self.assertEqual(raw(), expected, repr(text)[:40])
+
+    def _doctor(self, config_text, cols=200, detected=True):
+        import claude_statusline.cli as cli_mod
+        self._write(config_text)
+        return "\n".join(cli_mod._spill_doctor_lines(cols, detected))
+
+    def test_doctor_reports_the_setting(self):
+        self.assertIn("spill_overflow in config: not set (the theme "
+                      "decides)", self._doctor(None))
+        self.assertIn("spill_overflow in config: true (on, including for "
+                      "themes that leave it off)",
+                      self._doctor('{"spill_overflow": true}'))
+        self.assertIn("spill_overflow in config: false (off for every "
+                      "theme)", self._doctor('{"spill_overflow": false}'))
+
+    def test_doctor_says_when_the_file_cannot_be_read(self):
+        """A file that will not parse applies NONE of its settings,
+        whatever it appears to say — "not set" would be the wrong
+        thing to tell someone who wrote `false` in it."""
+        for text in ('{"spill_overflow": false,}',
+                     "\ufeff" + '{"spill_overflow": false}', "[]"):
+            out = self._doctor(text)
+            self.assertIn("could not be read as JSON", out)
+            self.assertNotIn("not set", out)
+            self.assertNotIn("false (off", out)
+
+    def test_doctor_lists_themes_only_when_the_theme_decides(self):
+        on = "themes with it on: default, gruvbox, nord, powerline, " \
+             "rose-pine, tokyo-night"
+        off = "themes with it off: focus, minimal, and custom themes"
+        for text in (None, '{"spill_overflow": "false"}', "not json"):
+            out = self._doctor(text)
+            self.assertIn(on, out)
+            self.assertIn(off, out)
+        for text in ('{"spill_overflow": true}', '{"spill_overflow": false}'):
+            self.assertNotIn("themes with it", self._doctor(text))
+        # The two lists are derived from the themes themselves.
+        listed = set(on.split(": ")[1].split(", "))
+        self.assertEqual(listed, {name for name, theme in THEMES.items()
+                                  if theme.get("spill") is True})
+
+    def test_doctor_mentions_the_cache_delay(self):
+        self.assertIn("up to 30 seconds", self._doctor(None))
+
+    def test_doctor_flags_a_value_that_is_ignored(self):
+        """The one way to believe spill is off when it is not."""
+        for text, shown in (('{"spill_overflow": "false"}', '"false"'),
+                            ('{"spill_overflow": 0}', "0"),
+                            ('{"spill_overflow": 1}', "1"),
+                            ('{"spill_overflow": 1.0}', "1.0"),
+                            ('{"spill_overflow": null}', "null")):
+            out = self._doctor(text)
+            self.assertIn("spill_overflow in config: {} ".format(shown), out)
+            self.assertIn("IGNORED", out)
+        # A very long value is shortened, not dumped.
+        out = self._doctor('{"spill_overflow": "%s"}' % ("x" * 200))
+        self.assertIn('"' + "x" * 39 + "... ", out)
+        self.assertNotIn("x" * 41, out)
+        for fine in (None, '{"spill_overflow": true}',
+                     '{"spill_overflow": false}'):
+            self.assertNotIn("IGNORED", self._doctor(fine))
+
+    def test_doctor_reports_the_width_gates(self):
+        self.assertIn("200 cols — meets the 160-col minimum",
+                      self._doctor(None, cols=200))
+        self.assertIn("160 cols — meets", self._doctor(None, cols=160))
+        self.assertIn("159 cols — below the 160-col minimum",
+                      self._doctor(None, cols=159))
+        self.assertIn("width was detected (not guessed): True",
+                      self._doctor(None, detected=True))
+        self.assertIn("width was detected (not guessed): False",
+                      self._doctor(None, detected=False))
+        self.assertIn("Claude Code >= 2.1.141", self._doctor(None))
+
+    def _custom(self, body):
+        from claude_statusline import themes as themes_mod
+        path = os.path.join(self._dir, "theme.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(body))
+        orig = themes_mod._custom_theme_path
+        themes_mod._custom_theme_path = lambda: path
+        try:
+            return themes_mod.load_custom_theme()
+        finally:
+            themes_mod._custom_theme_path = orig
+
+    def test_custom_theme_does_not_inherit_spill(self):
+        """A custom layout is deliberate. Its base theme has spill on;
+        the custom theme must not."""
+        for body in ({}, {"base": "default"}, {"base": "nord"},
+                     {"line2": ["branch"]}):
+            self.assertIs(self._custom(body)["spill"], False, repr(body))
+        # The built-in it was copied from is untouched.
+        self.assertIs(THEMES["default"]["spill"], True)
+
+    def test_custom_theme_opts_in_with_a_literal_true(self):
+        self.assertIs(self._custom({"spill": True})["spill"], True)
+        for not_true in (False, None, 1, "true", "yes", [True]):
+            self.assertIs(self._custom({"spill": not_true})["spill"], False,
+                          repr(not_true))
+
+
+class TestSpillRender(unittest.TestCase):
+    """#121 end to end: the demo payload through render() across a
+    contiguous width sweep, spill on against spill off."""
+
+    NOW = 1_800_000_000
+
+    def setUp(self):
+        import claude_statusline.cli as cli_mod
+        import claude_statusline.formatters as formatters_mod
+        self._cli = cli_mod
+        self._formatters = formatters_mod
+        clock = _FixedClock(self.NOW)
+        stubs = {
+            "get_branch": lambda: "feat/statusline",
+            "get_remote_url": lambda: "",
+            "get_git_state": lambda: "",
+            "get_last_commit_age_ms": lambda: 300_000,
+            "get_git_extras": lambda: {"stash": 0, "ahead": 0, "behind": 0},
+            "get_clickable_links_enabled": lambda: False,
+            "get_session_tool_count": lambda sid: 42,
+            "get_today_session_count": lambda: 3,
+            "get_effort_level": lambda: "high",
+            "get_budget_config": lambda: None,
+            "get_compaction_threshold": lambda: None,
+            "get_disabled_sections": lambda: [],
+            "record_and_get_daily_spend": lambda *a, **k: (0.0, False),
+            "get_spill_override": lambda: None,
+            "get_theme": cli_mod.get_theme,
+            # One clock for every render. Two modules read the time:
+            # cli (the `clock` chip) and formatters (the rate-limit
+            # countdown). Both are pinned, so nothing can differ
+            # between the two renders a test compares, and the widths
+            # asserted below do not drift with the calendar.
+            "time": clock,
+        }
+        self._orig = {name: getattr(cli_mod, name) for name in stubs}
+        for name, fn in stubs.items():
+            setattr(cli_mod, name, fn)
+        self._orig_formatters_time = formatters_mod.time
+        formatters_mod.time = clock
+        self._env = {k: os.environ.pop(k, None) for k in (
+            "CLAUDE_STATUSLINE_WIDTH", "COLUMNS")}
+
+    def tearDown(self):
+        for name, fn in self._orig.items():
+            setattr(self._cli, name, fn)
+        self._formatters.time = self._orig_formatters_time
+        for key, value in self._env.items():
+            if value is not None:
+                os.environ[key] = value
+
+    def _data(self, cols, version="2.1.197"):
+        data = self._cli._demo_data()
+        data["terminal"] = {"columns": cols}   # a real probe: confident
+        data["version"] = version
+        data["rate_limits"]["five_hour"]["resets_at"] = self.NOW + 7200
+        data["rate_limits"]["seven_day"]["resets_at"] = self.NOW + 432000
+        return data
+
+    def _rows(self, cols, theme="default", spill=None, version="2.1.197",
+              data=None):
+        """Each row as a list of section texts."""
+        self._cli.get_spill_override = lambda: spill
+        out = self._cli.render(
+            self._data(cols, version) if data is None else data, theme)
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+        self._sep = self._cli.get_theme(theme)["separator"]
+        return [row.split(self._sep) for row in plain.split("\n")]
+
+    def _width(self, row):
+        return len(self._sep.join(row))
+
+    def test_the_clock_really_is_fixed(self):
+        """Guards the premise of every comparison in this class."""
+        row = self._rows(300, spill=False)[0]
+        self.assertIn("5h:34% 7d:18% ~2h00m", row)
+        self.assertEqual(self._rows(300, spill=False)[1][-1], "08:00")
+
+    def test_a_wide_terminal_shows_more(self):
+        """The case from the issue: Line 1 had room while Line 2
+        dropped sections. These are the figures the README and the
+        changelog quote."""
+        off = self._rows(170, spill=False)
+        on = self._rows(170)
+        self.assertEqual((len(off[0]), len(off[1])), (7, 11))
+        self.assertEqual(self._width(off[0]), 105)
+        self.assertEqual((len(on[0]), len(on[1])), (12, 11))
+        # Line 2 is exactly what the fit produced.
+        self.assertEqual(on[1], off[1])
+        # Line 1 keeps its own sections, in order, in front of the
+        # ones that moved up.
+        self.assertEqual(on[0][:7], off[0])
+        self.assertEqual(
+            [chip.split(":")[0] for chip in on[0][7:]],
+            ["tools", "sessions", "v" + self._cli.__version__, "CC", "08"])
+        self.assertEqual(on[0][-1], "08:00")
+
+    def test_figures_quoted_in_the_changelog(self):
+        full = sum(map(len, self._rows(300, spill=False)))
+        self.assertEqual(full, 23)
+        for cols, unused, shown_before, shown_now in (
+                (160, 55, 18, 22), (170, 65, 18, 23), (190, 85, 20, 23)):
+            off = self._rows(cols, spill=False)
+            on = self._rows(cols)
+            self.assertEqual(cols - self._width(off[0]), unused, cols)
+            self.assertEqual(sum(map(len, off)), shown_before, cols)
+            self.assertEqual(sum(map(len, on)), shown_now, cols)
+        # Line 1 is the same width from the relaxed full-layout
+        # threshold up, with spill off.
+        for cols in (110, 130, 160, 200, 300):
+            self.assertEqual(
+                self._width(self._rows(cols, spill=False)[0]), 105, cols)
+
+    def test_custom_theme_file_end_to_end(self):
+        """Through the real loader: a custom theme copied from the
+        default one stays as the fit left it; the same file with
+        "spill": true behaves like the default theme."""
+        from claude_statusline import themes as themes_mod
+        on_baseline = self._rows(170)
+        off_baseline = self._rows(170, spill=False)
+        self.assertNotEqual(on_baseline, off_baseline)
+        d = tempfile.mkdtemp(prefix="claude-status-spilltheme-")
+        path = os.path.join(d, "theme.json")
+        orig = themes_mod._custom_theme_path
+        themes_mod._custom_theme_path = lambda: path
+        try:
+            for body, expected in (({"base": "default"}, off_baseline),
+                                   ({"base": "default", "spill": True},
+                                    on_baseline),
+                                   ({"base": "default", "spill": "true"},
+                                    off_baseline)):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(body))
+                self.assertEqual(self._rows(170, theme="custom"), expected,
+                                 repr(body))
+        finally:
+            themes_mod._custom_theme_path = orig
+            import shutil as shutil_mod
+            shutil_mod.rmtree(d, ignore_errors=True)
+
+    def test_starts_exactly_at_the_floor(self):
+        self.assertNotEqual(self._rows(160), self._rows(160, spill=False))
+        self.assertEqual(self._rows(159), self._rows(159, spill=False))
+
+    def test_sweep_invariants(self):
+        """Every width from the floor to past the point where nothing
+        is dropped at all."""
+        gained_somewhere = False
+        for cols in range(160, 301):
+            off = self._rows(cols, spill=False)
+            on = self._rows(cols)
+            label = "at {} cols".format(cols)
+            # Same number of rows; never a new one.
+            self.assertEqual(len(on), len(off), label)
+            # Line 2 — the bottom row — is never touched.
+            self.assertEqual(on[-1], off[-1], label)
+            # Line 1 keeps what it had, in order, at the front.
+            self.assertEqual(on[0][:len(off[0])], off[0], label)
+            # Nothing appears twice.
+            shown_on = [s for row in on for s in row]
+            self.assertEqual(len(shown_on), len(set(shown_on)), label)
+            gained_somewhere = gained_somewhere or len(on[0]) > len(off[0])
+            # The safety margin still holds on every row (probe
+            # margin: 4 columns).
+            for row in on:
+                self.assertLessEqual(self._width(row), cols - 4, label)
+        # Not vacuous: the sweep must include widths where it helped.
+        self.assertTrue(gained_somewhere)
+
+    def test_branch_companions_are_never_on_line_one(self):
+        """With a stash and unpushed commits, `stash:1 sync:+2` is
+        dropped from Line 2 at these widths and must stay dropped
+        rather than appear a line away from the branch."""
+        self._cli.get_git_extras = lambda: {
+            "stash": 1, "ahead": 2, "behind": 0}
+        dropped_somewhere = False
+        for cols in range(160, 301):
+            on = self._rows(cols)
+            for chip in on[0]:
+                self.assertFalse(chip.startswith(("stash:", "sync:")), cols)
+            on_line_two = any(c.startswith("stash:") for c in on[-1])
+            dropped_somewhere = dropped_somewhere or not on_line_two
+        self.assertTrue(dropped_somewhere)
+
+    def test_context_warning_stays_at_the_end_of_line_one(self):
+        data = self._data(170)
+        data["context_window"]["used_percentage"] = 90
+        on = self._rows(170, data=data)
+        off = self._rows(170, spill=False, data=data)
+        self.assertEqual(off[0][-1], "!CTX")
+        self.assertGreater(len(on[0]), len(off[0]))
+        self.assertEqual(on[0][-1], "!CTX")
+
+    def test_everything_fits_once_the_terminal_is_wide_enough(self):
+        """Past the widest layout there is nothing to move, and spill
+        changes nothing."""
+        self.assertEqual(self._rows(300), self._rows(300, spill=False))
+
+    def test_stage_three_gets_the_same_target_and_priority_as_the_fit(self):
+        seen = []
+        real = self._cli._spill_dropped
+
+        def spy(rows, sep_width, target, priority):
+            seen.append((sep_width, target, priority))
+            return real(rows, sep_width, target, priority)
+
+        self._cli._spill_dropped = spy
+        try:
+            self._rows(170)
+        finally:
+            self._cli._spill_dropped = real
+        self.assertEqual(len(seen), 1)
+        sep_width, target, priority = seen[0]
+        self.assertEqual(sep_width, 3)
+        self.assertEqual(target, 166)      # 170 minus the probe margin
+        self.assertIs(priority, self._cli._FIT_DROP_PRIORITY)
+
+    def test_off_below_the_width_floor(self):
+        for cols in range(100, 160):
+            self.assertEqual(self._rows(cols), self._rows(cols, spill=False),
+                             cols)
+            # The override cannot force it on down here either.
+            self.assertEqual(self._rows(cols, spill=True),
+                             self._rows(cols, spill=False), cols)
+
+    def test_off_on_older_claude_code(self):
+        # 170 is a width where spill demonstrably changes the output
+        # (see test_a_wide_terminal_shows_more).
+        for version in ("2.1.140", "2.0.0", "", "garbage"):
+            for spill in (None, True):
+                self.assertEqual(
+                    self._rows(170, version=version, spill=spill),
+                    self._rows(170, version=version, spill=False),
+                    (version, spill))
+
+    def test_off_when_the_width_was_guessed(self):
+        """A width that no probe reported — the detection chain fell
+        through to its guess — leaves Line 1 alone."""
+        orig = self._cli._detect_terminal_width_report
+        self._cli._detect_terminal_width_report = lambda data=None: (
+            170, [("fallback", "170 (no signal trusted)")])
+        try:
+            self.assertEqual(self._rows(170), self._rows(170, spill=False))
+            self.assertEqual(self._rows(170, spill=True),
+                             self._rows(170, spill=False))
+        finally:
+            self._cli._detect_terminal_width_report = orig
+
+    def _with_default_layout_but(self, **overrides):
+        """A theme with the default theme's (overflowing) layout and
+        the given keys changed — so "spill off" is tested where spill
+        would otherwise visibly act."""
+        theme = dict(THEMES["default"], **overrides)
+        self._cli.get_theme = lambda name: theme
+
+    def test_a_theme_without_the_flag_is_unchanged(self):
+        baseline_on = self._rows(170)
+        baseline_off = self._rows(170, spill=False)
+        self.assertNotEqual(baseline_on, baseline_off)
+        self._with_default_layout_but(spill=False)
+        self.assertEqual(self._rows(170), baseline_off)
+        # ...and the config override turns it on for that theme.
+        self.assertEqual(self._rows(170, spill=True), baseline_on)
+
+    def test_sparse_built_in_themes_have_it_off(self):
+        """`minimal` and `focus` never overflow at these widths, so
+        the meaningful check is that the flag is off and that forcing
+        it on never adds a row to one-row `focus`."""
+        for theme in ("minimal", "focus"):
+            self.assertIsNot(THEMES[theme].get("spill"), True)
+        for cols in (160, 170, 190):
+            self.assertEqual(len(self._rows(cols, theme="focus",
+                                            spill=True)), 1)
+
+    def test_all_full_themes_gain(self):
+        for theme in ("default", "powerline", "nord", "tokyo-night",
+                      "gruvbox", "rose-pine"):
+            on = self._rows(170, theme=theme)
+            off = self._rows(170, theme=theme, spill=False)
+            self.assertGreater(sum(map(len, on)), sum(map(len, off)), theme)
+
+    def test_config_false_turns_it_off(self):
+        self.assertNotEqual(self._rows(170), self._rows(170, spill=False))
+
+    def test_a_section_listed_twice_in_one_row_renders_once(self):
+        """The render-at-most-once rule used to be enforced between
+        rows only; a name repeated inside one row slipped through, and
+        stage 3 could then place the copies separately."""
+        self._with_default_layout_but(
+            line2=list(THEMES["default"]["line2"]) + ["clock", "tools"])
+        for spill in (None, False):
+            shown = [s for row in self._rows(300, spill=spill) for s in row]
+            self.assertEqual(shown.count("08:00"), 1, spill)
+            self.assertEqual(shown.count("tools:42"), 1, spill)
+
+    def test_doctor_passes_the_detected_width_and_confidence(self):
+        """cmd_doctor's own wiring: the block must be given the width
+        the detection chain chose and whether a real probe won. The
+        width chain and the config reader are stubbed so this does not
+        probe the terminal or read the real config."""
+        seen = []
+        saved = (self._cli._detect_terminal_width_report,
+                 self._cli._spill_doctor_lines)
+        self._cli._detect_terminal_width_report = lambda data=None: (
+            173, [("stdin terminal.columns", "173 (winner)")])
+        self._cli._spill_doctor_lines = lambda cols, detected: (
+            seen.append((cols, detected)) or ["  SPILL-BLOCK"])
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self._cli.cmd_doctor()
+        finally:
+            (self._cli._detect_terminal_width_report,
+             self._cli._spill_doctor_lines) = saved
+        self.assertEqual(seen, [(173, True)])
+        self.assertIn("  SPILL-BLOCK", buf.getvalue())
 
 
 class TestPromptCacheNormalize(unittest.TestCase):

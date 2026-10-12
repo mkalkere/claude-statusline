@@ -190,6 +190,7 @@ def main():
         "get_compaction_threshold": cli.get_compaction_threshold,
         "get_disabled_sections": cli.get_disabled_sections,
         "get_clickable_links_enabled": cli.get_clickable_links_enabled,
+        "get_spill_override": cli.get_spill_override,
     }
     cli.get_session_tool_count = lambda sid: 42
     cli.get_today_session_count = lambda: 3
@@ -200,6 +201,9 @@ def main():
     cli.get_compaction_threshold = lambda: None
     cli.get_disabled_sections = lambda: []
     cli.get_clickable_links_enabled = lambda: False
+    # None = no user override: each theme's own spill setting applies,
+    # which is what a fresh install shows.
+    cli.get_spill_override = lambda: None
     orig_strftime = cli.time.strftime
     cli.time.strftime = (
         lambda fmt, *a: "15:30" if fmt == "%H:%M" else orig_strftime(fmt, *a)

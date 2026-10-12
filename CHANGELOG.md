@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-10-12
+
+### Added
+
+- **Sections that don't fit on Line 2 now use the room on Line 1** ([#121](https://github.com/mkalkere/claude-statusline/issues/121)). The layout fitted each line on its own, so a wide terminal could show a half-empty Line 1 above a Line 2 that had dropped sections. Measured on the default theme with the demo data (Claude Code 2.1.141+, detected width), Line 1 was 105 columns wide at every terminal width from 110 up:
+
+  | terminal width | Line 1 unused | sections dropped from Line 2 | shown before | shown now |
+  |---|---|---|---|---|
+  | 160 | 55 columns | 5 | 18 of 23 | 22 |
+  | 170 | 65 columns | 5 | 18 of 23 | 23 |
+  | 190 | 85 columns | 3 | 20 of 23 | 23 |
+
+  A third layout step now shows what the per-line fit dropped:
+
+  - A dropped section moves **up** to the nearest line with room and is added at the **end** of it. That line's own sections keep their order and position.
+  - The line it came from is left exactly as the fit produced it. This step only ever adds sections to a line above.
+  - The most important sections are placed first, and one that fits nowhere does not block the next.
+  - It never moves a section down, never fills a line the fit left empty, never widens a line past the fitted width, and never shows a section twice.
+  - On a line that receives a section, that line's context warning (`!CTX`) is moved to the end, so the alert is still the last thing on it.
+  - Nine sections never move, because away from their neighbours they stop meaning anything: `git_extras` (`stash:1 sync:+2`), `git_state` (`merge` / `conflict`), `worktree`, `git_worktree` and `commit_age`, which belong beside the branch, and the four with no label of their own — `lines` (`+247 -38`), `duration` (`12m05s`), `vim` (`NORMAL`) and `agent` (`[Explore]`).
+
+  At 170 columns the sections that move are `tools`, `sessions`, the version, the Claude Code version and the clock. A session whose Line 2 already fits gains nothing and is unchanged.
+
+  **Where it applies.** On terminals of 160 columns or more, on Claude Code 2.1.141 or later, when the width was detected rather than guessed — the same condition that already unlocks the relaxed layout thresholds. On older Claude Code a Line 1 that overflows can cost you Line 2 entirely, so its spare room is left as a margin.
+
+  **Themes.** On for `default`, `powerline`, `nord`, `tokyo-night`, `gruvbox` and `rose-pine`. Off for `minimal` and `focus`, which are sparse by design. Off for custom themes too, since a custom layout is deliberate: add `"spill": true` to the theme file to opt in.
+
+  **Turning it off.** `"spill_overflow": false` in `~/.claude/claude-status-budget.json` disables it for every theme; `true` enables it for a theme that leaves it off. It must be a JSON `true` or `false`; a quoted `"false"` is ignored. The override picks between the themes' defaults — it does not bypass the width and version conditions above.
+
+  **Stability.** The result is a pure function of the payload and the width; no state is kept between renders. A section at a boundary can still come and go as its neighbours change width, as with the existing per-line fit. To check that this step does not make that noticeably worse, `scripts/layout_churn.py` simulates 600-frame sessions (two seeded sessions per profile) at every second width from 160 to 220 and counts the frames in which any section's position differs from the frame before:
+
+  | simulated session | frames with a change, before | now | sections shown on average, before | now |
+  |---|---|---|---|---|
+  | busy (long branch, session name, vim and an agent toggling, stash and unpushed commits) | 1,840 | 1,894 | 20.1 | 23.5 |
+  | plain (short branch, nothing optional) | 229 | 229 | 20.7 | 21.0 |
+
+  out of 37,138 frame-to-frame transitions per row. Most of what used to be a section disappearing is now that section moving to Line 1. The figures are specific to these two profiles — a session with more sections toggling will see more changes with and without this step — and the script is in the repository so they can be re-run.
+
+- **`claude-status --doctor` reports on this.** It prints the `spill_overflow` value exactly as written in the config file — flagging one that is being ignored, such as a quoted `"false"`, and saying so when the file cannot be parsed at all — and whether the terminal meets the width conditions. The setting itself is read before the rest of the config file, so a malformed neighbouring value (a `daily_budget_usd` of `"abc"`) cannot silently discard it. A change to the file can take up to 30 seconds to show, because the parsed config is cached.
+
+### Fixed
+
+- **A section listed twice within one line of a custom theme rendered twice.** The render-at-most-once rule from v0.15.0 was enforced between lines but not inside one. The first occurrence now wins there too.
+
+### Changed
+
+- The theme screenshots and the README's opening example are regenerated: at the 165 columns they are drawn at, `tools`, `sessions`, `version`, `CC` and the clock now appear at the end of Line 1.
+
+### Notes
+
+- 922 tests pass (+60; 924 run, with 2 POSIX-only tests skipped on Windows). The placement rules are tested on synthetic rows where each section's text is as long as its stated width, plus 4,000 seeded random layouts fitted by the real per-line fit, asserting that nothing the fit kept is lost, that a row which receives nothing comes back unchanged, that guests only come from lower rows and are never one of the nine fixed sections, that an empty row stays empty, that no row with a guest exceeds the target, and that no movable section is left out while a row above still has room for it. End to end, every width from 160 to 300 is rendered with the step on and off on a fixed clock: same number of lines, Line 2 identical, Line 1's own sections first and in order, nothing twice, the safety margin intact, and at least one width where it gains. Below 160, on older Claude Code, with a guessed width and for a theme without the flag, the output is asserted identical to the step being off — at a width where it demonstrably acts.
+- The design was prototyped against the real render functions and reviewed adversarially before any code was written, and again after; the record is on the issue. The first draft moved sections to any line and applied to every theme. Review found that it gave the one-line `focus` theme a second line and stranded the stash/sync counts a full line from the branch, which is where upward-only movement, the theme exemptions and the fixed sections come from. A later version also put a dropped section back on its own line when it fitted; the session simulation showed that this made sections swap lines whenever the home line's width moved by a column or two — 1,196 changed frames against 1,098 for moving up only (957 without the step), in an earlier run over 16 widths — for no gain in sections shown, so it was removed.
+
 ## [0.16.1] - 2026-10-12
 
 Robustness release. No new features, and no change for well-formed input.
