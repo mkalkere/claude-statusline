@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.16.0] - 2026-10-11
+## [0.16.0] - 2026-10-12
 
 Prompt-cache release. Claude Code v2.1.251 started sending a `prompt_cache` object on stdin with the session's real cache lifetime, expiry and hit statistics; this release reads it. Nothing changes on older Claude Code versions.
 
