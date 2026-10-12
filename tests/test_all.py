@@ -4617,7 +4617,9 @@ class TestOutputStyleExtra(unittest.TestCase):
             "git_branch": "main",
             "output_style": {"name": ["not", "a", "string"]},
         }
-        result = render(data)
+        # Wrapped: a wrong-typed name leaves a stderr note.
+        with contextlib.redirect_stderr(io.StringIO()):
+            result = render(data)
         self.assertNotIn("style:", result)
 
     def test_output_style_missing_name_key(self):
@@ -9733,8 +9735,78 @@ class TestStdinTypeRobustness(_StdinRenderCase):
         del data["cost"]["total_lines_added"]
         del data["cost"]["total_lines_removed"]
         data["lines_added"] = "12"
+        data["lines_removed"] = "5"
+        self.assertIn("+12 -5", self._plain(data))
         data["lines_removed"] = ["x"]
-        self.assertIn("+12", self._plain(data))
+        plain = self._plain(data)
+        self.assertIn("+12", plain)
+        self.assertNotIn("-5", plain)
+        # ...and the nested value wins when both are present.
+        data = self._base()
+        data["lines_added"] = 1
+        data["lines_removed"] = 1
+        self.assertIn("+156 -23", self._plain(data))
+
+    def test_line_count_bounds(self):
+        """Only a positive, plausible count renders. A negative one
+        used to print "+-5"; an absurd one became a chip hundreds of
+        digits wide that pushed every other section off the line."""
+        from claude_statusline.cli import _normalize
+
+        def added(value):
+            with contextlib.redirect_stderr(io.StringIO()):
+                return _normalize(
+                    {"cost": {"total_lines_added": value}})["lines_added"]
+
+        self.assertEqual(added(1), 1)
+        self.assertEqual(added(10 ** 9), 10 ** 9)
+        self.assertEqual(added(12.7), 12)
+        self.assertIsInstance(added(12.0), int)
+        for hidden in (0, -5, -0.5, 0.4, 10 ** 9 + 1, 1e308, "1e308",
+                       10 ** 400, True, False, None):
+            self.assertIsNone(added(hidden), repr(hidden)[:30])
+        # An exact int is not routed through a float.
+        self.assertEqual(added(123456789), 123456789)
+        data = self._base()
+        data["cost"]["total_lines_added"] = 1e308
+        plain = self._plain(data)
+        self.assertIn("-23", plain)
+        self.assertIn("[reviewer]", plain)
+        self.assertLess(len(plain), 400)
+
+    def test_boolean_line_count_is_silent(self):
+        """A bool is not a count, but it is not garbage worth a note
+        on every refresh either."""
+        from claude_statusline.cli import _normalize
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            _normalize({"cost": {"total_lines_added": True,
+                                 "total_lines_removed": False}})
+        self.assertEqual(err.getvalue(), "")
+
+    def test_category_names_that_sanitise_alike_are_summed(self):
+        """Two raw keys can clean up to the same name. Their costs add
+        up; the later one must not overwrite the earlier."""
+        from claude_statusline.cli import _normalize
+        with contextlib.redirect_stderr(io.StringIO()):
+            n = _normalize({"cost": {"by_category": {
+                "skills": 0.1, "ski\x1blls": 0.2, "skills\x00": 0.4,
+                "mcp": 0.5, "\x1b": 9.0, "": 9.0}}})
+        self.assertEqual(sorted(n["cost_by_category"]), ["mcp", "skills"])
+        self.assertAlmostEqual(n["cost_by_category"]["skills"], 0.7)
+        self.assertEqual(n["cost_top_category_name"], "skills")
+
+    def test_flat_agent_name(self):
+        """`agent_name` is read when `agent` is absent."""
+        data = self._base()
+        del data["agent"]
+        data["agent_name"] = "flat-agent"
+        self.assertIn("[flat-agent]", self._plain(data))
+        for bad in self.NOT_A_STRING:
+            data["agent_name"] = bad
+            plain = self._plain(data)
+            self.assertNotIn("[", plain.split("\n")[1], repr(bad)[:40])
+            self.assertIn("tools:3", plain, repr(bad)[:40])
 
     def test_str_field(self):
         from claude_statusline.cli import _str_field
@@ -9756,6 +9828,8 @@ class TestStdinTypeRobustness(_StdinRenderCase):
         one space. Deleting them glued the words together."""
         from claude_statusline.cli import _str_field
         self.assertEqual(_str_field("fix login\nbug"), "fix login bug")
+        for ws in ("\t", "\n", "\r", "\x0b", "\x0c", "\x85"):
+            self.assertEqual(_str_field("a" + ws + "b"), "a b", repr(ws))
         self.assertEqual(_str_field("a\tb\r\nc\x0bd\x0ce\x85f"),
                          "a b c d e f")
 
@@ -9800,6 +9874,8 @@ class TestStdinTypeRobustness(_StdinRenderCase):
                 ({"cwd": 1}, "non-string cwd"),
                 ({"output_style": {"name": 1}},
                  "non-string output_style.name"),
+                ({"agent": {"name": 7}}, "non-string agent.name"),
+                ({"agent_name": 7}, "non-string agent_name"),
                 ({"session_id": 7}, "non-string session_id"),
                 ({"session_id": "a\nb"}, "unusable session_id"),
                 ({"cost": {"total_lines_added": "lots"}},
@@ -9845,7 +9921,12 @@ class TestStdinTypeRobustness(_StdinRenderCase):
             data["workspace"] = {}
             data["cwd"] = "/home/user/" + attack
 
+        def flat_agent(data):
+            del data["agent"]
+            data["agent_name"] = attack
+
         mutations = {
+            "agent_name (flat)": flat_agent,
             "cost.by_category key": by_category,
             "vim_mode (flat)": flat("vim_mode"),
             "worktree_branch (flat)": flat("worktree_branch"),
@@ -9860,7 +9941,7 @@ class TestStdinTypeRobustness(_StdinRenderCase):
                      ("vim", "mode"), ("version",)):
             mutations[".".join(path)] = (
                 lambda d, p=path: self._set(d, p, attack))
-        self.assertEqual(len(mutations), 14)
+        self.assertEqual(len(mutations), 15)
         for label, mutate in mutations.items():
             data = self._base()
             mutate(data)
@@ -10032,7 +10113,7 @@ class TestDiagnosticsNeverReachStdout(unittest.TestCase):
         payload = {"context_window": {"used_percentage": "junk"},
                    "cost": {"total_cost_usd": "abc"},
                    "prompt_cache": {"ttl": "zzz", "hit_ratio": 91},
-                   "version": 7, "model": "opus", "session_id": 3}
+                   "version": 7, "model": "opus", "session_id": "a\nb"}
         # Positive control: with a real stderr the same payload DOES
         # produce diagnostics, so the silence below means something.
         err = io.StringIO()

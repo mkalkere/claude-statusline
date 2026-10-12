@@ -64,6 +64,11 @@ _PROMPT_CACHE_TTL_RE = re.compile(r"([1-9][0-9]{0,3})([mh])")
 _PROMPT_CACHE_TTL_UNIT_MS = {"m": 60 * 1000, "h": 60 * 60 * 1000}
 _PROMPT_CACHE_MAX_TTL_MS = 24 * 60 * 60 * 1000
 
+# Largest line count rendered by the `lines` section. Anything above
+# it is not a real diff size, and formatting it would produce a chip
+# wide enough to push every other section off the line.
+_LINE_COUNT_MAX = 10 ** 9
+
 # Largest miss count rendered in full by `cache_hit`; above it the chip
 # shows "999+". A count is unbounded on stdin, and an absurd one would
 # otherwise widen the chip until the fit logic evicts every other
@@ -349,14 +354,28 @@ def _normalize(data):
     # Line counts are formatted straight into the output, so they get
     # the same coercion as the trio above: a string here would be
     # embedded verbatim (escape sequences included) and a list would
-    # render as its repr. Stored as ints — "+247", not "+247.0".
+    # render as its repr. Stored as ints — "+247", not "+247.0" — and
+    # only when positive and plausible: zero has always been hidden, a
+    # negative count rendered as "+-5", and a value like 1e308 would
+    # become a 300-digit chip that evicts every other section.
     for key, nested, flat in (
             ("lines_added", "total_lines_added", "lines_added"),
             ("lines_removed", "total_lines_removed", "lines_removed")):
         raw_lines = _first(cost_obj.get(nested), data.get(flat))
-        num_lines = (None if isinstance(raw_lines, bool)
-                     else _num_or_note(key, raw_lines))
-        out[key] = int(num_lines) if num_lines is not None else None
+        if isinstance(raw_lines, bool):
+            num_lines = None
+        elif isinstance(raw_lines, int):
+            # Kept exact: a float round-trip loses precision past 2**53.
+            num_lines = raw_lines
+        else:
+            num_lines = _num_or_note(key, raw_lines)
+        # Bounds are checked on the truncated value, so 0.4 is a zero
+        # (hidden), not a positive count that renders as "+0".
+        if num_lines is not None and abs(num_lines) <= _LINE_COUNT_MAX:
+            num_lines = int(num_lines)
+        else:
+            num_lines = None
+        out[key] = num_lines if num_lines and num_lines > 0 else None
 
     # Per-category cost breakdown (Claude Code v2.1.150+ exposes
     # `cost.by_category` with keys like "skills", "subagents",
@@ -391,7 +410,9 @@ def _normalize(data):
             # _safe_num's semantics ever loosen again.
             if num is None or not math.isfinite(num) or num <= 0:
                 continue
-            sane_categories[k] = float(num)
+            # Summed, not assigned: two raw keys can sanitise to the
+            # same name, and overwriting would drop one of the costs.
+            sane_categories[k] = sane_categories.get(k, 0.0) + float(num)
         out["cost_by_category"] = sane_categories
         if sane_categories:
             top_name, top_value = max(sane_categories.items(), key=lambda kv: kv[1])
@@ -572,10 +593,8 @@ def _normalize(data):
     nested_name = agent_obj.get("name")
     flat_name = data.get("agent_name")
 
-    def _real_str(v):
-        return _str_field(v) or None
-
-    out["agent_name"] = _real_str(nested_name) or _real_str(flat_name)
+    out["agent_name"] = (_str_field(nested_name, "agent.name")
+                         or _str_field(flat_name, "agent_name") or None)
 
     # Worktree (nested or flat) — same isinstance guard.
     wt_obj = data.get("worktree")
@@ -2377,9 +2396,10 @@ def render(data, theme_name="default"):
     sep = colorize(theme["separator"], theme["colors"]["separator"])
     sep_width = _visible_width(sep)
 
-    # Detect terminal width via fallback chain — Claude Code's
-    # statusLine subprocess context hides this from us, so naive
-    # `shutil.get_terminal_size()` always returns the fallback. See
+    # Detect terminal width via fallback chain — the statusLine
+    # subprocess has no TTY, so on Claude Code releases that predate
+    # the COLUMNS/LINES handoff a naive `shutil.get_terminal_size()`
+    # returns its fallback. See
     # `_detect_terminal_width()` for the full chain (stdin JSON →
     # COLUMNS → shutil → /dev/tty stty/tput → compact default).
     # _detect_terminal_width_report() returns (winner, report). The
