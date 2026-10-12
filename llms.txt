@@ -69,7 +69,7 @@ Recognized values: `low`, `medium`, `high`, `xhigh`, `max`. The `medium` default
 ## Configuration Files
 
 - `~/.claude/settings.json` — statusLine config (type, command, refreshInterval)
-- `~/.claude/claude-status-budget.json` — daily_budget_usd, compaction_threshold_pct, clickable_links, disabled_sections
+- `~/.claude/claude-status-budget.json` — daily_budget_usd, compaction_threshold_pct, clickable_links, disabled_sections, spill_overflow (true/false: whether sections that do not fit on one line may move up to a line with room)
 - `~/.claude/claude-status-theme.json` — custom theme overrides
 
 ## StatusLine JSON Fields (from Claude Code stdin)

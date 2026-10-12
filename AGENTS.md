@@ -91,7 +91,7 @@ Prints Python version, install path, settings.json status, config files, write p
 - **No daemon, no network, no background processes** — runs as a stdin-to-stdout pipe in single-digit milliseconds. Cannot leak data or affect other processes.
 - **Configuration files** all live under `~/.claude/`:
   - `settings.json` — Claude Code's own config; we add a `statusLine` key.
-  - `claude-status-budget.json` — daily budget, compaction threshold, OSC 8 toggle, disabled sections (all optional).
+  - `claude-status-budget.json` — daily budget, compaction threshold, OSC 8 toggle, disabled sections, overflow-spill toggle (all optional).
   - `claude-status-theme.json` — custom theme overrides (optional, only used with `--theme custom`).
 - **Cross-platform** — tested on Linux, macOS, Windows. Python 3.8 through 3.14.
 - **Public OSS, MIT licensed** — repository at https://github.com/mkalkere/claude-statusline, package at https://pypi.org/project/claude-status/.

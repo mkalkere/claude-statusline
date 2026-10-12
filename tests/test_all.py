@@ -9021,14 +9021,20 @@ _OMIT_PC = object()
 
 
 class _FixedClock(object):
-    """Stand-in for the `time` module with a frozen time(); everything
-    else passes through to the real module."""
+    """Stand-in for the `time` module with a frozen clock: time()
+    returns the fixed instant and a strftime() with no explicit time
+    formats that same instant (in UTC, so the result does not depend
+    on the machine's timezone). Everything else passes through to the
+    real module."""
 
     def __init__(self, now):
         self._now = now
 
     def time(self):
         return self._now
+
+    def strftime(self, fmt, t=None):
+        return time.strftime(fmt, time.gmtime(self._now) if t is None else t)
 
     def __getattr__(self, name):
         return getattr(time, name)
@@ -10647,6 +10653,17 @@ class TestSpillRender(unittest.TestCase):
         # What Line 1 already had is still there, in the same order,
         # in front of anything that moved up.
         self.assertEqual(on[0][:len(off[0])], off[0])
+        # The figures quoted in the README and the changelog.
+        self.assertEqual((len(off[0]), len(off[1])), (7, 11))
+        self.assertEqual((len(on[0]), len(on[1])), (11, 12))
+        self.assertEqual(self._width(off[0]), 108)
+        moved_up = on[0][len(off[0]):]
+        self.assertEqual([chip.split(":")[0] for chip in moved_up],
+                         ["tools", "sessions",
+                          "v" + self._cli.__version__, "CC"])
+        # The clock went back to its own line rather than up.
+        self.assertEqual(on[1][-1], "08:00")
+        self.assertNotIn("08:00", off[1])
 
     def test_sweep_invariants(self):
         """Every width from the floor to past the point where nothing

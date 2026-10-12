@@ -18,8 +18,8 @@ uvx claude-status --demo    # or: pipx run claude-status --demo
 ![claude-status default theme](https://raw.githubusercontent.com/mkalkere/claude-statusline/main/assets/themes/default.svg)
 
 ```
-Line 1:  [████████░░░░░░░░░░░░] │ in:412K out:18K │ cache:46% │ $0.73 │ burn:66K/min │ 5h:34% 7d:18% ~1h59m │ (1M)
-Line 2:  12m05s │ api:5m12s │ speed:2.6K/s │ +247 -38 │ ⎇ myapp/feat/statusline │ last:5m00s │ tools:42 │ ✦ refactor auth │ Sonnet 5 │ effort:high │ 15:30
+Line 1:  [████████░░░░░░░░░░░░] │ in:412K out:18K │ cache:46% │ $0.73 │ burn:66K/min │ 5h:34% 7d:18% ~2h00m │ (1M) │ tools:42 │ sessions:3 │ v0.17.0 │ CC:2.1.197 │ 15:30
+Line 2:  12m05s │ api:5m12s │ speed:2.6K/s │ +247 -38 │ ⎇ myapp/feat/statusline │ last:5m00s │ ✦ refactor auth │ Sonnet 5 │ style:explanatory │ dirs:+1 │ effort:high
 ```
 
 ## 30-Second Setup
@@ -36,7 +36,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 - **Zero dependencies** — pure Python stdlib. No `psutil`, no `colorama`, no compilation. Installs in under 2 seconds
 - **Every metric that matters** — 30+ data points including burn rate (tokens/min), rate limit tracking, and effort level
 - **Rate limit awareness** — see your 5-hour and 7-day API usage at a glance with color-coded warnings and reset countdown
-- **Responsive layout** — automatically adapts to your terminal width (full/compact/narrow)
+- **Responsive layout** — automatically adapts to your terminal width (full/compact/narrow), and on wide terminals moves sections that don't fit on Line 2 into the room left on Line 1 instead of hiding them
 - **NO_COLOR / FORCE_COLOR support** — respects terminal color standards
 - **Clickable git branch** *(opt-in)* — OSC 8 links open repo in browser in iTerm2, Kitty, WezTerm. Off by default because Claude Code's TUI doesn't understand OSC 8 and would drop Line 2. Enable with `"clickable_links": true`.
 - **Per-section toggle** — disable any section via config without a custom theme
@@ -48,6 +48,8 @@ The setup wizard walks you through theme selection, budget configuration, and in
 - **Clean uninstall** — `--uninstall` restores your previous configuration
 
 ## Features
+
+The two tables below list each section under the line it belongs to. On a wide terminal, a Line 2 section that doesn't fit there can appear at the end of Line 1 instead — see [Using the room on Line 1](#using-the-room-on-line-1).
 
 ### Line 1 — Metrics at a Glance
 | Feature | What You See | Why It Matters |
@@ -93,7 +95,7 @@ The setup wizard walks you through theme selection, budget configuration, and in
 | Thinking | `think` | Shown when extended thinking is enabled for the session. Reads `thinking.enabled` from stdin; surfaces only the on state (an off badge would be noise). Opt-in via custom theme. |
 | Pull Request | `PR#86 ok` / `MR#42 ok` | Current pull request (GitHub) or merge request (GitLab) number when detected, clickable to its page via OSC 8. Renders `MR#` when Claude Code reports `pr.kind` as `mr` (v2.1.234+), `PR#` otherwise. Reads `pr.number` / `pr.url` from stdin (newer Claude Code releases) with `github.pr_number` / `github.pr_url` as a fallback for older releases. When `pr.review_state` is present, a short status token follows the number: `ok` (approved), `chg` (changes requested), `rev` (pending review), `draft`. For GitLab merge requests `ok` reflects that GitLab reports the MR *mergeable*, which is not the same as a human approval. Opt-in via custom theme. |
 | Cost Breakdown | `mcp:$0.80` | Largest non-base cost category from `cost.by_category` (newer Claude Code releases). Falls back to `other:$N` (sum) when no single category exceeds $0.01 but multiple together do. Opt-in via custom theme. |
-| Version | `v0.16.1` | claude-status version |
+| Version | `v0.17.0` | claude-status version |
 | CC Version | `CC:2.1.219` | Claude Code application version |
 | Clock | `15:30` | Current time |
 
@@ -258,6 +260,29 @@ The status line automatically adapts to your terminal width via a two-stage proc
 2. **Precise width-aware fit** then measures the actual rendered width of each line (stripping invisible ANSI/OSC 8 escapes) and drops sections in priority order until the line fits the terminal. This means a 180-col terminal sees rate_limits, speed, version, etc., even though the static compact bucket would have hidden them — and a 110-col terminal stays within bounds even with heavy data (long agent name, vim mode active, long branch + session name).
 
 The bar, tokens, cost, branch, and `!CTX` warning are always preserved — even at extreme widths, the statusline keeps its core identity.
+
+### Using the room on Line 1
+
+The two steps above work on each line separately, which used to leave Line 1 with dozens of unused columns while Line 2 dropped sections to fit. A third step now puts those sections back where there is room:
+
+- A section that was dropped goes back onto **its own line**, in its usual place, if it fits there after all.
+- Otherwise it moves **up** to the nearest line with room and is added at the **end** of that line. The sections that belong to that line keep their order and position.
+- The most important sections are placed first. Git stash/sync counts and the merge/conflict indicator never leave the branch's line — away from the branch they would not mean anything.
+- No line is ever made wider than the fitted width, nothing appears twice, and no new line is created.
+
+On a 170-column terminal with the demo data this shows 23 sections instead of 18: `tools`, `sessions`, `version` and `CC` join the end of Line 1, and the clock fits back onto Line 2.
+
+**When it applies:** terminals of 160 columns or more, on Claude Code 2.1.141 or later, when the width was actually detected rather than guessed. Narrower than that, Line 1's own width shifts by a few columns as counters change, and packing it to the edge made sections come and go; on older Claude Code a Line 1 that overflows can cost you Line 2, so its spare room is left alone.
+
+**Themes:** on for `default`, `powerline`, `nord`, `tokyo-night`, `gruvbox` and `rose-pine`. Off for `minimal` and `focus`, which are sparse on purpose, and off for custom themes unless the theme file contains `"spill": true`.
+
+**To turn it off** (or on for a theme that leaves it off), add this to `~/.claude/claude-status-budget.json`:
+
+```json
+{
+  "spill_overflow": false
+}
+```
 
 ### Detecting your real terminal width
 

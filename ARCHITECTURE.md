@@ -86,6 +86,10 @@ Two-stage adaptation prevents Line 2 truncation under Claude Code's `wrap:"trunc
 
 Truly essential sections (bar, tokens, cost, branch, ctx_warning) are deliberately omitted from `_FIT_DROP_PRIORITY` and never dropped — losing those would defeat the statusline's purpose.
 
+**Stage 3 — overflow spill** (`_spill_dropped`, gated by `_spill_enabled`) re-places sections stage 2 dropped. Stages 1 and 2 treat each row on its own, which left Line 1 with unused columns while Line 2 shed sections. Candidates are tried in reverse drop order (most important first); each goes back to its own row at its original position if it fits, otherwise to the nearest row above with room, appended after that row's native sections. It never moves a section down, never fills a row stage 2 left empty, never exceeds the fitted width, and keeps `git_extras` / `git_state` on the branch's row (`_SPILL_HOME_ONLY`). It is a pure function of the payload and the width — no state is kept between renders.
+
+Stage 3 runs only when all three hold: the relaxed-layout gate passes (Claude Code 2.1.141+ and a width a real probe reported), the terminal is at least `_SPILL_MIN_COLS` (160) wide, and spill is on — the theme's `spill` flag (true on the six full themes, unset on `minimal` / `focus`, and reset to false for custom themes unless the theme file sets it), or the `spill_overflow` override in `claude-status-budget.json`.
+
 ## Themes
 
 Each theme is a dict with:
@@ -94,6 +98,7 @@ Each theme is a dict with:
 - `bar_filled`, `bar_empty`, `bar_left`, `bar_right` — progress bar characters
 - `bar_width` — bar character width (default: 20, focus: 12)
 - `line1`, `line2` — ordered lists of section names to render
+- `spill` — optional; `True` lets stage 3 move overflow sections up a row (see Responsive Layout)
 - `colors` — dict mapping color keys to ANSI escape codes
 
 Custom themes override any keys from a base theme via `~/.claude/claude-status-theme.json`.
@@ -103,7 +108,7 @@ Custom themes override any keys from a base theme via `~/.claude/claude-status-t
 | File | Purpose |
 |------|---------|
 | `~/.claude/settings.json` | Claude Code settings, includes `statusLine` config |
-| `~/.claude/claude-status-budget.json` | Daily budget limit and compaction threshold |
+| `~/.claude/claude-status-budget.json` | Daily budget limit, compaction threshold, disabled sections, clickable links, overflow-spill override |
 | `~/.claude/claude-status-theme.json` | Custom theme overrides |
 | `~/.claude/sessions/*.json` | Session metadata (startedAt, pid, entrypoint) |
 | `~/.claude/projects/<slug>/*.jsonl` | Session conversation data (tool call counting) |
