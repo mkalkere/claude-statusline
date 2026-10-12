@@ -127,6 +127,41 @@ def _settings_path():
     return os.path.join(home, ".claude", "settings.json")
 
 
+def _note(message):
+    """Write a one-line diagnostic to stderr, or nowhere.
+
+    Diagnostics must never reach stdout: stdout IS the status line.
+    When the process is started with file descriptor 2 closed,
+    sys.stderr is None, and print(file=None) silently falls back to
+    stdout — the diagnostic would become the first row of the status
+    line. A stream that has since been closed or broken is the same
+    case, so write failures are swallowed too.
+    """
+    stream = sys.stderr
+    if stream is None:
+        return
+    try:
+        print(message, file=stream)
+    except (OSError, ValueError):
+        pass
+
+
+def _str_field(value):
+    """A string field from stdin, ready to embed in terminal output.
+
+    Anything that is not a string becomes "" — the renderers
+    concatenate and call str methods on these, so a number or a list
+    sent where a name belongs would raise from inside render() and
+    blank the whole status line instead of hiding one section. C0/C1
+    control characters are stripped so a session, branch or agent name
+    cannot carry escape sequences into the user's terminal (the same
+    threat model as the subagent row text and the OSC 8 URL check).
+    """
+    if not isinstance(value, str):
+        return ""
+    return _CONTROL_CHARS_RE.sub("", value)
+
+
 def _first(*vals):
     """Return the first value that is not None."""
     for v in vals:
@@ -198,10 +233,15 @@ def _normalize(data):
     """
     out = {}
 
-    # Context window (nested or flat)
-    cw = data.get("context_window") or {}
-    cu = cw.get("current_usage") or {}
-    flat_usage = data.get("current_usage") or {}
+    # Context window (nested or flat). isinstance guards rather than
+    # `or {}`: a truthy non-dict (a string, a number, a list) survives
+    # `or` and raises on the .get() below.
+    cw = data.get("context_window")
+    cw = cw if isinstance(cw, dict) else {}
+    cu = cw.get("current_usage")
+    cu = cu if isinstance(cu, dict) else {}
+    flat_usage = data.get("current_usage")
+    flat_usage = flat_usage if isinstance(flat_usage, dict) else {}
 
     # _safe_num on the whole context/token block — same chokepoint
     # treatment the money/time trio received in v0.11.0, applied here
@@ -227,10 +267,8 @@ def _normalize(data):
             # Same stderr breadcrumb as the money/time trio's
             # _num_or_note: present-but-garbage must leave a
             # diagnostic trail, not vanish silently.
-            print(
-                "claude-status: ignoring non-numeric {} value".format(field),
-                file=sys.stderr,
-            )
+            _note(
+                "claude-status: ignoring non-numeric {} value".format(field))
         return num
 
     out["token_fields_corrupt"] = False
@@ -278,10 +316,8 @@ def _normalize(data):
     def _num_or_note(field, raw):
         num = _safe_num(raw)
         if num is None and raw is not None:
-            print(
-                "claude-status: ignoring non-numeric {} value".format(field),
-                file=sys.stderr,
-            )
+            _note(
+                "claude-status: ignoring non-numeric {} value".format(field))
         return num
 
     out["cost"] = _num_or_note(
@@ -488,7 +524,8 @@ def _normalize(data):
     # here for consistency.
     vim_obj = data.get("vim")
     vim_obj = vim_obj if isinstance(vim_obj, dict) else {}
-    out["vim_mode"] = vim_obj.get("mode") or data.get("vim_mode")
+    out["vim_mode"] = (_str_field(vim_obj.get("mode"))
+                       or _str_field(data.get("vim_mode")) or None)
 
     # Agent (nested or flat). The isinstance guard prevents an
     # upstream sending `agent: "Explore"` as a string (or list/int)
@@ -506,18 +543,21 @@ def _normalize(data):
     flat_name = data.get("agent_name")
 
     def _real_str(v):
-        return v if isinstance(v, str) and v else None
+        return _str_field(v) or None
 
     out["agent_name"] = _real_str(nested_name) or _real_str(flat_name)
 
     # Worktree (nested or flat) — same isinstance guard.
     wt_obj = data.get("worktree")
     wt_obj = wt_obj if isinstance(wt_obj, dict) else {}
-    out["worktree_branch"] = wt_obj.get("branch") or data.get("worktree_branch")
-    out["worktree_name"] = wt_obj.get("name")
+    out["worktree_branch"] = (_str_field(wt_obj.get("branch"))
+                              or _str_field(data.get("worktree_branch"))
+                              or None)
+    out["worktree_name"] = _str_field(wt_obj.get("name")) or None
 
-    # Git branch
-    out["git_branch"] = data.get("git_branch")
+    # Git branch. None (absent or unusable) makes every consumer fall
+    # back to asking git.
+    out["git_branch"] = _str_field(data.get("git_branch")) or None
 
     # Project name: prefer workspace.project_dir (explicit project root),
     # fall back to last folder of current_dir / cwd
@@ -528,17 +568,19 @@ def _normalize(data):
     # the pattern across _normalize.
     workspace = data.get("workspace")
     workspace = workspace if isinstance(workspace, dict) else {}
-    project_dir = workspace.get("project_dir") or ""
-    cwd = workspace.get("current_dir") or data.get("cwd") or ""
+    project_dir = _str_field(workspace.get("project_dir"))
+    cwd = (_str_field(workspace.get("current_dir"))
+           or _str_field(data.get("cwd")))
     best_path = project_dir or cwd
     out["project_name"] = os.path.basename(os.path.normpath(best_path)) if best_path else ""
 
     # Model info
-    model_obj = data.get("model") or {}
-    out["model_name"] = model_obj.get("display_name")
+    model_obj = data.get("model")
+    model_obj = model_obj if isinstance(model_obj, dict) else {}
+    out["model_name"] = _str_field(model_obj.get("display_name")) or None
 
     # Session ID (for tool call counting)
-    out["session_id"] = data.get("session_id") or ""
+    out["session_id"] = _str_field(data.get("session_id"))
 
     # Transcript path (for live activity counter — tool calls since
     # the most recent user message). Stored only if it's a non-empty
@@ -549,10 +591,10 @@ def _normalize(data):
     out["transcript_path"] = transcript if isinstance(transcript, str) else ""
 
     # Session name (custom name via --name or /rename)
-    out["session_name"] = data.get("session_name") or ""
+    out["session_name"] = _str_field(data.get("session_name"))
 
     # Claude Code version
-    out["cc_version"] = data.get("version") or ""
+    out["cc_version"] = _str_field(data.get("version"))
 
     # Rate limits (Pro/Max only, added in Claude Code v2.1.80).
     rl = data.get("rate_limits")
@@ -617,11 +659,8 @@ def _normalize(data):
     # not be undiagnosable. Absent fields and the documented nulls
     # (expires_at, hit_ratio) stay silent.
     def _pc_note(field):
-        print(
-            "claude-status: ignoring unusable prompt_cache{} value".format(
-                "." + field if field else ""),
-            file=sys.stderr,
-        )
+        _note("claude-status: ignoring unusable prompt_cache{} value".format(
+            "." + field if field else ""))
 
     pc_obj = data.get("prompt_cache")
     if not isinstance(pc_obj, dict):
@@ -683,7 +722,7 @@ def _normalize(data):
     style_obj = data.get("output_style")
     style_obj = style_obj if isinstance(style_obj, dict) else {}
     style_name = style_obj.get("name")
-    out["output_style"] = style_name if isinstance(style_name, str) and style_name else ""
+    out["output_style"] = _str_field(style_name)
 
     # Added directories count
     added_dirs = workspace.get("added_dirs")
@@ -3762,8 +3801,7 @@ def main():
         if not args.subagent and '"tasks":' not in (raw or ""):
             print("?")
         else:
-            print("claude-status: undecodable subagent payload",
-                  file=sys.stderr)
+            _note("claude-status: undecodable subagent payload")
         return
     except KeyboardInterrupt:
         return
@@ -3775,15 +3813,14 @@ def main():
     # convenience fallback for users who pasted the bare command.
     if args.subagent or _is_subagent_payload(data):
         if not args.subagent:
-            print("claude-status: subagent payload auto-detected; "
+            _note("claude-status: subagent payload auto-detected; "
                   "prefer \"claude-status --subagent\" in "
-                  "subagentStatusLine settings", file=sys.stderr)
+                  "subagentStatusLine settings")
         try:
             output = render_subagent(data, args.theme) \
                 if _is_subagent_payload(data) else ""
         except Exception as exc:
-            print("claude-status: subagent render error: {}".format(exc),
-                  file=sys.stderr)
+            _note("claude-status: subagent render error: {}".format(exc))
             output = ""
         if output:
             print(output)
@@ -3792,7 +3829,7 @@ def main():
     try:
         output = render(data, args.theme)
     except Exception as exc:
-        print("claude-status: render error: {}".format(exc), file=sys.stderr)
+        _note("claude-status: render error: {}".format(exc))
         output = ""
     if output:
         print(output)

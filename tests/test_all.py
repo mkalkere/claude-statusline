@@ -9425,6 +9425,295 @@ class TestSafeNumOverflow(unittest.TestCase):
             cli_mod.get_branch = orig
 
 
+class TestStdinTypeRobustness(unittest.TestCase):
+    """#133: a stdin field of the wrong TYPE must hide one section, not
+    raise from inside render() and blank the whole status line. Every
+    field here was found crashing by fuzzing each documented field
+    with each JSON type."""
+
+    # One value of every JSON type that is wrong for a name or an
+    # object, plus the oversized integer json.loads can produce.
+    BAD = ("text", 7, 0, 2.5, True, False, None, [], ["x"], {},
+           {"k": "v"}, 10 ** 400)
+
+    def setUp(self):
+        import claude_statusline.cli as cli_mod
+        self._cli_mod = cli_mod
+        self._saved_lines = (THEMES["default"]["line1"],
+                             THEMES["default"]["line2"])
+        self._saved_fns = {name: getattr(cli_mod, name) for name in (
+            "get_branch", "get_disabled_sections", "get_git_state",
+            "get_git_extras")}
+        cli_mod.get_branch = lambda: "from-git"
+        cli_mod.get_disabled_sections = lambda: []
+        cli_mod.get_git_state = lambda: ""
+        cli_mod.get_git_extras = lambda: {"stash": 0, "ahead": 0, "behind": 0}
+        # Every section that reads one of the fields under test.
+        THEMES["default"]["line1"] = ["bar", "tokens", "cache", "cost",
+                                      "context_size", "context_tokens"]
+        THEMES["default"]["line2"] = ["model", "vim", "worktree",
+                                      "cc_version", "session_name",
+                                      "output_style", "agent", "branch"]
+        self._saved_env = {k: os.environ.get(k) for k in (
+            "COLUMNS", "CLAUDE_STATUSLINE_WIDTH")}
+        os.environ["COLUMNS"] = "400"
+        os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+
+    def tearDown(self):
+        (THEMES["default"]["line1"],
+         THEMES["default"]["line2"]) = self._saved_lines
+        for name, fn in self._saved_fns.items():
+            setattr(self._cli_mod, name, fn)
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _base(self):
+        return {
+            "git_branch": "main",
+            "version": "2.1.296",
+            "session_name": "my-session",
+            "model": {"display_name": "Opus"},
+            "vim": {"mode": "NORMAL"},
+            "worktree": {"name": "feat", "branch": "wt-feat"},
+            "output_style": {"name": "concise"},
+            "agent": {"name": "reviewer"},
+            "workspace": {"project_dir": "/home/user/projects/myapp",
+                          "current_dir": "/home/user/projects/myapp"},
+            "cwd": "/home/user/projects/myapp",
+            "context_window": {
+                "used_percentage": 8, "context_window_size": 200000,
+                "current_usage": {"input_tokens": 8500,
+                                  "output_tokens": 1200,
+                                  "cache_read_input_tokens": 2000,
+                                  "cache_creation_input_tokens": 5000}},
+            "cost": {"total_cost_usd": 1.23},
+        }
+
+    def _plain(self, data):
+        with contextlib.redirect_stderr(io.StringIO()):
+            out = self._cli_mod.render(data, "default")
+        return re.sub(r"\x1b\[[0-9;]*m", "", out)
+
+    def _set(self, data, path, value):
+        node = data
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+
+    def test_baseline_renders_every_section_under_test(self):
+        """Guards the loop below against going vacuous: with good
+        input, each field under test is actually on the line."""
+        plain = self._plain(self._base())
+        for token in ("Opus", "NORMAL", "wt:wt-feat", "CC:2.1.296",
+                      "my-session", "style:concise", "[reviewer]", "main",
+                      "$1.2", "in:"):
+            self.assertIn(token, plain)
+
+    def test_wrong_type_never_blanks_the_line(self):
+        fields = (("version",), ("session_name",), ("git_branch",),
+                  ("model",), ("model", "display_name"), ("vim", "mode"),
+                  ("worktree", "branch"), ("worktree", "name"),
+                  ("output_style", "name"), ("agent", "name"),
+                  ("workspace", "project_dir"),
+                  ("workspace", "current_dir"), ("cwd",),
+                  ("context_window",), ("context_window", "current_usage"),
+                  ("session_id",))
+        for path in fields:
+            for bad in self.BAD:
+                data = self._base()
+                self._set(data, path, bad)
+                label = "{}={!r}".format(".".join(path), bad)[:70]
+                try:
+                    plain = self._plain(data)
+                except Exception as exc:  # the regression under test
+                    self.fail("{} raised {!r}".format(label, exc))
+                # Untouched sections on both lines survive.
+                self.assertEqual(len(plain.split("\n")), 2, label)
+                self.assertIn("$1.2", plain, label)
+                if path != ("agent", "name"):
+                    self.assertIn("[reviewer]", plain, label)
+
+    def test_flat_current_usage_wrong_type(self):
+        """The flat `current_usage` fallback (demo mode, older
+        schemas) had the same unguarded .get()."""
+        for bad in self.BAD:
+            data = self._base()
+            data["current_usage"] = bad
+            self.assertIn("$1.2", self._plain(data), repr(bad)[:40])
+
+    def test_wrong_type_hides_only_its_own_section(self):
+        data = self._base()
+        data["version"] = 2.1
+        plain = self._plain(data)
+        self.assertNotIn("CC:", plain)
+        self.assertIn("my-session", plain)
+        data = self._base()
+        data["vim"]["mode"] = ["NORMAL"]
+        plain = self._plain(data)
+        self.assertNotIn("NORMAL", plain)
+        self.assertIn("Opus", plain)
+
+    def test_unusable_git_branch_falls_back_to_git(self):
+        for bad in (7, ["main"], {"name": "main"}, True):
+            data = self._base()
+            data["git_branch"] = bad
+            self.assertIn("from-git", self._plain(data), repr(bad))
+
+    def test_absent_string_fields_keep_their_none_contract(self):
+        """Callers test several of these with `is None` / truthiness;
+        a wrong type must look exactly like an absent field."""
+        from claude_statusline.cli import _normalize
+        with contextlib.redirect_stderr(io.StringIO()):
+            n = _normalize({"git_branch": 7, "model": "opus",
+                            "vim": {"mode": 3},
+                            "worktree": {"branch": [], "name": 9},
+                            "version": 2.1, "session_name": {"a": 1},
+                            "session_id": 7})
+        for key in ("git_branch", "model_name", "vim_mode",
+                    "worktree_branch", "worktree_name"):
+            self.assertIsNone(n[key], key)
+        for key in ("cc_version", "session_name", "session_id"):
+            self.assertEqual(n[key], "", key)
+
+    def test_str_field(self):
+        from claude_statusline.cli import _str_field
+        self.assertEqual(_str_field("plain"), "plain")
+        self.assertEqual(_str_field(""), "")
+        for bad in (None, 7, 2.5, True, [], {}, ["x"], b"bytes"):
+            self.assertEqual(_str_field(bad), "", repr(bad))
+        # C0, DEL and C1 are all removed; printable text is kept.
+        self.assertEqual(_str_field("a\x1b[31mb\x07c\nd\te\x7ff\x9bg"),
+                         "a[31mbcdefg")
+        self.assertEqual(_str_field("café ✦"), "café ✦")
+
+    def test_control_characters_cannot_reach_the_terminal(self):
+        """A name is embedded in terminal output verbatim. An escape
+        sequence in it must arrive defused (the ESC byte removed), not
+        as a live sequence."""
+        attack = "\x1b]0;owned\x07\x1b[2Jevil"
+        for path in (("session_name",), ("model", "display_name"),
+                     ("git_branch",), ("worktree", "branch"),
+                     ("agent", "name"), ("output_style", "name"),
+                     ("vim", "mode"), ("version",)):
+            data = self._base()
+            self._set(data, path, attack)
+            with contextlib.redirect_stderr(io.StringIO()):
+                out = self._cli_mod.render(data, "default")
+            label = ".".join(path)
+            self.assertNotIn("\x07", out, label)
+            self.assertNotIn("\x1b]", out, label)
+            self.assertNotIn("\x1b[2J", out, label)
+            # The only escapes left are the renderer's own SGR colors.
+            self.assertEqual(
+                re.sub(r"\x1b\[[0-9;]*m", "", out).count("\x1b"), 0, label)
+            self.assertIn("evil", out.lower(), label)
+
+
+class TestDiagnosticsNeverReachStdout(unittest.TestCase):
+    """#133: stdout IS the status line. With file descriptor 2 closed
+    sys.stderr is None, and print(file=None) falls back to stdout —
+    the diagnostic became the first row of the status line."""
+
+    def _with_stderr(self, stream, fn):
+        saved = sys.stderr
+        out = io.StringIO()
+        sys.stderr = stream
+        try:
+            with contextlib.redirect_stdout(out):
+                result = fn()
+        finally:
+            sys.stderr = saved
+        return result, out.getvalue()
+
+    def test_note_writes_to_stderr(self):
+        from claude_statusline.cli import _note
+        err = io.StringIO()
+        _, stdout = self._with_stderr(err, lambda: _note("hello"))
+        self.assertEqual(err.getvalue(), "hello\n")
+        self.assertEqual(stdout, "")
+
+    def test_note_is_silent_when_stderr_is_none(self):
+        from claude_statusline.cli import _note
+        _, stdout = self._with_stderr(None, lambda: _note("hello"))
+        self.assertEqual(stdout, "")
+
+    def test_note_survives_a_broken_stream(self):
+        from claude_statusline.cli import _note
+
+        class _Broken(object):
+            def __init__(self, exc):
+                self._exc = exc
+
+            def write(self, text):
+                raise self._exc
+
+            def flush(self):
+                pass
+
+        for exc in (ValueError("I/O operation on closed file"),
+                    OSError("broken pipe")):
+            _, stdout = self._with_stderr(
+                _Broken(exc), lambda: _note("hello"))
+            self.assertEqual(stdout, "")
+
+    def test_normalize_breadcrumbs_stay_off_stdout(self):
+        """Every breadcrumb source in _normalize: the token block, the
+        money/time trio, and prompt_cache."""
+        from claude_statusline.cli import _normalize
+        payload = {"context_window": {"used_percentage": "junk"},
+                   "cost": {"total_cost_usd": "abc"},
+                   "prompt_cache": {"ttl": "zzz", "hit_ratio": 91}}
+        # Positive control: with a real stderr the same payload DOES
+        # produce diagnostics, so the silence below means something.
+        err = io.StringIO()
+        _, stdout = self._with_stderr(err, lambda: _normalize(payload))
+        self.assertEqual(stdout, "")
+        self.assertEqual(len(err.getvalue().splitlines()), 4)
+        _, stdout = self._with_stderr(None, lambda: _normalize(payload))
+        self.assertEqual(stdout, "")
+
+    def test_render_output_is_only_the_status_line(self):
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            rendered, stdout = self._with_stderr(None, lambda: cli_mod.render(
+                {"git_branch": "main", "cost": {"total_cost_usd": "abc"},
+                 "prompt_cache": {"ttl": "zzz"}}, "default"))
+        finally:
+            cli_mod.get_branch = orig
+        self.assertEqual(stdout, "")
+        self.assertNotIn("claude-status:", rendered)
+        self.assertIn("main", rendered)
+
+    def test_custom_theme_warning_stays_off_stdout(self):
+        from claude_statusline import themes as themes_mod
+        d = tempfile.mkdtemp(prefix="claude-status-theme-")
+        path = os.path.join(d, "theme.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{ not json")
+        orig = themes_mod._custom_theme_path
+        themes_mod._custom_theme_path = lambda: path
+        try:
+            err = io.StringIO()
+            theme, stdout = self._with_stderr(
+                err, lambda: themes_mod.get_theme("custom"))
+            self.assertEqual(stdout, "")
+            self.assertIn("could not load custom theme", err.getvalue())
+            theme, stdout = self._with_stderr(
+                None, lambda: themes_mod.get_theme("custom"))
+            self.assertEqual(stdout, "")
+            # Still degrades to the default theme.
+            self.assertIs(theme, THEMES["default"])
+        finally:
+            themes_mod._custom_theme_path = orig
+            import shutil as shutil_mod
+            shutil_mod.rmtree(d, ignore_errors=True)
+
+
 class TestPromptCacheNormalize(unittest.TestCase):
     """_normalize's handling of the `prompt_cache` stdin object: each
     field validates independently and collapses to None, and a value

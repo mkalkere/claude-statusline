@@ -601,7 +601,9 @@ def get_theme(name):
             return custom
         import sys
         path = _custom_theme_path()
-        if os.path.isfile(path):
+        # sys.stderr is None when fd 2 is closed; print(file=None)
+        # would then write the warning to stdout, into the status line.
+        if os.path.isfile(path) and sys.stderr is not None:
             print("Warning: could not load custom theme from {}".format(path),
                   file=sys.stderr)
     return THEMES.get(name, THEMES["default"])
