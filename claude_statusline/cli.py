@@ -38,7 +38,7 @@ from .sessions import (
     get_disabled_sections, get_effort_level, get_last_assistant_timestamp_ms,
     record_and_get_daily_spend,
     get_session_activity_count,
-    get_session_tool_count, get_today_session_count,
+    get_session_tool_count, get_spill_override, get_today_session_count,
 )
 from .themes import THEMES, get_theme
 
@@ -1718,6 +1718,23 @@ _FIT_DROP_PRIORITY = _COMPACT_DROP + [
 ]
 
 
+# ─── Overflow spill (#121) ───────────────────────────────────────────
+#
+# Minimum terminal width at which sections may be moved between rows.
+# Below it, a row's own width shifts by a few columns as token counts
+# and countdowns change, and packing rows to the edge makes
+# low-priority sections come and go far more often for one or two
+# recovered sections. Measured before this shipped: at 112-130 columns
+# the frames in which some section changed went from about 3 in 600 to
+# about 30; from 165 up the count was the same as without spill.
+_SPILL_MIN_COLS = 160
+
+# Sections that only read correctly beside the branch: "stash:1
+# sync:+2" and a bare "merge" mean nothing a line away from it. They
+# may return to their OWN row when it has room, never to another.
+_SPILL_HOME_ONLY = frozenset({"git_extras", "git_state"})
+
+
 # Plausibility bounds for a detected terminal width. Anything outside
 # this range is treated as garbage and ignored — protects against
 # `stty size` returning 0 0 on a closed pty, an OS reporting absurd
@@ -2354,6 +2371,109 @@ def _fit_to_width(named_items, sep_visible_width, target_width, drop_priority):
     return [(n, r) for (n, r, _) in items]
 
 
+def _spill_enabled(theme, term_width, relaxed_layout):
+    """Whether overflow sections may be re-placed for this render.
+
+    Three gates, all required:
+
+    - `relaxed_layout`: Claude Code 2.1.141+ AND a width a real probe
+      reported — the same condition that unlocks the relaxed layout
+      thresholds. On older releases a Line 1 that overflows costs the
+      user Line 2 entirely, and unused room on Line 1 is the margin
+      that protects against a mis-detected width.
+    - `term_width >= _SPILL_MIN_COLS`: see that constant.
+    - the user's config override when it is set, else the theme's own
+      "spill" flag (strict True; unset means off).
+
+    The first two are safety gates and cannot be overridden: the
+    config key chooses between themes' defaults, not past them.
+    """
+    if not relaxed_layout or term_width < _SPILL_MIN_COLS:
+        return False
+    override = get_spill_override()
+    if override is not None:
+        return override
+    return theme.get("spill") is True
+
+
+def _spill_dropped(rows, sep_visible_width, target_width, drop_priority):
+    """Re-place sections that the per-row fit dropped (stage 3).
+
+    Args:
+        rows: One (named, kept) pair per row — `named` is everything
+            rendered for the row, `kept` what _fit_to_width left of
+            it. Both are lists of (name, rendered) tuples.
+        sep_visible_width, target_width, drop_priority: as for
+            _fit_to_width; the same target the rows were fitted to.
+
+    Returns:
+        One list of (name, rendered) tuples per row.
+
+    Rules (the reasons are in #121):
+
+    - Candidates are tried most-important-first, i.e. in REVERSE drop
+      order. One that fits nowhere is skipped and the next is tried.
+    - A candidate first goes back to its OWN row, at its original
+      position, if it fits. The per-row fit stops at the first drop
+      that makes the row fit, so it can leave room behind.
+    - Otherwise it goes to the NEAREST ROW ABOVE that has room,
+      appended after that row's own sections. Never downward, and
+      never for a section in _SPILL_HOME_ONLY.
+    - A row left empty by the fit stays empty: this never creates a
+      row the layout did not already have.
+    - No row ever exceeds `target_width`, and a section still appears
+      at most once (it is only ever placed if it had been dropped).
+
+    Pure function of its arguments — no state is kept between
+    renders, so the same payload at the same width always lays out
+    the same way.
+    """
+    # Each row is a list of entries [sort_key, name, rendered, width].
+    # Native sections sort by their original index; guests sort after
+    # every native, by (home row, original index).
+    native, guest = 0, 1
+    layout = []
+    widths = []
+    candidates = []
+    for row_index, (named, kept) in enumerate(rows):
+        kept_names = set(name for name, _ in kept)
+        entries = []
+        for position, (name, rendered) in enumerate(named):
+            width = _visible_width(rendered)
+            if name in kept_names:
+                entries.append([(native, position), name, rendered, width])
+            elif name in drop_priority:
+                candidates.append((-drop_priority.index(name), row_index,
+                                   position, name, rendered, width))
+        layout.append(entries)
+        widths.append(sum(e[3] for e in entries)
+                      + sep_visible_width * max(0, len(entries) - 1))
+
+    def fits(row_index, width):
+        # A row must already have something on it to take more.
+        return (bool(layout[row_index])
+                and widths[row_index] + sep_visible_width + width
+                <= target_width)
+
+    def place(row_index, entry):
+        layout[row_index].append(entry)
+        layout[row_index].sort(key=lambda e: e[0])
+        widths[row_index] += sep_visible_width + entry[3]
+
+    for _, home, position, name, rendered, width in sorted(candidates):
+        if fits(home, width):
+            place(home, [(native, position), name, rendered, width])
+            continue
+        if name in _SPILL_HOME_ONLY:
+            continue
+        for host in range(home - 1, -1, -1):
+            if fits(host, width):
+                place(host, [(guest, home, position), name, rendered, width])
+                break
+
+    return [[(e[1], e[2]) for e in entries] for entries in layout]
+
+
 def render(data, theme_name="default"):
     """Render the statusline as one or two lines.
 
@@ -2487,14 +2607,23 @@ def render(data, theme_name="default"):
     # deliberately buckets on the raw term_width: it is a render-cost
     # pre-filter choosing which sections are worth computing, while
     # this stage is the authoritative "does it actually fit" decision.
-    lines = []
     fit_width = max(_TERM_WIDTH_MIN, term_width - _fit_margin(width_report))
+    fitted = []  # one (everything rendered, what the fit kept) per row
     for row in raw_lines:
         named = _render_sections_named(n, row, theme)
-        named = _fit_to_width(named, sep_width, fit_width, _FIT_DROP_PRIORITY)
-        if named:
-            lines.append(sep.join(r for _, r in named))
+        fitted.append((named, _fit_to_width(
+            named, sep_width, fit_width, _FIT_DROP_PRIORITY)))
 
+    # Stage 3: where it is enabled, sections the fit dropped may go
+    # back onto their own row or up onto a row with room (#121).
+    relaxed_layout = (full_min == _FULL_LAYOUT_MIN_COLS_RELAXED)
+    if _spill_enabled(theme, term_width, relaxed_layout):
+        final_rows = _spill_dropped(
+            fitted, sep_width, fit_width, _FIT_DROP_PRIORITY)
+    else:
+        final_rows = [kept for _, kept in fitted]
+
+    lines = [sep.join(r for _, r in row) for row in final_rows if row]
     return "\n".join(lines)
 
 

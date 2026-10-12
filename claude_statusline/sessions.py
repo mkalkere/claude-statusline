@@ -716,7 +716,8 @@ def _read_status_config():
     """Read ~/.claude/claude-status-budget.json once, cache all values.
 
     Returns:
-        Dict with 'budget', 'threshold', 'disabled', and 'clickable_links'.
+        Dict with 'budget', 'threshold', 'disabled', 'clickable_links',
+        'budget_scope' and 'spill'.
     """
     cached = _read_cache("status_config")
     if cached is not None:
@@ -728,6 +729,7 @@ def _read_status_config():
         "disabled": [],
         "clickable_links": False,
         "budget_scope": "daily",
+        "spill": None,
     }
     path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
     try:
@@ -753,6 +755,12 @@ def _read_status_config():
         if isinstance(disabled, list):
             result["disabled"] = [s for s in disabled if isinstance(s, str)]
         result["clickable_links"] = bool(data.get("clickable_links", False))
+        # Tri-state: a literal true/false overrides the theme's own
+        # setting; anything else (absent, null, "yes", 1) leaves the
+        # theme in charge.
+        spill = data.get("spill_overflow")
+        if isinstance(spill, bool):
+            result["spill"] = spill
     except (OSError, IOError, json.JSONDecodeError,
             ValueError, TypeError, AttributeError):
         # AttributeError covers non-dict JSON (null, list, scalar) —
@@ -1129,6 +1137,21 @@ def get_disabled_sections():
     """
     config = _read_status_config()
     return config.get("disabled", [])
+
+
+def get_spill_override():
+    """Read the user's override for moving overflow sections up a row.
+
+    Expected format: {"spill_overflow": false} (or true)
+    Uses 30s cache shared with budget/compaction config.
+
+    Returns:
+        True or False when the config file says so explicitly, None
+        when it does not (the theme's own "spill" setting then applies).
+    """
+    config = _read_status_config()
+    value = config.get("spill")
+    return value if isinstance(value, bool) else None
 
 
 def get_clickable_links_enabled():
