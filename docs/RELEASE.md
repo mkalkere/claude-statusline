@@ -215,7 +215,7 @@ These are upstream and host pitfalls the project has hit. Documented here so a f
 Claude Code's stdin JSON evolves quickly. Recent additions we track or have already integrated:
 
 - `effort.level` (v2.1.119+) — thinking effort level. Integrated v0.5.8.
-- `terminal.columns` (proposed, [#22115](https://github.com/anthropics/claude-code/issues/22115)) — terminal width. Forward-compat code in place; honored when present.
+- Terminal width ([#22115](https://github.com/anthropics/claude-code/issues/22115), closed as completed 2026-05-28) — delivered upstream as the `COLUMNS` and `LINES` environment variables rather than a stdin field. Both are read; the forward-compat read of a stdin `terminal.columns` is still in place and honored when present.
 - `github.{pr_number, pr_url, repo}` (v2.1.148+) — PR context. Track integration status in CHANGELOG.
 - Per-category cost breakdown (v2.1.150+) — `cost.by_category`. Track integration status.
 

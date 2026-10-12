@@ -146,20 +146,43 @@ def _note(message):
         pass
 
 
-def _str_field(value):
+def _str_field(value, field=None):
     """A string field from stdin, ready to embed in terminal output.
 
     Anything that is not a string becomes "" — the renderers
     concatenate and call str methods on these, so a number or a list
     sent where a name belongs would raise from inside render() and
-    blank the whole status line instead of hiding one section. C0/C1
-    control characters are stripped so a session, branch or agent name
+    blank the whole status line instead of hiding one section. When
+    `field` is given, a value that is present but not a string leaves
+    a stderr breadcrumb naming it; absent (None) stays silent.
+
+    Control characters are removed so a session, branch or agent name
     cannot carry escape sequences into the user's terminal (the same
     threat model as the subagent row text and the OSC 8 URL check).
+    Tabs and line breaks become a space first, so the words either
+    side of one do not run together. What is left of a defused escape
+    sequence (its printable tail) stays visible: it is harmless, and
+    hiding it would hide that the name was odd.
     """
     if not isinstance(value, str):
+        if value is not None and field:
+            _note("claude-status: ignoring non-string {} value".format(field))
         return ""
-    return _CONTROL_CHARS_RE.sub("", value)
+    return _CONTROL_CHARS_RE.sub("", _WHITESPACE_CONTROLS_RE.sub(" ", value))
+
+
+def _dict_field(value, field):
+    """A JSON object field from stdin, or {} for anything else.
+
+    isinstance rather than `value or {}`: a truthy non-dict (a string,
+    a number, a list) survives `or` and raises on the first .get().
+    Present-but-not-an-object leaves a stderr breadcrumb.
+    """
+    if isinstance(value, dict):
+        return value
+    if value is not None:
+        _note("claude-status: ignoring non-object {} value".format(field))
+    return {}
 
 
 def _first(*vals):
@@ -233,15 +256,10 @@ def _normalize(data):
     """
     out = {}
 
-    # Context window (nested or flat). isinstance guards rather than
-    # `or {}`: a truthy non-dict (a string, a number, a list) survives
-    # `or` and raises on the .get() below.
-    cw = data.get("context_window")
-    cw = cw if isinstance(cw, dict) else {}
-    cu = cw.get("current_usage")
-    cu = cu if isinstance(cu, dict) else {}
-    flat_usage = data.get("current_usage")
-    flat_usage = flat_usage if isinstance(flat_usage, dict) else {}
+    # Context window (nested or flat).
+    cw = _dict_field(data.get("context_window"), "context_window")
+    cu = _dict_field(cw.get("current_usage"), "context_window.current_usage")
+    flat_usage = _dict_field(data.get("current_usage"), "current_usage")
 
     # _safe_num on the whole context/token block — same chokepoint
     # treatment the money/time trio received in v0.11.0, applied here
@@ -328,8 +346,17 @@ def _normalize(data):
     out["api_duration"] = _num_or_note(
         "api_duration",
         _first(cost_obj.get("total_api_duration_ms"), data.get("api_duration_ms")))
-    out["lines_added"] = _first(cost_obj.get("total_lines_added"), data.get("lines_added"))
-    out["lines_removed"] = _first(cost_obj.get("total_lines_removed"), data.get("lines_removed"))
+    # Line counts are formatted straight into the output, so they get
+    # the same coercion as the trio above: a string here would be
+    # embedded verbatim (escape sequences included) and a list would
+    # render as its repr. Stored as ints — "+247", not "+247.0".
+    for key, nested, flat in (
+            ("lines_added", "total_lines_added", "lines_added"),
+            ("lines_removed", "total_lines_removed", "lines_removed")):
+        raw_lines = _first(cost_obj.get(nested), data.get(flat))
+        num_lines = (None if isinstance(raw_lines, bool)
+                     else _num_or_note(key, raw_lines))
+        out[key] = int(num_lines) if num_lines is not None else None
 
     # Per-category cost breakdown (Claude Code v2.1.150+ exposes
     # `cost.by_category` with keys like "skills", "subagents",
@@ -348,7 +375,9 @@ def _normalize(data):
         # fallback was meant to close.
         sane_categories = {}
         for k, v in by_category.items():
-            if not isinstance(k, str):
+            # The category name is rendered as a label.
+            k = _str_field(k)
+            if not k:
                 continue
             num = _safe_num(v)
             # Defense-in-depth: since v0.11.0 _safe_num itself rejects
@@ -524,8 +553,9 @@ def _normalize(data):
     # here for consistency.
     vim_obj = data.get("vim")
     vim_obj = vim_obj if isinstance(vim_obj, dict) else {}
-    out["vim_mode"] = (_str_field(vim_obj.get("mode"))
-                       or _str_field(data.get("vim_mode")) or None)
+    out["vim_mode"] = (_str_field(vim_obj.get("mode"), "vim.mode")
+                       or _str_field(data.get("vim_mode"), "vim_mode")
+                       or None)
 
     # Agent (nested or flat). The isinstance guard prevents an
     # upstream sending `agent: "Explore"` as a string (or list/int)
@@ -550,14 +580,17 @@ def _normalize(data):
     # Worktree (nested or flat) — same isinstance guard.
     wt_obj = data.get("worktree")
     wt_obj = wt_obj if isinstance(wt_obj, dict) else {}
-    out["worktree_branch"] = (_str_field(wt_obj.get("branch"))
-                              or _str_field(data.get("worktree_branch"))
-                              or None)
-    out["worktree_name"] = _str_field(wt_obj.get("name")) or None
+    out["worktree_branch"] = (
+        _str_field(wt_obj.get("branch"), "worktree.branch")
+        or _str_field(data.get("worktree_branch"), "worktree_branch")
+        or None)
+    out["worktree_name"] = (
+        _str_field(wt_obj.get("name"), "worktree.name") or None)
 
     # Git branch. None (absent or unusable) makes every consumer fall
     # back to asking git.
-    out["git_branch"] = _str_field(data.get("git_branch")) or None
+    out["git_branch"] = (
+        _str_field(data.get("git_branch"), "git_branch") or None)
 
     # Project name: prefer workspace.project_dir (explicit project root),
     # fall back to last folder of current_dir / cwd
@@ -568,19 +601,33 @@ def _normalize(data):
     # the pattern across _normalize.
     workspace = data.get("workspace")
     workspace = workspace if isinstance(workspace, dict) else {}
-    project_dir = _str_field(workspace.get("project_dir"))
-    cwd = (_str_field(workspace.get("current_dir"))
-           or _str_field(data.get("cwd")))
+    project_dir = _str_field(
+        workspace.get("project_dir"), "workspace.project_dir")
+    cwd = (_str_field(workspace.get("current_dir"), "workspace.current_dir")
+           or _str_field(data.get("cwd"), "cwd"))
     best_path = project_dir or cwd
     out["project_name"] = os.path.basename(os.path.normpath(best_path)) if best_path else ""
 
     # Model info
-    model_obj = data.get("model")
-    model_obj = model_obj if isinstance(model_obj, dict) else {}
-    out["model_name"] = _str_field(model_obj.get("display_name")) or None
+    model_obj = _dict_field(data.get("model"), "model")
+    out["model_name"] = (
+        _str_field(model_obj.get("display_name"), "model.display_name")
+        or None)
 
-    # Session ID (for tool call counting)
-    out["session_id"] = _str_field(data.get("session_id"))
+    # Session ID (for tool call counting and the daily-spend ledger).
+    # It is a KEY, not display text, so an id containing control
+    # characters is rejected outright rather than repaired: stripping
+    # them could turn it into a different session's id.
+    session_id = data.get("session_id")
+    if isinstance(session_id, str):
+        if _CONTROL_CHARS_RE.search(session_id):
+            _note("claude-status: ignoring unusable session_id value")
+            session_id = ""
+    else:
+        if session_id is not None:
+            _note("claude-status: ignoring non-string session_id value")
+        session_id = ""
+    out["session_id"] = session_id
 
     # Transcript path (for live activity counter — tool calls since
     # the most recent user message). Stored only if it's a non-empty
@@ -591,10 +638,10 @@ def _normalize(data):
     out["transcript_path"] = transcript if isinstance(transcript, str) else ""
 
     # Session name (custom name via --name or /rename)
-    out["session_name"] = _str_field(data.get("session_name"))
+    out["session_name"] = _str_field(data.get("session_name"), "session_name")
 
     # Claude Code version
-    out["cc_version"] = _str_field(data.get("version"))
+    out["cc_version"] = _str_field(data.get("version"), "version")
 
     # Rate limits (Pro/Max only, added in Claude Code v2.1.80).
     rl = data.get("rate_limits")
@@ -722,7 +769,7 @@ def _normalize(data):
     style_obj = data.get("output_style")
     style_obj = style_obj if isinstance(style_obj, dict) else {}
     style_name = style_obj.get("name")
-    out["output_style"] = _str_field(style_name)
+    out["output_style"] = _str_field(style_name, "output_style.name")
 
     # Added directories count
     added_dirs = workspace.get("added_dirs")
@@ -1760,14 +1807,17 @@ def _detect_terminal_width_report(data=None):
     """Detect terminal width and return both the winner and a per-step report.
 
     Claude Code spawns the statusLine command as a child process with
-    stdin piped — there is no TTY, no `COLUMNS` env var, and
-    `shutil.get_terminal_size()` returns its fallback. As a result we
-    can't tell from the subprocess context alone whether the user has
-    a 100-col terminal or a 300-col one, and our two-stage layout
-    silently trims to the fallback width.
+    stdin piped and no TTY. Releases that predate the `COLUMNS` /
+    `LINES` handoff set no width in the environment either, so
+    `shutil.get_terminal_size()` returns its fallback there: from the
+    subprocess context alone we could not tell a 100-col terminal
+    from a 300-col one, and the two-stage layout silently trimmed to
+    the fallback width.
 
-    Tracked upstream at anthropics/claude-code#22115 (open since Jan
-    2026, no upstream fix). Worse, Claude Code 2.1.139 (2026-05-11)
+    The handoff was requested upstream at anthropics/claude-code#22115
+    (closed as completed, 2026-05-28); current releases set `COLUMNS`
+    and `LINES`, and the chain below still serves the older ones.
+    Before that landed, Claude Code 2.1.139 (2026-05-11)
     shipped "hooks now run without terminal access," which closed the
     `/dev/tty` escape hatch our stty/tput steps relied on AND caused
     `tput cols` to return its terminfo stub (typically 80) instead of
@@ -2309,7 +2359,9 @@ def render(data, theme_name="default"):
        (long agent name, vim mode active, long branch+session).
 
     Stage 2 exists because Claude Code's Ink TUI uses wrap:"truncate"
-    on the statusline (anthropics/claude-code#28750, still unfixed) —
+    on the statusline (anthropics/claude-code#28750; the dropped-line
+    case was fixed upstream in 2.1.141, older releases still have it,
+    and every release cuts an over-wide line mid-section) —
     if Line 1 overflows, Line 2 is silently dropped. Measuring our
     actual rendered width and shrinking until we fit prevents this.
 
@@ -2456,6 +2508,11 @@ _TERMINAL_TASK_STATUSES = frozenset({
 # sequences into the user's terminal (same threat model as the OSC 8
 # URL sanitizer above).
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+# The whitespace members of that class. _str_field turns these into a
+# space before the rest are removed, so "fix login\nbug" stays three
+# words instead of becoming "fix loginbug".
+_WHITESPACE_CONTROLS_RE = re.compile(r"[\t\n\v\f\r\x85]+")
 
 # Length of the "YYYYMMDD" date stamp carried by model IDs
 # ("claude-sonnet-5-20250707"). An all-numeric id part of exactly this
@@ -3790,7 +3847,14 @@ def main():
         if not raw.strip():
             return
         data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+        if not isinstance(data, dict):
+            # Valid JSON that is not an object ("[]", "42", "null") is
+            # as unusable as invalid JSON, and gets the same handling.
+            raise ValueError("payload is not a JSON object")
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        # RecursionError: json.loads recurses per nesting level, so a
+        # pathologically nested payload overflows the stack rather
+        # than reporting a decode error.
         # JSONL purity: in subagent mode (or anything that even LOOKS
         # like a truncated subagent payload) a bare "?" line would be
         # injected into the agent panel's JSONL stream. Print nothing

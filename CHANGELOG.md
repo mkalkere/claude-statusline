@@ -7,17 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.16.1] - 2026-10-12
 
-Robustness release. No new features and no change for well-formed input.
+Robustness release. No new features, and no change for well-formed input.
 
 ### Fixed
 
-- **A stdin field of the wrong type could blank the whole status line** ([#133](https://github.com/mkalkere/claude-statusline/issues/133)). Several fields were read without a type check and then concatenated or method-called by a renderer, so a number or a list where a name belongs raised from inside the render, and the only thing that caught it was the outer fallback that prints nothing at all. Fuzzing every documented stdin field with every JSON type found nine such paths:
+- **A stdin field of the wrong type could blank the whole status line** ([#133](https://github.com/mkalkere/claude-statusline/issues/133)). Several fields were read without a type check and then concatenated or method-called by a renderer, so a number or a list where a name belongs raised from inside the render, and the only thing that caught it was the outer fallback that prints nothing at all. Replacing every field of a full payload, in turn, with a value of every JSON type found ten such fields:
 
   | field | failed when it was |
   |---|---|
-  | `version` | not a string, with `cc_version` in the theme |
-  | `vim.mode` | not a string |
-  | `worktree.branch` | not a string |
+  | `version` | not a string (with `cc_version` in the theme) |
+  | `vim.mode` | not a string (with `vim` in the theme) |
+  | `worktree.branch` | not a string (with `worktree` in the theme) |
+  | `session_id` | not a string (with `tools` in the theme) |
   | `git_branch` | not a string |
   | `workspace.project_dir` | not a string |
   | `model` | not an object |
@@ -25,20 +26,26 @@ Robustness release. No new features and no change for well-formed input.
   | `context_window.current_usage` | not an object |
   | `current_usage` (flat form) | not an object |
 
-  All string fields now go through one check: anything that is not a string is treated as absent, so its own section hides (or, for the branch, falls back to asking git) and the rest of the line renders. The object fields get the same `isinstance` guard the other nested blocks already had. The same fuzz run — 1,674 cases across 93 fields — now completes with no exception.
+  The flat `vim_mode` and `worktree_branch` keys, read when the nested objects are absent, failed the same way. Every string field now goes through one check: anything that is not a string is treated as absent, so its own section hides (or, for the branch, falls back to asking git) and the rest of the line renders. The object fields get the same `isinstance` guard the other nested blocks already had. That sweep — 80 fields by 18 values, 1,440 renders with every consuming section enabled — is now a test in the suite, so a field added later without a type check fails there.
 
-- **Control characters in names are no longer passed through to the terminal.** Session, model, branch, worktree, agent, output-style and vim-mode text, plus the Claude Code version, is embedded in the output as sent. C0 and C1 control characters are now stripped from all of them, so a name cannot carry an escape sequence into your terminal. Subagent row text and link URLs were already handled this way; the main line was not.
+- **A payload that is valid JSON but not an object** (`[]`, `42`, `null`) raised in the renderer and left a blank line. It now gets the same `?` as invalid JSON, and nothing at all in subagent mode. A pathologically nested payload, which overflowed the parser's stack and escaped as a traceback, is handled the same way.
 
-- **Diagnostics could appear inside the status line when stderr was closed.** The one-line "ignoring … value" notes are written to stderr. When the command is started with file descriptor 2 closed, Python's `sys.stderr` is `None` and `print` then falls back to stdout — so the note became the first row of the status line. Every diagnostic on the render path now goes through one helper that writes to stderr or nowhere.
+- **Control characters in names are no longer passed through to the terminal.** Session, model, branch, project, worktree, agent, output-style and vim-mode text, the Claude Code version, and cost-category names are all embedded in the output as sent. C0 and C1 control characters are now removed from every one of them, so none of these can carry an escape sequence into your terminal. Tabs and line breaks become a space, so the words either side stay apart. Subagent row text was already stripped this way, and link URLs containing such bytes were already rejected; the main line was not covered.
+
+- **Line counts are coerced like the other numbers.** `cost.total_lines_added` and `total_lines_removed` were formatted into the output as sent: a string was embedded verbatim, escape sequences included, and a list rendered as its `repr`. They now go through the same numeric check as cost and duration and render as whole numbers.
+
+- **Diagnostics could appear inside the status line when stderr was closed.** The one-line "ignoring … value" notes are written to stderr. When the command is started with file descriptor 2 closed, Python's `sys.stderr` is `None` and `print` then falls back to stdout — so the note became the first row of the status line. Every diagnostic on the render path now goes through one helper that writes to stderr or nowhere, and the custom-theme load warning no longer raises (and so no longer blanks the line) when stderr is closed or broken.
 
 ### Changed
 
-- README and `llms.txt` describe the upstream width situation as it is now: Claude Code passes the terminal dimensions to the command through `COLUMNS` and `LINES` (the request for it, anthropics/claude-code#22115, was closed as completed), and the per-line truncation case was fixed in Claude Code 2.1.141. Both documents still said the width was hidden and the request open. This closes the tracking issue [#53](https://github.com/mkalkere/claude-statusline/issues/53); the adaptive layout stays, because it is what keeps each line inside the panel on every release.
+- **Wrong-typed fields now say so on stderr.** A string or object field that is present with the wrong type leaves a one-line note naming it — `claude-status: ignoring non-string version value` — as numeric fields already did. Absent fields stay silent. If a section disappears after a Claude Code update, that note says which field changed shape.
+- **A `session_id` containing control characters is ignored** rather than cleaned up. It is a key for the tool count and the daily-spend ledger, and removing characters from one could turn it into a different session's id.
+- README, `llms.txt`, two code comments and the release playbook describe the upstream width situation as it is now: Claude Code passes the terminal dimensions to the command through `COLUMNS` and `LINES` (the request for it, anthropics/claude-code#22115, was closed as completed), and the dropped-line case was fixed in Claude Code 2.1.141. They still said the width was hidden and the request open. This closes the tracking issue [#53](https://github.com/mkalkere/claude-statusline/issues/53); the adaptive layout stays, because it is what keeps each line inside the panel on every release.
 
 ### Notes
 
-- 836 tests pass (+14; 838 run, with 2 POSIX-only tests skipped on Windows): each crashing field against twelve wrong-typed values with a check that untouched sections on both lines survive, a baseline that proves every field under test is actually rendered, the fall back to git for an unusable branch, the `None`-when-absent contract the renderers rely on, control-character stripping per field, and the diagnostics path with stderr missing, broken, and present. Pure stdlib, zero dependencies, as always.
-- Names that are extremely long are not shortened by this release; a branch or project name of several thousand characters still produces an over-wide line.
+- 858 tests pass (+36; 860 run, with 2 POSIX-only tests skipped on Windows). 31 of the new tests fail against the v0.16.0 package. They cover: the type sweep above; each affected field hiding its own section without a stringified wrong-type value appearing in its place, checked against a baseline that proves the field is on the line to begin with; the flat fallbacks and the project-name fallback order; control-character removal for all fourteen text sources; the stderr notes, one per field; and `main()` run in-process with stderr missing for each of its four diagnostics, plus the non-object and deeply nested payloads.
+- Not addressed: names that are extremely long are not shortened, so a branch or project name of several thousand characters still produces an over-wide line; and Unicode bidirectional and zero-width format characters are not removed.
 
 ## [0.16.0] - 2026-10-12
 

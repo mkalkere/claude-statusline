@@ -9425,35 +9425,59 @@ class TestSafeNumOverflow(unittest.TestCase):
             cli_mod.get_branch = orig
 
 
-class TestStdinTypeRobustness(unittest.TestCase):
-    """#133: a stdin field of the wrong TYPE must hide one section, not
-    raise from inside render() and blank the whole status line. Every
-    field here was found crashing by fuzzing each documented field
-    with each JSON type."""
+# Sentinel default for "capture stderr in a buffer" in TestMainDiagnostics
+# — None is itself a value under test there (stderr closed).
+_REAL_STDERR = object()
 
-    # One value of every JSON type that is wrong for a name or an
-    # object, plus the oversized integer json.loads can produce.
-    BAD = ("text", 7, 0, 2.5, True, False, None, [], ["x"], {},
-           {"k": "v"}, 10 ** 400)
+
+class _BrokenStream(object):
+    """A stderr whose every write raises the given exception."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def write(self, text):
+        raise self._exc
+
+    def flush(self):
+        pass
+
+
+def _strict_str(value):
+    """Stand-in for a session-keyed reader: like the real ones, it
+    only works on a str. Stubbing them with something that accepts any
+    type would hide exactly the failure #133 is about."""
+    if not isinstance(value, str):
+        raise TypeError("expected str, got {}".format(type(value).__name__))
+    return 3
+
+
+class _StdinRenderCase(unittest.TestCase):
+    """Shared fixture: a full, well-formed payload rendered with every
+    section that reads a string or object field, hermetically."""
+
+    LINE1 = ["bar", "tokens", "cache", "cost", "cost_breakdown", "lines",
+             "context_size", "context_tokens"]
+    LINE2 = ["model", "vim", "worktree", "cc_version", "session_name",
+             "output_style", "agent", "tools", "branch"]
 
     def setUp(self):
         import claude_statusline.cli as cli_mod
         self._cli_mod = cli_mod
         self._saved_lines = (THEMES["default"]["line1"],
                              THEMES["default"]["line2"])
-        self._saved_fns = {name: getattr(cli_mod, name) for name in (
-            "get_branch", "get_disabled_sections", "get_git_state",
-            "get_git_extras")}
-        cli_mod.get_branch = lambda: "from-git"
-        cli_mod.get_disabled_sections = lambda: []
-        cli_mod.get_git_state = lambda: ""
-        cli_mod.get_git_extras = lambda: {"stash": 0, "ahead": 0, "behind": 0}
-        # Every section that reads one of the fields under test.
-        THEMES["default"]["line1"] = ["bar", "tokens", "cache", "cost",
-                                      "context_size", "context_tokens"]
-        THEMES["default"]["line2"] = ["model", "vim", "worktree",
-                                      "cc_version", "session_name",
-                                      "output_style", "agent", "branch"]
+        stubs = {
+            "get_branch": lambda: "from-git",
+            "get_disabled_sections": lambda: [],
+            "get_git_state": lambda: "",
+            "get_git_extras": lambda: {"stash": 0, "ahead": 0, "behind": 0},
+            "get_session_tool_count": _strict_str,
+        }
+        self._saved_fns = {name: getattr(cli_mod, name) for name in stubs}
+        for name, fn in stubs.items():
+            setattr(cli_mod, name, fn)
+        THEMES["default"]["line1"] = list(self.LINE1)
+        THEMES["default"]["line2"] = list(self.LINE2)
         self._saved_env = {k: os.environ.get(k) for k in (
             "COLUMNS", "CLAUDE_STATUSLINE_WIDTH")}
         os.environ["COLUMNS"] = "400"
@@ -9474,6 +9498,7 @@ class TestStdinTypeRobustness(unittest.TestCase):
         return {
             "git_branch": "main",
             "version": "2.1.296",
+            "session_id": "abc123",
             "session_name": "my-session",
             "model": {"display_name": "Opus"},
             "vim": {"mode": "NORMAL"},
@@ -9489,13 +9514,17 @@ class TestStdinTypeRobustness(unittest.TestCase):
                                   "output_tokens": 1200,
                                   "cache_read_input_tokens": 2000,
                                   "cache_creation_input_tokens": 5000}},
-            "cost": {"total_cost_usd": 1.23},
+            "cost": {"total_cost_usd": 1.23, "total_lines_added": 156,
+                     "total_lines_removed": 23,
+                     "by_category": {"mcp": 0.4}},
         }
 
-    def _plain(self, data):
+    def _raw(self, data):
         with contextlib.redirect_stderr(io.StringIO()):
-            out = self._cli_mod.render(data, "default")
-        return re.sub(r"\x1b\[[0-9;]*m", "", out)
+            return self._cli_mod.render(data, "default")
+
+    def _plain(self, data):
+        return re.sub(r"\x1b\[[0-9;]*m", "", self._raw(data))
 
     def _set(self, data, path, value):
         node = data
@@ -9503,26 +9532,52 @@ class TestStdinTypeRobustness(unittest.TestCase):
             node = node[key]
         node[path[-1]] = value
 
+
+class TestStdinTypeRobustness(_StdinRenderCase):
+    """#133: a stdin field of the wrong TYPE must hide its own section,
+    not raise from inside render() and blank the whole status line."""
+
+    # Wrong for a name: every JSON type except string, plus the
+    # oversized integer json.loads can produce. None is "absent".
+    NOT_A_STRING = (7, 0, 2.5, True, False, None, [], ["x"], {},
+                    {"k": "v"}, 10 ** 400)
+    # Wrong for an object: every JSON type except object.
+    NOT_AN_OBJECT = ("text", 7, 0, 2.5, True, False, None, [], ["x"],
+                     10 ** 400)
+
+    # field path -> text that field puts on the line when well-formed.
+    STRING_FIELDS = {
+        ("version",): "CC:",
+        ("session_name",): "my-session",
+        ("model", "display_name"): "Opus",
+        ("vim", "mode"): "NORMAL",
+        ("worktree", "branch"): "wt:",
+        ("output_style", "name"): "style:",
+        ("agent", "name"): "[reviewer]",
+        ("git_branch",): "/main",
+        ("workspace", "project_dir"): None,   # see the project tests
+        ("worktree", "name"): None,           # stored, not rendered
+    }
+    OBJECT_FIELDS = {
+        ("model",): "Opus",
+        ("context_window",): "in:8.5K",
+        ("context_window", "current_usage"): "in:8.5K",
+    }
+
     def test_baseline_renders_every_section_under_test(self):
-        """Guards the loop below against going vacuous: with good
-        input, each field under test is actually on the line."""
+        """Guards the loops below against going vacuous: with good
+        input, each token they later expect to disappear is present."""
         plain = self._plain(self._base())
+        self.assertEqual(len(plain.split("\n")), 2)
         for token in ("Opus", "NORMAL", "wt:wt-feat", "CC:2.1.296",
-                      "my-session", "style:concise", "[reviewer]", "main",
-                      "$1.2", "in:"):
+                      "my-session", "style:concise", "[reviewer]",
+                      "myapp/main", "tools:3", "$1.2", "in:8.5K",
+                      "mcp:$0.40", "+156", "-23"):
             self.assertIn(token, plain)
 
-    def test_wrong_type_never_blanks_the_line(self):
-        fields = (("version",), ("session_name",), ("git_branch",),
-                  ("model",), ("model", "display_name"), ("vim", "mode"),
-                  ("worktree", "branch"), ("worktree", "name"),
-                  ("output_style", "name"), ("agent", "name"),
-                  ("workspace", "project_dir"),
-                  ("workspace", "current_dir"), ("cwd",),
-                  ("context_window",), ("context_window", "current_usage"),
-                  ("session_id",))
-        for path in fields:
-            for bad in self.BAD:
+    def _assert_field_hidden(self, fields, bad_values):
+        for path, token in fields.items():
+            for bad in bad_values:
                 data = self._base()
                 self._set(data, path, bad)
                 label = "{}={!r}".format(".".join(path), bad)[:70]
@@ -9530,31 +9585,105 @@ class TestStdinTypeRobustness(unittest.TestCase):
                     plain = self._plain(data)
                 except Exception as exc:  # the regression under test
                     self.fail("{} raised {!r}".format(label, exc))
-                # Untouched sections on both lines survive.
+                # Both lines survive, with sections the field does not
+                # feed still on them...
                 self.assertEqual(len(plain.split("\n")), 2, label)
                 self.assertIn("$1.2", plain, label)
-                if path != ("agent", "name"):
-                    self.assertIn("[reviewer]", plain, label)
+                self.assertIn("tools:3", plain, label)
+                # ...and the field's own text is gone rather than
+                # replaced by a stringified wrong-type value.
+                if token is not None:
+                    self.assertNotIn(token, plain, label)
+                for garbage in ("None", "True", "False", "['x']",
+                                "{'k'", "[]", "{}"):
+                    self.assertNotIn(garbage, plain, label)
+
+    def test_wrong_typed_string_field_hides_its_section(self):
+        self._assert_field_hidden(self.STRING_FIELDS, self.NOT_A_STRING)
+
+    def test_wrong_typed_object_field_hides_its_section(self):
+        self._assert_field_hidden(self.OBJECT_FIELDS, self.NOT_AN_OBJECT)
 
     def test_flat_current_usage_wrong_type(self):
         """The flat `current_usage` fallback (demo mode, older
         schemas) had the same unguarded .get()."""
-        for bad in self.BAD:
+        for bad in self.NOT_AN_OBJECT:
             data = self._base()
             data["current_usage"] = bad
-            self.assertIn("$1.2", self._plain(data), repr(bad)[:40])
+            self.assertIn("in:8.5K", self._plain(data), repr(bad)[:40])
 
-    def test_wrong_type_hides_only_its_own_section(self):
+    def test_wrong_typed_session_id(self):
+        """The session-keyed readers only accept a str (the stub here
+        raises on anything else, as the real reader did). A wrong-typed
+        id never reaches them: the tools section hides and the rest of
+        the line renders."""
+        for bad in self.NOT_A_STRING:
+            data = self._base()
+            data["session_id"] = bad
+            plain = self._plain(data)
+            self.assertNotIn("tools:", plain, repr(bad)[:40])
+            self.assertIn("[reviewer]", plain, repr(bad)[:40])
+            self.assertIn("$1.2", plain, repr(bad)[:40])
+
+    def test_session_id_with_control_characters_is_rejected(self):
+        """A session id is a key. Stripping characters out of one
+        could turn it into another session's id, so it is dropped."""
+        from claude_statusline.cli import _normalize
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                _normalize({"session_id": "abc\ndef"})["session_id"], "")
+            self.assertEqual(
+                _normalize({"session_id": "abc\x1bdef"})["session_id"], "")
+            self.assertEqual(
+                _normalize({"session_id": "abc-DEF_123"})["session_id"],
+                "abc-DEF_123")
+
+    def test_real_tool_count_reader_accepts_the_empty_id(self):
+        from claude_statusline.sessions import get_session_tool_count
+        self.assertEqual(get_session_tool_count(""), 0)
+
+    def test_flat_string_fallbacks(self):
+        """`vim_mode` and `worktree_branch` are read when the nested
+        objects are absent (demo mode, older schemas)."""
         data = self._base()
-        data["version"] = 2.1
+        del data["vim"], data["worktree"]
+        data["vim_mode"] = "FLATVIM"
+        data["worktree_branch"] = "flat-wt"
         plain = self._plain(data)
-        self.assertNotIn("CC:", plain)
-        self.assertIn("my-session", plain)
-        data = self._base()
-        data["vim"]["mode"] = ["NORMAL"]
-        plain = self._plain(data)
-        self.assertNotIn("NORMAL", plain)
-        self.assertIn("Opus", plain)
+        self.assertIn("FLATVIM", plain)
+        self.assertIn("wt:flat-wt", plain)
+        for bad in self.NOT_A_STRING:
+            data["vim_mode"] = bad
+            data["worktree_branch"] = bad
+            plain = self._plain(data)
+            self.assertNotIn("wt:", plain, repr(bad)[:40])
+            self.assertNotIn("FLATVIM", plain)
+            self.assertIn("tools:3", plain, repr(bad)[:40])
+
+    def test_project_name_sources(self):
+        """project_dir wins; current_dir, then cwd, stand in for it. A
+        wrong type at any level falls through to the next."""
+        def project(workspace, cwd):
+            data = self._base()
+            data["workspace"] = workspace
+            if cwd is None:
+                data.pop("cwd")
+            else:
+                data["cwd"] = cwd
+            m = re.search(r"\u2387 (\S+)", self._plain(data))
+            return m.group(1) if m else None
+
+        self.assertEqual(project({"project_dir": "/home/user/a"},
+                                 "/home/user/c"), "a/main")
+        self.assertEqual(project({"project_dir": 7,
+                                  "current_dir": "/home/user/b"},
+                                 "/home/user/c"), "b/main")
+        self.assertEqual(project({"current_dir": ["x"]},
+                                 "/home/user/c"), "c/main")
+        for bad in self.NOT_A_STRING:
+            self.assertEqual(project({"project_dir": bad,
+                                      "current_dir": bad}, bad), "main",
+                             repr(bad)[:40])
 
     def test_unusable_git_branch_falls_back_to_git(self):
         for bad in (7, ["main"], {"name": "main"}, True):
@@ -9572,11 +9701,40 @@ class TestStdinTypeRobustness(unittest.TestCase):
                             "worktree": {"branch": [], "name": 9},
                             "version": 2.1, "session_name": {"a": 1},
                             "session_id": 7})
+            clean = _normalize({"worktree": {"name": "a\x1bb"}})
         for key in ("git_branch", "model_name", "vim_mode",
                     "worktree_branch", "worktree_name"):
             self.assertIsNone(n[key], key)
         for key in ("cc_version", "session_name", "session_id"):
             self.assertEqual(n[key], "", key)
+        self.assertEqual(clean["worktree_name"], "ab")
+
+    def test_line_counts_are_coerced(self):
+        """Line counts are formatted into the output; a string was
+        embedded verbatim and a list rendered as its repr."""
+        def lines(added, removed=23):
+            data = self._base()
+            data["cost"]["total_lines_added"] = added
+            data["cost"]["total_lines_removed"] = removed
+            return self._plain(data).split("\n")[0]
+
+        self.assertIn("+156 -23", lines(156))
+        self.assertIn("+156 -23", lines("156"))      # numeric string
+        self.assertIn("+156 -23", lines(156.0))      # no "+156.0"
+        self.assertNotIn("156.0", lines(156.0))
+        for bad in ("lots", ["a", "b"], {"k": 1}, True, float("nan"),
+                    10 ** 400, "\x1b]0;x\x07"):
+            line = lines(bad)
+            self.assertIn("-23", line, repr(bad)[:40])
+            self.assertNotIn("+", line.split("mcp:$0.40")[1].split("-23")[0],
+                             repr(bad)[:40])
+        # Flat keys used by demo mode get the same treatment.
+        data = self._base()
+        del data["cost"]["total_lines_added"]
+        del data["cost"]["total_lines_removed"]
+        data["lines_added"] = "12"
+        data["lines_removed"] = ["x"]
+        self.assertIn("+12", self._plain(data))
 
     def test_str_field(self):
         from claude_statusline.cli import _str_field
@@ -9584,32 +9742,251 @@ class TestStdinTypeRobustness(unittest.TestCase):
         self.assertEqual(_str_field(""), "")
         for bad in (None, 7, 2.5, True, [], {}, ["x"], b"bytes"):
             self.assertEqual(_str_field(bad), "", repr(bad))
-        # C0, DEL and C1 are all removed; printable text is kept.
-        self.assertEqual(_str_field("a\x1b[31mb\x07c\nd\te\x7ff\x9bg"),
-                         "a[31mbcdefg")
-        self.assertEqual(_str_field("café ✦"), "café ✦")
+        # C0, DEL and C1 are removed; printable text is kept, including
+        # what is left of a defused escape sequence.
+        self.assertEqual(_str_field("a\x1b[31mb\x07c\x7fd\x9be"),
+                         "a[31mbcde")
+        self.assertEqual(_str_field("caf\u00e9 \u2726"), "caf\u00e9 \u2726")
+        # Backslashes are not control characters.
+        self.assertEqual(_str_field("C:\\Users\\user\\my app"),
+                         "C:\\Users\\user\\my app")
+
+    def test_str_field_keeps_words_apart(self):
+        """Tabs and line breaks become a space; a run of them becomes
+        one space. Deleting them glued the words together."""
+        from claude_statusline.cli import _str_field
+        self.assertEqual(_str_field("fix login\nbug"), "fix login bug")
+        self.assertEqual(_str_field("a\tb\r\nc\x0bd\x0ce\x85f"),
+                         "a b c d e f")
+
+    def test_str_field_breadcrumbs(self):
+        """Present-but-not-a-string names the field on stderr; absent
+        and well-formed are silent; no field name, no note."""
+        from claude_statusline.cli import _str_field
+        for value, field, expected in (
+                (7, "version", "claude-status: ignoring non-string "
+                               "version value\n"),
+                (["x"], "vim.mode", "claude-status: ignoring non-string "
+                                    "vim.mode value\n"),
+                (None, "version", ""), ("ok", "version", ""),
+                (7, None, "")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                _str_field(value, field)
+            self.assertEqual(err.getvalue(), expected, (value, field))
+
+    def test_wrong_typed_fields_leave_a_breadcrumb(self):
+        from claude_statusline.cli import _normalize
+        for payload, expected in (
+                ({"model": "Opus 5"}, "non-object model"),
+                ({"model": {"display_name": 7}},
+                 "non-string model.display_name"),
+                ({"context_window": []}, "non-object context_window"),
+                ({"context_window": {"current_usage": 3}},
+                 "non-object context_window.current_usage"),
+                ({"current_usage": "x"}, "non-object current_usage"),
+                ({"version": 2.1}, "non-string version"),
+                ({"session_name": ["a"]}, "non-string session_name"),
+                ({"git_branch": 7}, "non-string git_branch"),
+                ({"vim": {"mode": 1}}, "non-string vim.mode"),
+                ({"vim_mode": 1}, "non-string vim_mode"),
+                ({"worktree": {"branch": 1}}, "non-string worktree.branch"),
+                ({"worktree_branch": 1}, "non-string worktree_branch"),
+                ({"worktree": {"name": 1}}, "non-string worktree.name"),
+                ({"workspace": {"project_dir": 1}},
+                 "non-string workspace.project_dir"),
+                ({"workspace": {"current_dir": 1}},
+                 "non-string workspace.current_dir"),
+                ({"cwd": 1}, "non-string cwd"),
+                ({"output_style": {"name": 1}},
+                 "non-string output_style.name"),
+                ({"session_id": 7}, "non-string session_id"),
+                ({"session_id": "a\nb"}, "unusable session_id"),
+                ({"cost": {"total_lines_added": "lots"}},
+                 "non-numeric lines_added"),
+                ({"cost": {"total_lines_removed": []}},
+                 "non-numeric lines_removed")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                _normalize(payload)
+            self.assertEqual(
+                err.getvalue(),
+                "claude-status: ignoring {} value\n".format(expected),
+                repr(payload))
+
+    def test_well_formed_payload_is_silent(self):
+        from claude_statusline.cli import _normalize
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            _normalize(self._base())
+            _normalize({})
+        self.assertEqual(err.getvalue(), "")
 
     def test_control_characters_cannot_reach_the_terminal(self):
-        """A name is embedded in terminal output verbatim. An escape
-        sequence in it must arrive defused (the ESC byte removed), not
-        as a live sequence."""
+        """Every piece of stdin text that is embedded in the output.
+        An escape sequence in it must arrive defused (the ESC byte
+        removed), not as a live sequence."""
         attack = "\x1b]0;owned\x07\x1b[2Jevil"
+
+        def by_category(data):
+            data["cost"]["by_category"] = {attack: 0.4}
+
+        def flat(key):
+            def mutate(data):
+                del data["vim"], data["worktree"]
+                data[key] = attack
+            return mutate
+
+        def current_dir(data):
+            data["workspace"] = {"current_dir": "/home/user/" + attack}
+            del data["cwd"]
+
+        def cwd(data):
+            data["workspace"] = {}
+            data["cwd"] = "/home/user/" + attack
+
+        mutations = {
+            "cost.by_category key": by_category,
+            "vim_mode (flat)": flat("vim_mode"),
+            "worktree_branch (flat)": flat("worktree_branch"),
+            "workspace.current_dir": current_dir,
+            "cwd": cwd,
+            "workspace.project_dir": lambda d: self._set(
+                d, ("workspace", "project_dir"), "/home/user/" + attack),
+        }
         for path in (("session_name",), ("model", "display_name"),
                      ("git_branch",), ("worktree", "branch"),
                      ("agent", "name"), ("output_style", "name"),
                      ("vim", "mode"), ("version",)):
+            mutations[".".join(path)] = (
+                lambda d, p=path: self._set(d, p, attack))
+        self.assertEqual(len(mutations), 14)
+        for label, mutate in mutations.items():
             data = self._base()
-            self._set(data, path, attack)
-            with contextlib.redirect_stderr(io.StringIO()):
-                out = self._cli_mod.render(data, "default")
-            label = ".".join(path)
+            mutate(data)
+            out = self._raw(data)
             self.assertNotIn("\x07", out, label)
             self.assertNotIn("\x1b]", out, label)
             self.assertNotIn("\x1b[2J", out, label)
             # The only escapes left are the renderer's own SGR colors.
             self.assertEqual(
                 re.sub(r"\x1b\[[0-9;]*m", "", out).count("\x1b"), 0, label)
+            # Not vacuous: the text really was on the line.
             self.assertIn("evil", out.lower(), label)
+
+    def test_escapes_in_numeric_slots_are_not_rendered(self):
+        """Fields that are formatted as numbers must not echo a string
+        at all."""
+        attack = "\x1b]0;owned\x07evil"
+        for path in (("cost", "total_lines_added"),
+                     ("cost", "total_lines_removed"),
+                     ("cost", "total_cost_usd"),
+                     ("context_window", "used_percentage"),
+                     ("context_window", "context_window_size")):
+            data = self._base()
+            self._set(data, path, attack)
+            out = self._raw(data)
+            self.assertNotIn("evil", out, ".".join(path))
+            self.assertNotIn("\x07", out, ".".join(path))
+
+
+class TestStdinTypeFuzz(_StdinRenderCase):
+    """Every field of the fixture payload, replaced in turn by a value
+    of every JSON type, with every consuming section enabled. This is
+    the sweep that found the #133 crashes; it stays in the suite so a
+    field added later without a type check fails here."""
+
+    VALUES = ("text", "", 7, 0, -1, 2.5, True, False, None, [], ["x"],
+              {}, {"k": "v"}, 10 ** 400, float("nan"), float("inf"),
+              "\x1b[31mx", "x" * 300)
+
+    def _paths(self, obj, prefix=()):
+        for key, value in obj.items():
+            yield prefix + (key,)
+            if isinstance(value, dict):
+                for path in self._paths(value, prefix + (key,)):
+                    yield path
+
+    def _payload(self):
+        data = self._base()
+        data.update({
+            "prompt_cache": {"warm": True, "caching_observed": True,
+                             "ttl": "1h", "expires_at": 1738429200,
+                             "misses": 2, "hit_ratio": 0.91},
+            "rate_limits": {"five_hour": {"used_percentage": 23.5,
+                                          "resets_at": 1738425600},
+                            "seven_day": {"used_percentage": 41.2,
+                                          "resets_at": 1738857600}},
+            "effort": {"level": "high"},
+            "thinking": {"enabled": True},
+            "pr": {"number": 1234, "url": "https://example.com/pull/1234",
+                   "review_state": "pending", "kind": "mr"},
+            "github": {"pr_number": 5, "repo": "user/myapp",
+                       "pr_url": "https://example.com/pull/5"},
+            "terminal": {"columns": 400},
+            "exceeds_200k_tokens": False,
+            "transcript_path": "/home/user/.claude/projects/myapp/t.jsonl",
+            "current_usage": {"used_percentage": 8, "context_size": 200000},
+            "agent_name": "flat", "vim_mode": "NORMAL",
+            "worktree_branch": "flat-wt",
+            "lines_added": 1, "lines_removed": 1,
+        })
+        data["workspace"].update({
+            "added_dirs": ["/home/user/projects/lib"],
+            "git_worktree": "feature-xyz",
+            "repo": {"host": "example.com", "owner": "user",
+                     "name": "myapp"}})
+        data["cost"].update({"total_duration_ms": 450000,
+                             "total_api_duration_ms": 23000})
+        return data
+
+    def test_no_field_and_type_combination_raises(self):
+        cli = self._cli_mod
+        extra = {
+            "get_last_commit_age_ms": lambda: 300000,
+            "get_budget_config": lambda: 10.0,
+            "get_budget_scope": lambda: "session",
+            "record_and_get_daily_spend": lambda *a, **k: (0.0, False),
+            "get_today_session_count": lambda: 2,
+            "get_session_activity_count": _strict_str,
+            "get_last_assistant_timestamp_ms": lambda p: (
+                _strict_str(p) and None),
+            "get_effort_level": lambda: "high",
+            "get_compaction_threshold": lambda: None,
+            "_write_cache": lambda *a, **k: None,
+            "_read_cache": lambda *a, **k: None,
+        }
+        for name, fn in extra.items():
+            self._saved_fns[name] = getattr(cli, name)
+            setattr(cli, name, fn)
+        THEMES["default"]["line1"] = self.LINE1 + [
+            "cost_rate", "duration", "burn", "speed", "latency",
+            "ctx_warning", "rate_limits", "budget", "cache_hit"]
+        THEMES["default"]["line2"] = self.LINE2 + [
+            "git_worktree", "git_state", "git_extras", "commit_age", "pr",
+            "thinking", "effort", "version", "clock", "added_dirs",
+            "sessions", "activity", "cache_age"]
+
+        template = self._payload()
+        paths = list(self._paths(template))
+        # The sweep must stay broad: a fixture that shrinks would let
+        # this test pass while covering nothing.
+        self.assertGreaterEqual(len(paths), 70)
+        self.assertEqual(len(self._plain(self._payload()).split("\n")), 2)
+        failures = []
+        for path in paths:
+            for bad in self.VALUES:
+                data = self._payload()
+                self._set(data, path, bad)
+                try:
+                    out = self._raw(data)
+                except Exception as exc:
+                    failures.append("{}={!r}: {!r}".format(
+                        ".".join(path), bad, exc)[:120])
+                    continue
+                if not isinstance(out, str):
+                    failures.append("{}: non-str output".format(path))
+        self.assertEqual(failures, [])
 
 
 class TestDiagnosticsNeverReachStdout(unittest.TestCase):
@@ -9642,36 +10019,26 @@ class TestDiagnosticsNeverReachStdout(unittest.TestCase):
 
     def test_note_survives_a_broken_stream(self):
         from claude_statusline.cli import _note
-
-        class _Broken(object):
-            def __init__(self, exc):
-                self._exc = exc
-
-            def write(self, text):
-                raise self._exc
-
-            def flush(self):
-                pass
-
         for exc in (ValueError("I/O operation on closed file"),
                     OSError("broken pipe")):
             _, stdout = self._with_stderr(
-                _Broken(exc), lambda: _note("hello"))
+                _BrokenStream(exc), lambda: _note("hello"))
             self.assertEqual(stdout, "")
 
     def test_normalize_breadcrumbs_stay_off_stdout(self):
         """Every breadcrumb source in _normalize: the token block, the
-        money/time trio, and prompt_cache."""
+        money/time trio, prompt_cache, and the string/object checks."""
         from claude_statusline.cli import _normalize
         payload = {"context_window": {"used_percentage": "junk"},
                    "cost": {"total_cost_usd": "abc"},
-                   "prompt_cache": {"ttl": "zzz", "hit_ratio": 91}}
+                   "prompt_cache": {"ttl": "zzz", "hit_ratio": 91},
+                   "version": 7, "model": "opus", "session_id": 3}
         # Positive control: with a real stderr the same payload DOES
         # produce diagnostics, so the silence below means something.
         err = io.StringIO()
         _, stdout = self._with_stderr(err, lambda: _normalize(payload))
         self.assertEqual(stdout, "")
-        self.assertEqual(len(err.getvalue().splitlines()), 4)
+        self.assertEqual(len(err.getvalue().splitlines()), 7)
         _, stdout = self._with_stderr(None, lambda: _normalize(payload))
         self.assertEqual(stdout, "")
 
@@ -9689,7 +10056,7 @@ class TestDiagnosticsNeverReachStdout(unittest.TestCase):
         self.assertNotIn("claude-status:", rendered)
         self.assertIn("main", rendered)
 
-    def test_custom_theme_warning_stays_off_stdout(self):
+    def _custom_theme(self, stream):
         from claude_statusline import themes as themes_mod
         d = tempfile.mkdtemp(prefix="claude-status-theme-")
         path = os.path.join(d, "theme.json")
@@ -9698,20 +10065,123 @@ class TestDiagnosticsNeverReachStdout(unittest.TestCase):
         orig = themes_mod._custom_theme_path
         themes_mod._custom_theme_path = lambda: path
         try:
-            err = io.StringIO()
-            theme, stdout = self._with_stderr(
-                err, lambda: themes_mod.get_theme("custom"))
-            self.assertEqual(stdout, "")
-            self.assertIn("could not load custom theme", err.getvalue())
-            theme, stdout = self._with_stderr(
-                None, lambda: themes_mod.get_theme("custom"))
-            self.assertEqual(stdout, "")
-            # Still degrades to the default theme.
-            self.assertIs(theme, THEMES["default"])
+            return self._with_stderr(
+                stream, lambda: themes_mod.get_theme("custom"))
         finally:
             themes_mod._custom_theme_path = orig
             import shutil as shutil_mod
             shutil_mod.rmtree(d, ignore_errors=True)
+
+    def test_custom_theme_warning_goes_to_stderr(self):
+        err = io.StringIO()
+        theme, stdout = self._custom_theme(err)
+        self.assertEqual(stdout, "")
+        self.assertIn("could not load custom theme", err.getvalue())
+        self.assertIs(theme, THEMES["default"])
+
+    def test_custom_theme_warning_stays_off_stdout(self):
+        theme, stdout = self._custom_theme(None)
+        self.assertEqual(stdout, "")
+        self.assertIs(theme, THEMES["default"])
+
+    def test_custom_theme_warning_survives_a_broken_stream(self):
+        """This runs inside render(): a raise here blanked the line
+        instead of falling back to the default theme."""
+        for exc in (ValueError("I/O operation on closed file"),
+                    OSError("broken pipe")):
+            theme, stdout = self._custom_theme(_BrokenStream(exc))
+            self.assertEqual(stdout, "")
+            self.assertIs(theme, THEMES["default"])
+
+
+class TestMainDiagnostics(unittest.TestCase):
+    """main()'s own diagnostics, and the payload shapes it rejects
+    before rendering. Run in-process with stdin, stdout, stderr and
+    argv swapped."""
+
+    def _main(self, stdin_text, argv=(), stderr=_REAL_STDERR, patches=None):
+        import claude_statusline.cli as cli_mod
+        patches = dict(patches or {})
+        saved = {name: getattr(cli_mod, name) for name in patches}
+        saved_io = (sys.argv, sys.stdin, sys.stderr)
+        out = io.StringIO()
+        err = io.StringIO() if stderr is _REAL_STDERR else stderr
+        sys.argv = ["claude-status"] + list(argv)
+        sys.stdin = io.StringIO(stdin_text)
+        sys.stderr = err
+        for name, fn in patches.items():
+            setattr(cli_mod, name, fn)
+        try:
+            with contextlib.redirect_stdout(out):
+                cli_mod.main()
+        finally:
+            sys.argv, sys.stdin, sys.stderr = saved_io
+            for name, fn in saved.items():
+                setattr(cli_mod, name, fn)
+        return out.getvalue(), (err.getvalue() if err is not None
+                                and hasattr(err, "getvalue") else None)
+
+    SUBAGENT = json.dumps({"columns": 80, "tasks": [
+        {"id": "a", "name": "x", "status": "running"}]})
+
+    def _boom(self, *args, **kwargs):
+        raise RuntimeError("boom")
+
+    def test_each_main_diagnostic_reaches_stderr(self):
+        """Positive controls for the four tests below."""
+        cases = (
+            ("{not json", ["--subagent"], None,
+             "undecodable subagent payload"),
+            (self.SUBAGENT, [], None, "subagent payload auto-detected"),
+            (self.SUBAGENT, ["--subagent"], {"render_subagent": self._boom},
+             "subagent render error: boom"),
+            ('{"git_branch": "main"}', [], {"render": self._boom},
+             "render error: boom"),
+        )
+        for stdin_text, argv, patches, expected in cases:
+            _, err = self._main(stdin_text, argv, patches=patches)
+            self.assertIn(expected, err, expected)
+
+    def test_undecodable_subagent_payload_with_stderr_closed(self):
+        out, _ = self._main("{not json", ["--subagent"], stderr=None)
+        self.assertEqual(out, "")
+
+    def test_autodetect_notice_with_stderr_closed(self):
+        out, _ = self._main(self.SUBAGENT, stderr=None)
+        self.assertNotIn("claude-status:", out)
+        # The rows themselves still come out.
+        self.assertIn('"id": "a"', out)
+
+    def test_subagent_render_error_with_stderr_closed(self):
+        out, _ = self._main(self.SUBAGENT, ["--subagent"], stderr=None,
+                            patches={"render_subagent": self._boom})
+        self.assertEqual(out, "")
+
+    def test_render_error_with_stderr_closed(self):
+        out, _ = self._main('{"git_branch": "main"}', stderr=None,
+                            patches={"render": self._boom})
+        self.assertEqual(out, "")
+
+    def test_non_object_payload_is_treated_as_undecodable(self):
+        """Valid JSON that is not an object raised AttributeError in
+        the renderer and blanked the line with only a stderr note;
+        invalid JSON has always printed "?". Same handling now."""
+        for payload in ("[]", "[1, 2]", '"text"', "42", "null", "true"):
+            out, _ = self._main(payload)
+            self.assertEqual(out, "?\n", payload)
+
+    def test_non_object_subagent_payload_prints_nothing(self):
+        """JSONL purity: no "?" row in the agent panel."""
+        for payload in ("[]", "42", "null"):
+            out, err = self._main(payload, ["--subagent"])
+            self.assertEqual(out, "", payload)
+            self.assertIn("undecodable subagent payload", err)
+
+    def test_pathologically_nested_payload(self):
+        """json.loads recurses per level; RecursionError is not a
+        decode error and escaped as a traceback."""
+        out, _ = self._main("[" * 100000)
+        self.assertEqual(out, "?\n")
 
 
 class TestPromptCacheNormalize(unittest.TestCase):

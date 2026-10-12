@@ -603,7 +603,13 @@ def get_theme(name):
         path = _custom_theme_path()
         # sys.stderr is None when fd 2 is closed; print(file=None)
         # would then write the warning to stdout, into the status line.
+        # A stream that is closed or broken raises instead, and this
+        # runs inside render(): the warning is best-effort, falling
+        # back to the default theme is not.
         if os.path.isfile(path) and sys.stderr is not None:
-            print("Warning: could not load custom theme from {}".format(path),
-                  file=sys.stderr)
+            try:
+                print("Warning: could not load custom theme from {}".format(
+                    path), file=sys.stderr)
+            except (OSError, ValueError):
+                pass
     return THEMES.get(name, THEMES["default"])
