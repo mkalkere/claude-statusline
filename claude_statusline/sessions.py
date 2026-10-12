@@ -1165,18 +1165,25 @@ def read_spill_setting_raw():
     value that get_spill_override() ignores (a quoted "false", a 0).
 
     Returns:
-        (present, value). `present` is False when the file or the key
-        is missing or the file is not a JSON object.
+        (state, value). `state` is "absent" when there is no config
+        file or no such key, "unreadable" when the file exists but is
+        not a JSON object this module can parse (in which case NONE of
+        its settings apply, whatever it appears to say), and "present"
+        with the raw value otherwise.
     """
     path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
+    if not os.path.isfile(path):
+        return "absent", None
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, ValueError):
-        return False, None
-    if not isinstance(data, dict) or "spill_overflow" not in data:
-        return False, None
-    return True, data["spill_overflow"]
+    except (OSError, ValueError, RecursionError):
+        return "unreadable", None
+    if not isinstance(data, dict):
+        return "unreadable", None
+    if "spill_overflow" not in data:
+        return "absent", None
+    return "present", data["spill_overflow"]
 
 
 def get_clickable_links_enabled():

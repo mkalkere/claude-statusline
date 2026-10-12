@@ -1730,15 +1730,17 @@ _SPILL_MIN_COLS = 160
 # Sections that are never shown on another row, because away from
 # their neighbours they stop meaning anything: the branch's companions
 # ("stash:1 sync:+2", a bare "merge", "wt:fix/bug", "gwt", "last:5m"),
-# and the two that carry no label of their own ("+247 -38", "12m05s").
+# and the ones that carry no label of their own ("+247 -38", "12m05s",
+# "NORMAL", "[Explore]").
 _SPILL_HOME_ONLY = frozenset({
     "git_extras", "git_state", "worktree", "git_worktree", "commit_age",
-    "lines", "duration",
+    "lines", "duration", "vim", "agent",
 })
 
-# A row's own section that must stay at the very end of it, after any
-# sections that moved up: the context warning is an alert, and an
-# alert buried mid-row is easy to miss.
+# A row's own section that must end up at the very end of it once
+# other sections have moved up onto that row: the context warning is
+# an alert, and an alert buried mid-row is easy to miss. A row that
+# receives nothing is not reordered.
 _SPILL_KEEP_LAST = "ctx_warning"
 
 
@@ -1854,7 +1856,7 @@ def _detect_terminal_width_report(data=None):
     `LINES` handoff set no width in the environment either, so
     `shutil.get_terminal_size()` returns its fallback there: from the
     subprocess context alone we could not tell a 100-col terminal
-    from a 300-col one, and the two-stage layout silently trimmed to
+    from a 300-col one, and the layout silently trimmed to
     the fallback width.
 
     The handoff was requested upstream at anthropics/claude-code#22115
@@ -2444,9 +2446,11 @@ def _spill_dropped(rows, sep_visible_width, target_width, drop_priority):
     - Never a section in _SPILL_HOME_ONLY.
     - A row left empty by the fit stays empty: this never creates a
       row the layout did not already have.
-    - A row's own _SPILL_KEEP_LAST section stays last, after guests.
-    - No row ever exceeds `target_width`, and a section still appears
-      at most once (only a dropped section is ever placed).
+    - On a row that receives a guest, the row's own _SPILL_KEEP_LAST
+      section is moved to the end, after the guests. A row that
+      receives nothing is returned exactly as it came in.
+    - No row is ever widened past `target_width`, and a section still
+      appears at most once (only a dropped section is ever placed).
 
     Pure function of its arguments — no state is kept between
     renders, so the same payload at the same width always lays out
@@ -2454,8 +2458,8 @@ def _spill_dropped(rows, sep_visible_width, target_width, drop_priority):
     """
     # Each row is a list of entries [sort_key, name, rendered, width].
     # Sort keys order a row as: its own sections by original index,
-    # then guests by (home row, original index), then its own
-    # keep-last section.
+    # then guests by (home row, original index), then — only on a row
+    # that took a guest — its own keep-last section.
     native, guest, last = 0, 1, 2
     rank = {}
     for index, name in enumerate(drop_priority):
@@ -2470,8 +2474,7 @@ def _spill_dropped(rows, sep_visible_width, target_width, drop_priority):
         for position, (name, rendered) in enumerate(named):
             width = _visible_width(rendered)
             if name in kept_names:
-                group = last if name == _SPILL_KEEP_LAST else native
-                entries.append([(group, position), name, rendered, width])
+                entries.append([(native, position), name, rendered, width])
             elif name in rank and name not in _SPILL_HOME_ONLY:
                 candidates.append((-rank[name], row_index, position,
                                    name, rendered, width))
@@ -2490,7 +2493,11 @@ def _spill_dropped(rows, sep_visible_width, target_width, drop_priority):
                 break
 
     for entries in layout:
-        entries.sort(key=lambda e: e[0])
+        if any(e[0][0] == guest for e in entries):
+            for entry in entries:
+                if entry[1] == _SPILL_KEEP_LAST and entry[0][0] == native:
+                    entry[0] = (last, entry[0][1])
+            entries.sort(key=lambda e: e[0])
     return [[(e[1], e[2]) for e in entries] for entries in layout]
 
 
@@ -2505,16 +2512,26 @@ def _spill_doctor_lines(detected_cols, width_gate_passes):
     called out — it is the one way to believe spill is off when it is
     not.
     """
-    present, raw = read_spill_setting_raw()
-    if not present:
+    state, raw = read_spill_setting_raw()
+    theme_decides = False
+    if state == "unreadable":
+        setting = ("config file could not be read as JSON — none of its "
+                   "settings apply (the theme decides)")
+        theme_decides = True
+    elif state == "absent":
         setting = "not set (the theme decides)"
+        theme_decides = True
     elif raw is True:
         setting = "true (on, including for themes that leave it off)"
     elif raw is False:
         setting = "false (off for every theme)"
     else:
-        setting = "{} — IGNORED, must be true or false without quotes".format(
-            json.dumps(raw)[:40])
+        shown = json.dumps(raw)
+        if len(shown) > 40:
+            shown = shown[:40] + "..."
+        setting = ("{} — IGNORED, must be true or false without quotes "
+                   "(the theme decides)".format(shown))
+        theme_decides = True
     lines = [
         "  Overflow spill (sections that don't fit move up a line):",
         "    spill_overflow in config: {}".format(setting),
@@ -2523,11 +2540,17 @@ def _spill_doctor_lines(detected_cols, width_gate_passes):
             "meets" if detected_cols >= _SPILL_MIN_COLS else "below",
             _SPILL_MIN_COLS),
         "    width was detected (not guessed): {}".format(width_gate_passes),
-        "    also needs, per render: Claude Code >= 2.1.141, and a theme "
-        "with spill on",
-        "    (on: default, powerline, nord, tokyo-night, gruvbox, rose-pine;"
-        " off: minimal, focus, custom unless it sets \"spill\": true)",
+        "    also needs, per render: Claude Code >= 2.1.141",
     ]
+    if theme_decides:
+        on = sorted(name for name, theme in THEMES.items()
+                    if theme.get("spill") is True)
+        off = sorted(name for name in THEMES if name not in on)
+        lines.append("    themes with it on: {}".format(", ".join(on)))
+        lines.append("    themes with it off: {}, and custom themes unless "
+                     "the file sets \"spill\": true".format(", ".join(off)))
+    lines.append("    a change to the config file can take up to 30 seconds "
+                 "to show (it is cached)")
     return lines
 
 

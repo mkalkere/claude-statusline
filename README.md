@@ -268,11 +268,11 @@ The two steps above work on each line separately, which used to leave Line 1 wit
 - A section that didn't fit on Line 2 moves **up** to the nearest line with room and is added at the **end** of it. That line's own sections keep their order and position; only the context warning (`!CTX`) stays behind the newcomers, so the alert is still the last thing on the line.
 - Line 2 itself is left exactly as the fit produced it. Nothing ever moves down, no line is made wider than the fitted width, nothing appears twice, and no new line is created.
 - The most important sections are placed first.
-- Some sections never move, because away from their neighbours they stop meaning anything: the stash/sync counts, the merge/conflict indicator, the worktree chips and the commit age (which belong beside the branch), and the two with no label of their own — lines changed (`+247 -38`) and the session duration (`12m05s`).
+- Some sections never move, because away from their neighbours they stop meaning anything: the stash/sync counts, the merge/conflict indicator, the worktree chips and the commit age (which belong beside the branch), and the ones with no label of their own — lines changed (`+247 -38`), the session duration (`12m05s`), the vim mode and the agent name.
 
 With the demo data at 170 columns this shows all 23 sections instead of 18: `tools`, `sessions`, the version, `CC` and the clock join the end of Line 1. A session whose Line 2 already fits — a short branch name, no session name, no extra directories — gains nothing, and nothing changes for it.
 
-**When it applies:** terminals of 160 columns or more, on Claude Code 2.1.141 or later, when the width was actually detected rather than guessed. Narrower than that there is little spare room to use; on older Claude Code a Line 1 that overflows can cost you Line 2, so its spare room is left alone. If you pin the width with `CLAUDE_STATUSLINE_WIDTH`, lines are fitted to exactly that width with no margin, so Line 1 can now reach the last column.
+**When it applies:** terminals of 160 columns or more, on Claude Code 2.1.141 or later, when the width was actually detected rather than guessed. Narrower than that, Line 1's own width shifts by a few columns as token counts and countdowns change, and filling it to the edge would make sections come and go; on older Claude Code a Line 1 that overflows can cost you Line 2, so its spare room is left alone. If you pin the width with `CLAUDE_STATUSLINE_WIDTH`, lines are fitted to exactly that width with no margin, so Line 1 can now reach the last column.
 
 **Themes:** on for `default`, `powerline`, `nord`, `tokyo-night`, `gruvbox` and `rose-pine`. Off for `minimal` and `focus`, which are sparse on purpose, and off for custom themes unless the theme file contains `"spill": true`.
 
@@ -284,7 +284,7 @@ With the demo data at 170 columns this shows all 23 sections instead of 18: `too
 }
 ```
 
-`claude-status --doctor` shows the value it read (and says so if it is being ignored), plus whether your terminal meets the width conditions.
+A change to that file can take up to 30 seconds to show, because the file is cached. `claude-status --doctor` shows the value it read (and says so if it is being ignored), plus whether your terminal meets the width conditions.
 
 ### Detecting your real terminal width
 
