@@ -1,5 +1,7 @@
 """Comprehensive tests for claude-status — stdlib unittest only."""
 
+import contextlib
+import io
 import json
 import os
 import platform
@@ -9011,9 +9013,30 @@ class TestLastAssistantTimestamp(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+# Sentinel for "leave the prompt_cache key out of the payload" — None
+# and strings are themselves shapes under test.
+_OMIT_PC = object()
+
+
+class _FixedClock(object):
+    """Stand-in for the `time` module with a frozen time(); everything
+    else passes through to the real module."""
+
+    def __init__(self, now):
+        self._now = now
+
+    def time(self):
+        return self._now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+
 class TestCacheAgeSection(unittest.TestCase):
     """End-to-end `cache_age` section rendering: shows time since the
-    last assistant turn, warns past the ~5-min prompt-cache TTL, and
+    last assistant turn, warns once the prompt cache has gone cold (by
+    the reported expiry or lifetime, else a 5-minute assumption), and
     hides on every degrade path (no transcript, no timestamp, future
     timestamp)."""
 
@@ -9051,6 +9074,11 @@ class TestCacheAgeSection(unittest.TestCase):
         # the responsive layout (it lives in _COMPACT_DROP).
         self._orig_cols = os.environ.get("COLUMNS")
         os.environ["COLUMNS"] = "300"
+        # The width override outranks COLUMNS, and a user config that
+        # disables the section must not reach these tests.
+        self._orig_width = os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+        self._orig_disabled = cli_mod.get_disabled_sections
+        cli_mod.get_disabled_sections = lambda: []
         # Clear the cache_age cache each test (5s TTL cross-contamination).
         try:
             cache_dir = sessions_mod._cache_dir()
@@ -9064,10 +9092,13 @@ class TestCacheAgeSection(unittest.TestCase):
     def tearDown(self):
         THEMES["default"]["line2"] = self._orig_line2
         self._cli_mod.get_branch = self._orig_branch
+        self._cli_mod.get_disabled_sections = self._orig_disabled
         if self._orig_cols is None:
             os.environ.pop("COLUMNS", None)
         else:
             os.environ["COLUMNS"] = self._orig_cols
+        if self._orig_width is not None:
+            os.environ["CLAUDE_STATUSLINE_WIDTH"] = self._orig_width
         for d in self._dirs:
             self._shutil_mod.rmtree(d, ignore_errors=True)
 
@@ -9149,6 +9180,586 @@ class TestCacheAgeSection(unittest.TestCase):
         self.assertIn("cache_age", _COMPACT_DROP)
         self.assertIn("cache_age", _NARROW_DROP)
         self.assertIn("cache_age", _FIT_DROP_PRIORITY)
+
+    # --- #131: the warn threshold follows the real cache lifetime ---
+    #
+    # These run on a fixed clock with the transcript reader stubbed, so
+    # exact boundaries can be pinned and nothing touches the wall clock
+    # or the real ~/.claude directory.
+
+    NOW = 1_800_000_000  # fixed "now", epoch seconds
+
+    def _is_warn(self, age_ms, prompt_cache=_OMIT_PC, raw=False):
+        """Render with a last assistant turn `age_ms` old at a fixed
+        clock and report whether the cache_age chip's line took the
+        warn color. Only the last line is inspected: it holds
+        cache_age + branch (branch is GREEN), so nothing else on it can
+        be YELLOW. With raw=True the line itself is returned."""
+        cli = self._cli_mod
+        now = self.NOW
+        saved = (cli.time, cli.get_last_assistant_timestamp_ms,
+                 cli.get_disabled_sections)
+        width = os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+        cli.time = _FixedClock(now)
+        cli.get_last_assistant_timestamp_ms = (
+            lambda path: now * 1000 - age_ms)
+        cli.get_disabled_sections = lambda: []
+        try:
+            data = {"git_branch": "main",
+                    "transcript_path":
+                        "/home/user/.claude/projects/myapp/t.jsonl"}
+            if prompt_cache is not _OMIT_PC:
+                data["prompt_cache"] = prompt_cache
+            with contextlib.redirect_stderr(io.StringIO()):
+                line = cli.render(data, "default").split("\n")[-1]
+        finally:
+            (cli.time, cli.get_last_assistant_timestamp_ms,
+             cli.get_disabled_sections) = saved
+            if width is not None:
+                os.environ["CLAUDE_STATUSLINE_WIDTH"] = width
+        self.assertIn("cache_age:", self._plain(line))
+        return line if raw else YELLOW in line
+
+    def test_one_hour_ttl_does_not_warn_at_ten_minutes(self):
+        """The bug: a 1-hour cache is still warm at 10 minutes, but the
+        flat 5-minute threshold warned anyway."""
+        self.assertFalse(self._is_warn(600_000, {"ttl": "1h"}))
+        # Positive control: the same age with no lifetime reported
+        # still warns, so the line above is the ttl's doing.
+        self.assertTrue(self._is_warn(600_000))
+
+    def test_ttl_boundaries_are_exact(self):
+        """Cold from the lifetime itself, not a millisecond before."""
+        for ttl, ms in (("1m", 60_000), ("5m", 300_000),
+                        ("30m", 1_800_000), ("1h", 3_600_000),
+                        ("2h", 7_200_000), ("24h", 86_400_000)):
+            self.assertTrue(self._is_warn(ms, {"ttl": ttl}), ttl)
+            self.assertFalse(self._is_warn(ms - 1, {"ttl": ttl}), ttl)
+
+    def test_fallback_boundary_is_five_minutes(self):
+        self.assertTrue(self._is_warn(300_000))
+        self.assertFalse(self._is_warn(299_999))
+
+    def test_expires_at_boundary_is_exact(self):
+        self.assertTrue(self._is_warn(600_000, {"expires_at": self.NOW}))
+        self.assertFalse(
+            self._is_warn(600_000, {"expires_at": self.NOW + 1}))
+        # Sub-second expiries are not rounded away.
+        self.assertFalse(
+            self._is_warn(600_000, {"expires_at": self.NOW + 0.5}))
+
+    def test_expires_at_needs_no_ttl(self):
+        self.assertFalse(
+            self._is_warn(600_000, {"expires_at": self.NOW + 1800}))
+
+    def test_expires_at_wins_over_ttl_and_age(self):
+        """expires_at is upstream's own answer to "when does it go
+        cold", so it decides even against the age-based reading."""
+        # Not expired, though the age is past the stated lifetime.
+        self.assertFalse(self._is_warn(
+            600_000, {"ttl": "5m", "expires_at": self.NOW + 1800}))
+        self.assertFalse(self._is_warn(
+            3_700_000, {"ttl": "1h", "expires_at": self.NOW + 1800}))
+        # Expired a minute ago, though the age is inside the lifetime.
+        self.assertTrue(self._is_warn(
+            600_000, {"ttl": "1h", "expires_at": self.NOW - 60}))
+
+    def test_expiry_older_than_the_last_turn_is_stale(self):
+        """An expiry at or before the last assistant turn cannot
+        describe the cache that turn refreshed — the payload is behind
+        the transcript. It is ignored, not read as "already cold"."""
+        stale = self.NOW - 10
+        self.assertFalse(self._is_warn(3_000, {"expires_at": stale}))
+        self.assertFalse(
+            self._is_warn(3_000, {"ttl": "1h", "expires_at": stale}))
+        # Exactly at the turn is stale too.
+        self.assertFalse(
+            self._is_warn(10_000, {"ttl": "1h", "expires_at": stale}))
+        # Half a second after the turn is not stale.
+        self.assertTrue(self._is_warn(
+            10_000, {"ttl": "1h", "expires_at": stale + 0.5}))
+        # Ignored means the next signal decides, in both directions...
+        self.assertTrue(
+            self._is_warn(400_000, {"expires_at": self.NOW - 500}))
+        # ...including "not warm on a caching session".
+        self.assertTrue(self._is_warn(3_000, {
+            "expires_at": stale, "warm": False, "caching_observed": True}))
+
+    def test_expiry_too_far_ahead_is_not_trusted(self):
+        """Further ahead than the longest lifetime accepted (a day) is
+        not a cache expiry; trusting it would silence the warning."""
+        day = 24 * 60 * 60
+        self.assertTrue(
+            self._is_warn(600_000, {"expires_at": self.NOW + day + 1}))
+        self.assertFalse(
+            self._is_warn(600_000, {"expires_at": self.NOW + day}))
+        self.assertTrue(
+            self._is_warn(600_000, {"expires_at": self.NOW + day + 0.5}))
+        # A millisecond-sized value (the field is in SECONDS) reads as
+        # a date tens of thousands of years away.
+        ms_value = (self.NOW + 1800) * 1000
+        self.assertTrue(self._is_warn(600_000, {"expires_at": ms_value}))
+        self.assertTrue(self._is_warn(
+            600_000, {"ttl": "5m", "expires_at": ms_value}))
+
+    def test_not_warm_on_a_caching_session_is_cold(self):
+        """warm False with caching_observed True: the session caches
+        and the last response touched no cache tokens, so there is no
+        warm cache however recent the turn — the documented meaning of
+        a null expires_at."""
+        self.assertTrue(self._is_warn(30_000, {
+            "ttl": "1h", "expires_at": None,
+            "warm": False, "caching_observed": True}))
+        self.assertTrue(self._is_warn(
+            30_000, {"warm": False, "caching_observed": True}))
+        # Control: warm True on the same payload is not cold.
+        self.assertFalse(self._is_warn(30_000, {
+            "ttl": "1h", "expires_at": None,
+            "warm": True, "caching_observed": True}))
+
+    def test_warm_true_does_not_override_the_age_rules(self):
+        """warm is only ever a reason to warn. A True that arrives
+        without a usable expiry does not hold the chip in the normal
+        color past the lifetime."""
+        self.assertTrue(self._is_warn(
+            600_000, {"warm": True, "caching_observed": True}))
+        self.assertTrue(self._is_warn(3_600_000, {
+            "ttl": "1h", "warm": True, "caching_observed": True}))
+
+    def test_not_warm_without_observed_caching_falls_through(self):
+        """Without caching_observed True, "not warm" cannot be told
+        apart from "provider doesn't report cache tokens". Warning
+        forever would be wrong for those sessions, so the age rules
+        decide as they did before."""
+        for observed in ({"caching_observed": False}, {},
+                         {"caching_observed": None}):
+            pc = dict({"warm": False}, **observed)
+            self.assertFalse(self._is_warn(30_000, pc), repr(pc))
+            self.assertTrue(self._is_warn(600_000, pc), repr(pc))
+            pc["ttl"] = "1h"
+            self.assertFalse(self._is_warn(600_000, pc), repr(pc))
+
+    def test_valid_expiry_outranks_not_warm(self):
+        self.assertFalse(self._is_warn(30_000, {
+            "expires_at": self.NOW + 1800,
+            "warm": False, "caching_observed": True}))
+
+    def test_null_expires_at_falls_back_to_ttl(self):
+        self.assertFalse(self._is_warn(
+            600_000, {"ttl": "1h", "expires_at": None}))
+        self.assertTrue(self._is_warn(
+            600_000, {"ttl": "5m", "expires_at": None}))
+
+    def test_malformed_prompt_cache_keeps_the_five_minute_default(self):
+        """Every empty or malformed shape must behave exactly like an
+        absent field: warn at 10 minutes, not at 30 seconds."""
+        shapes = (
+            "junk", None, 42, [], {},
+            {"ttl": "25h"}, {"ttl": 3600}, {"ttl": ["1h"]}, {"ttl": None},
+            {"ttl": "1H"}, {"ttl": "0m"}, {"ttl": "1.5h"}, {"ttl": "1h\n"},
+            {"expires_at": "soon"}, {"expires_at": True},
+            {"expires_at": 0}, {"expires_at": -5},
+            {"expires_at": float("nan")}, {"expires_at": float("inf")},
+            {"expires_at": 10 ** 400},
+            {"warm": "no", "caching_observed": True},
+            {"warm": False, "caching_observed": "yes"},
+            {"warm": 0, "caching_observed": 1},
+        )
+        self.assertEqual(len(shapes), 23)
+        for bad in shapes:
+            self.assertTrue(self._is_warn(600_000, bad), repr(bad))
+            self.assertFalse(self._is_warn(30_000, bad), repr(bad))
+
+    def test_cache_age_theme_keys(self):
+        colors = THEMES["default"]["colors"]
+        saved = {k: colors[k] for k in ("cache_age", "cache_age_warn")
+                 if k in colors}
+        try:
+            colors["cache_age"] = CYAN
+            colors["cache_age_warn"] = RED
+            cold = self._is_warn(600_000, raw=True)
+            self.assertIn(RED, cold)
+            self.assertNotIn(YELLOW, cold)
+            warm = self._is_warn(30_000, raw=True)
+            self.assertIn(CYAN, warm)
+            self.assertNotIn(RED, warm)
+            # An explicit null falls back to the default colors.
+            colors["cache_age"] = None
+            colors["cache_age_warn"] = None
+            self.assertIn(YELLOW, self._is_warn(600_000, raw=True))
+            warm = self._is_warn(30_000, raw=True)
+            self.assertIn(BRIGHT_BLACK, warm)
+            self.assertNotIn("None", warm)
+        finally:
+            for k in ("cache_age", "cache_age_warn"):
+                colors.pop(k, None)
+            colors.update(saved)
+
+
+class TestSafeNumOverflow(unittest.TestCase):
+    """json.loads returns arbitrary-precision ints; float() of one
+    beyond the double range raises OverflowError rather than returning
+    inf. _safe_num must absorb it like any other unusable value."""
+
+    def test_huge_int_is_none(self):
+        from claude_statusline.cli import _safe_num
+        self.assertIsNone(_safe_num(10 ** 400))
+        self.assertIsNone(_safe_num(-(10 ** 400)))
+        # Large but representable still coerces.
+        self.assertEqual(_safe_num(10 ** 30), 1e30)
+
+    def test_huge_int_on_stdin_does_not_blank_the_line(self):
+        """Reaches _normalize whether or not a prompt_cache section is
+        in the theme, so an uncaught raise would blank every line."""
+        import claude_statusline.cli as cli_mod
+        orig = cli_mod.get_branch
+        cli_mod.get_branch = lambda: "main"
+        try:
+            for field in ("misses", "expires_at", "hit_ratio"):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    out = cli_mod.render(
+                        {"git_branch": "main",
+                         "prompt_cache": {field: 10 ** 400}}, "default")
+                self.assertIn("main", out, field)
+        finally:
+            cli_mod.get_branch = orig
+
+
+class TestPromptCacheNormalize(unittest.TestCase):
+    """_normalize's handling of the `prompt_cache` stdin object: each
+    field validates independently and collapses to None, and a value
+    that is present but unusable leaves a stderr breadcrumb."""
+
+    KEYS = ("prompt_cache_ttl_ms", "prompt_cache_expires_ms",
+            "prompt_cache_hit_ratio", "prompt_cache_misses",
+            "prompt_cache_warm", "prompt_cache_observed")
+
+    def _n(self, prompt_cache=_OMIT_PC, stderr=None):
+        from claude_statusline.cli import _normalize
+        data = {}
+        if prompt_cache is not _OMIT_PC:
+            data["prompt_cache"] = prompt_cache
+        with contextlib.redirect_stderr(
+                io.StringIO() if stderr is None else stderr):
+            return _normalize(data)
+
+    def _notes(self, prompt_cache=_OMIT_PC):
+        buf = io.StringIO()
+        self._n(prompt_cache, stderr=buf)
+        return buf.getvalue()
+
+    def test_documented_payload(self):
+        payload = {"warm": True, "caching_observed": True, "ttl": "1h",
+                   "expires_at": 1738429200, "requests": 14, "misses": 2,
+                   "hit_ratio": 0.91}
+        n = self._n(payload)
+        self.assertEqual(n["prompt_cache_ttl_ms"], 3_600_000)
+        self.assertEqual(n["prompt_cache_expires_ms"], 1738429200 * 1000)
+        self.assertEqual(n["prompt_cache_hit_ratio"], 0.91)
+        self.assertEqual(n["prompt_cache_misses"], 2)
+        self.assertIs(n["prompt_cache_warm"], True)
+        self.assertIs(n["prompt_cache_observed"], True)
+        self.assertEqual(self._notes(payload), "")
+
+    def test_absent_and_non_dict_yield_all_none(self):
+        for shape in (_OMIT_PC, None, "junk", 7, [], True, {}):
+            n = self._n(shape)
+            for key in self.KEYS:
+                self.assertIn(key, n, (shape, key))
+                self.assertIsNone(n[key], (shape, key))
+
+    def test_documented_nulls(self):
+        payload = {"expires_at": None, "hit_ratio": None}
+        n = self._n(payload)
+        self.assertIsNone(n["prompt_cache_expires_ms"])
+        self.assertIsNone(n["prompt_cache_hit_ratio"])
+        self.assertEqual(self._notes(payload), "")
+
+    def test_zero_values_are_kept(self):
+        """Zero is data, not absence: a 0 ratio and 0 misses are real
+        readings, and so are the two False flags."""
+        n = self._n({"hit_ratio": 0, "misses": 0, "warm": False,
+                     "caching_observed": False})
+        self.assertEqual(n["prompt_cache_hit_ratio"], 0)
+        self.assertEqual(n["prompt_cache_misses"], 0)
+        self.assertIs(n["prompt_cache_warm"], False)
+        self.assertIs(n["prompt_cache_observed"], False)
+
+    def test_ratio_bounds(self):
+        self.assertEqual(self._n({"hit_ratio": 1})["prompt_cache_hit_ratio"], 1)
+        for bad in (1.01, -0.01, 91, "x", True, False, [0.5],
+                    float("nan"), float("inf"), 10 ** 400):
+            self.assertIsNone(
+                self._n({"hit_ratio": bad})["prompt_cache_hit_ratio"],
+                repr(bad)[:40])
+
+    def test_numeric_strings_coerce(self):
+        """Same rule as every other numeric stdin field."""
+        n = self._n({"hit_ratio": "0.5", "misses": "3",
+                     "expires_at": "1738429200"})
+        self.assertEqual(n["prompt_cache_hit_ratio"], 0.5)
+        self.assertEqual(n["prompt_cache_misses"], 3)
+        self.assertEqual(n["prompt_cache_expires_ms"], 1738429200 * 1000)
+
+    def test_misses_validation(self):
+        self.assertEqual(self._n({"misses": 2.0})["prompt_cache_misses"], 2)
+        self.assertIsInstance(
+            self._n({"misses": 2.0})["prompt_cache_misses"], int)
+        # A fractional count truncates rather than rounding up.
+        self.assertEqual(self._n({"misses": 2.7})["prompt_cache_misses"], 2)
+        for bad in (-1, "many", True, [2], float("nan"), float("inf"),
+                    10 ** 400):
+            self.assertIsNone(
+                self._n({"misses": bad})["prompt_cache_misses"],
+                repr(bad)[:40])
+
+    def test_expires_at_validation(self):
+        self.assertEqual(
+            self._n({"expires_at": 99_999_999_999})[
+                "prompt_cache_expires_ms"], 99_999_999_999_000)
+        # Fractional seconds survive the conversion.
+        self.assertEqual(
+            self._n({"expires_at": 1738429200.5})[
+                "prompt_cache_expires_ms"], 1738429200500)
+        for bad in (0, -1, True, "soon", 1e11, 1738429200000,
+                    float("nan"), float("inf"), 10 ** 400):
+            self.assertIsNone(
+                self._n({"expires_at": bad})["prompt_cache_expires_ms"],
+                repr(bad)[:40])
+
+    def test_ttl_accepts_minutes_and_hours(self):
+        """The two documented values, plus any other whole number of
+        minutes or hours up to a day — so a lifetime added upstream
+        later is read instead of falling back to a 5-minute guess."""
+        for raw, ms in (("5m", 300_000), ("1h", 3_600_000),
+                        ("30m", 1_800_000), ("2h", 7_200_000),
+                        ("24h", 86_400_000), ("1440m", 86_400_000)):
+            self.assertEqual(
+                self._n({"ttl": raw})["prompt_cache_ttl_ms"], ms, raw)
+
+    def test_ttl_validation(self):
+        for bad in ("25h", "1441m", "0m", "0h", "05m", "1H", "5M", "",
+                    " 1h", "1h ", "1h\n", "1.5h", "h", "5", "5s", "-5m",
+                    "99999m", 3600, True, ["1h"], {"1h": 1}):
+            self.assertIsNone(
+                self._n({"ttl": bad})["prompt_cache_ttl_ms"], repr(bad))
+
+    def test_flags_are_strict_bools(self):
+        for key, out in (("warm", "prompt_cache_warm"),
+                         ("caching_observed", "prompt_cache_observed")):
+            for bad in (1, 0, "true", "false", []):
+                self.assertIsNone(self._n({key: bad})[out], (key, bad))
+
+    def test_one_bad_field_does_not_take_the_others_down(self):
+        n = self._n({"ttl": ["bad"], "expires_at": "bad",
+                     "hit_ratio": 0.4, "misses": 1})
+        self.assertIsNone(n["prompt_cache_ttl_ms"])
+        self.assertIsNone(n["prompt_cache_expires_ms"])
+        self.assertEqual(n["prompt_cache_hit_ratio"], 0.4)
+        self.assertEqual(n["prompt_cache_misses"], 1)
+
+    def test_unusable_values_leave_a_breadcrumb(self):
+        """Present-but-unusable must be diagnosable from stderr; one
+        line per field, naming it."""
+        for field, bad in (("ttl", "25h"), ("ttl", 3600),
+                           ("expires_at", "soon"), ("expires_at", 0),
+                           ("expires_at", 1e11),
+                           ("hit_ratio", 91), ("hit_ratio", True),
+                           ("misses", "lots"), ("misses", -3),
+                           ("warm", "no"), ("caching_observed", 1)):
+            notes = self._notes({field: bad})
+            self.assertEqual(
+                notes,
+                "claude-status: ignoring unusable prompt_cache.{} "
+                "value\n".format(field), (field, bad))
+
+    def test_non_dict_object_leaves_a_breadcrumb(self):
+        for bad in ("junk", 7, [], True):
+            self.assertEqual(
+                self._notes(bad),
+                "claude-status: ignoring unusable prompt_cache value\n",
+                repr(bad))
+
+    def test_absent_is_silent(self):
+        for quiet in (_OMIT_PC, None, {}, {"ttl": None},
+                      {"warm": None, "caching_observed": None,
+                       "misses": None}):
+            self.assertEqual(self._notes(quiet), "", repr(quiet))
+
+
+class TestCacheHitSection(unittest.TestCase):
+    """End-to-end `cache_hit` section (#132): session hit ratio plus a
+    miss count, hidden on every degrade path."""
+
+    def setUp(self):
+        import claude_statusline.cli as cli_mod
+        self._cli_mod = cli_mod
+        self._orig_line2 = THEMES["default"]["line2"]
+        self._orig_branch = cli_mod.get_branch
+        self._orig_disabled = cli_mod.get_disabled_sections
+        cli_mod.get_branch = lambda: "main"
+        # A user config that disables the section must not reach here.
+        cli_mod.get_disabled_sections = lambda: []
+        THEMES["default"]["line2"] = ["cache_hit", "branch"]
+        # Wide COLUMNS so the compact-droppable section isn't shed, and
+        # no width override (it outranks COLUMNS).
+        self._orig_cols = os.environ.get("COLUMNS")
+        os.environ["COLUMNS"] = "300"
+        self._orig_width = os.environ.pop("CLAUDE_STATUSLINE_WIDTH", None)
+
+    def tearDown(self):
+        THEMES["default"]["line2"] = self._orig_line2
+        self._cli_mod.get_branch = self._orig_branch
+        self._cli_mod.get_disabled_sections = self._orig_disabled
+        if self._orig_cols is None:
+            os.environ.pop("COLUMNS", None)
+        else:
+            os.environ["COLUMNS"] = self._orig_cols
+        if self._orig_width is not None:
+            os.environ["CLAUDE_STATUSLINE_WIDTH"] = self._orig_width
+
+    def _raw(self, prompt_cache=_OMIT_PC):
+        data = {"git_branch": "main"}
+        if prompt_cache is not _OMIT_PC:
+            data["prompt_cache"] = prompt_cache
+        with contextlib.redirect_stderr(io.StringIO()):
+            return self._cli_mod.render(data, "default").split("\n")[-1]
+
+    def _chip(self, prompt_cache=_OMIT_PC):
+        """The section's plain text, or "" when it did not render."""
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", self._raw(prompt_cache))
+        m = re.search(r"(hit:\S+(?: miss:\S+)?|miss:\S+)", plain)
+        return m.group(1) if m else ""
+
+    def test_ratio_and_misses(self):
+        self.assertEqual(
+            self._chip({"hit_ratio": 0.91, "misses": 2,
+                        "caching_observed": True}),
+            "hit:91% miss:2")
+
+    def test_exact_default_rendering(self):
+        """Label color, value colors, order and separator, byte for
+        byte — the branch on this line is GREEN too, so a looser check
+        could not tell the chip's colors apart from it."""
+        label = THEMES["default"]["colors"]["label"]
+        expected = (colorize("hit:", label) + colorize("91%", GREEN)
+                    + " " + colorize("miss:2", YELLOW))
+        self.assertIn(expected, self._raw({"hit_ratio": 0.91, "misses": 2}))
+
+    def test_no_misses_shows_ratio_only(self):
+        self.assertEqual(self._chip({"hit_ratio": 0.91, "misses": 0}),
+                         "hit:91%")
+        self.assertEqual(self._chip({"hit_ratio": 0.91}), "hit:91%")
+
+    def test_misses_without_a_ratio(self):
+        self.assertEqual(self._chip({"hit_ratio": None, "misses": 3}),
+                         "miss:3")
+
+    def test_zero_ratio_renders(self):
+        """0% is a real reading once caching has been observed."""
+        self.assertEqual(
+            self._chip({"hit_ratio": 0, "caching_observed": True}),
+            "hit:0%")
+
+    def test_rounds_instead_of_flooring(self):
+        """0.29 * 100 is 28.999999999999996 in floating point; a floor
+        would print 28%."""
+        self.assertEqual(self._chip({"hit_ratio": 0.29}), "hit:29%")
+        self.assertEqual(self._chip({"hit_ratio": 0.576}), "hit:58%")
+        # ...and it rounds down as well as up.
+        self.assertEqual(self._chip({"hit_ratio": 0.574}), "hit:57%")
+
+    def test_never_rounds_up_to_a_perfect_score(self):
+        self.assertEqual(self._chip({"hit_ratio": 0.9996, "misses": 1}),
+                         "hit:99% miss:1")
+        self.assertEqual(self._chip({"hit_ratio": 0.995}), "hit:99%")
+        self.assertEqual(self._chip({"hit_ratio": 1}), "hit:100%")
+        self.assertEqual(self._chip({"hit_ratio": 1.0}), "hit:100%")
+        # The cap is about rounding only: an exact 1 is shown as sent,
+        # whatever the miss count says.
+        self.assertEqual(self._chip({"hit_ratio": 1, "misses": 3}),
+                         "hit:100% miss:3")
+
+    def test_miss_count_is_capped_for_display(self):
+        """An absurd count must not widen the chip until the fit logic
+        evicts everything else on the line."""
+        self.assertEqual(self._chip({"misses": 999}), "miss:999")
+        self.assertEqual(self._chip({"misses": 1000}), "miss:999+")
+        self.assertEqual(self._chip({"misses": 1e300}), "miss:999+")
+        self.assertEqual(
+            self._chip({"hit_ratio": 0.5, "misses": 10 ** 9}),
+            "hit:50% miss:999+")
+
+    def test_hidden_when_absent_or_malformed(self):
+        for shape in (_OMIT_PC, None, "junk", 7, [], {},
+                      {"hit_ratio": None}, {"hit_ratio": None, "misses": 0},
+                      {"hit_ratio": "x"}, {"hit_ratio": True},
+                      {"hit_ratio": 1.5, "misses": -1},
+                      {"hit_ratio": float("nan"), "misses": float("inf")},
+                      {"hit_ratio": 10 ** 400, "misses": 10 ** 400}):
+            self.assertEqual(self._chip(shape), "", repr(shape)[:60])
+
+    def test_hidden_when_caching_is_not_observed(self):
+        """caching_observed False means caching is off or not reported.
+        A 0 ratio sent with it must not be shown as hit:0%."""
+        self.assertEqual(
+            self._chip({"hit_ratio": 0, "misses": 0,
+                        "caching_observed": False}), "")
+        self.assertEqual(
+            self._chip({"hit_ratio": 0.5, "misses": 2,
+                        "caching_observed": False}), "")
+        # Only an explicit False is a veto; a non-bool is ignored.
+        self.assertEqual(
+            self._chip({"hit_ratio": 0.5, "caching_observed": 0}),
+            "hit:50%")
+
+    def test_miss_count_uses_the_warn_color(self):
+        self.assertIn(YELLOW, self._raw({"hit_ratio": 0.9, "misses": 2}))
+        self.assertNotIn(YELLOW, self._raw({"hit_ratio": 0.9, "misses": 0}))
+
+    def test_theme_colors_override_and_null_falls_through(self):
+        colors = THEMES["default"]["colors"]
+        saved = {k: colors[k] for k in ("cache_hit", "cache_miss")
+                 if k in colors}
+        try:
+            colors["cache_hit"] = CYAN
+            colors["cache_miss"] = RED
+            line = self._raw({"hit_ratio": 0.9, "misses": 2})
+            self.assertIn(colorize("90%", CYAN), line)
+            self.assertIn(colorize("miss:2", RED), line)
+            self.assertNotIn(YELLOW, line)
+            # An explicit null must fall back to the default color, not
+            # reach colorize() as None.
+            colors["cache_hit"] = None
+            colors["cache_miss"] = None
+            line = self._raw({"hit_ratio": 0.9, "misses": 2})
+            self.assertIn(colorize("90%", GREEN), line)
+            self.assertIn(colorize("miss:2", YELLOW), line)
+            self.assertNotIn("None", line)
+        finally:
+            for k in ("cache_hit", "cache_miss"):
+                colors.pop(k, None)
+            colors.update(saved)
+
+    def test_not_in_any_built_in_theme(self):
+        """Opt-in only: no built-in theme lists the section."""
+        # setUp swapped the default theme's line2 for the fixture.
+        THEMES["default"]["line2"] = self._orig_line2
+        for name, theme in THEMES.items():
+            for key, value in theme.items():
+                if re.fullmatch(r"line\d+", key):
+                    self.assertNotIn("cache_hit", value, name)
+
+    def test_cache_hit_is_dropped_under_width_pressure(self):
+        from claude_statusline.cli import _COMPACT_DROP
+        self.assertIn("cache_hit", _COMPACT_DROP)
+        # ...and it really is shed on a narrow terminal while the
+        # branch survives.
+        os.environ["COLUMNS"] = "60"
+        plain = re.sub(r"\x1b\[[0-9;]*m", "",
+                       self._raw({"hit_ratio": 0.91, "misses": 2}))
+        self.assertNotIn("hit:", plain)
+        self.assertIn("main", plain)
 
 
 class TestCostBreakdownSection(unittest.TestCase):

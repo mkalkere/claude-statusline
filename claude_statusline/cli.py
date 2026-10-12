@@ -47,10 +47,28 @@ CTX_WARNING_THRESHOLD_PCT = 85
 
 # cache_age (#92): milliseconds since the last assistant turn beyond
 # which the section renders in a warning color, signalling the prompt
-# cache has likely gone cold. Anthropic's prompt cache TTL is ~5
-# minutes; we mirror that default here. This is a display heuristic
-# only — it never changes behavior, just the color the user sees.
+# cache has likely gone cold. This 5-minute default is the FALLBACK:
+# when stdin carries `prompt_cache` (Claude Code v2.1.251+) the real
+# expiry or lifetime decides instead (#131). This is a display
+# heuristic only — it never changes behavior, just the color the user
+# sees.
 _CACHE_AGE_WARN_MS = 5 * 60 * 1000
+
+# prompt_cache.ttl is documented as "5m" or "1h". The pattern accepts
+# any whole number of minutes or hours so a lifetime added upstream
+# later is read rather than silently replaced by the 5-minute guess
+# above — the exact mistake #131 fixed for "1h". Capped at
+# _PROMPT_CACHE_MAX_TTL_MS: beyond a day it is not a lifetime we can
+# vouch for, and the same cap bounds how far ahead an expiry may sit.
+_PROMPT_CACHE_TTL_RE = re.compile(r"([1-9][0-9]{0,3})([mh])")
+_PROMPT_CACHE_TTL_UNIT_MS = {"m": 60 * 1000, "h": 60 * 60 * 1000}
+_PROMPT_CACHE_MAX_TTL_MS = 24 * 60 * 60 * 1000
+
+# Largest miss count rendered in full by `cache_hit`; above it the chip
+# shows "999+". A count is unbounded on stdin, and an absurd one would
+# otherwise widen the chip until the fit logic evicts every other
+# section on the line.
+_CACHE_MISS_DISPLAY_MAX = 999
 
 # Documented review states for pr.review_state (statusline doc enum
 # as of 2026-06-04). Used by _normalize to membership-check the
@@ -131,7 +149,10 @@ def _safe_num(val):
         return None
     try:
         num = float(val)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: json.loads returns arbitrary-precision ints,
+        # and float() of one beyond the double range raises instead of
+        # returning inf.
         return None
     return num if math.isfinite(num) else None
 
@@ -570,6 +591,93 @@ def _normalize(data):
         out["rate_limit_{}_resets".format(period)] = (
             resets_sec * 1000 if resets_sec is not None else None
         )
+
+    # Prompt cache statistics for the main conversation (Claude Code
+    # v2.1.251+; absent before the first API response and on older
+    # versions). Every field is validated on its own and collapses to
+    # None when missing or malformed, so each consumer degrades
+    # independently:
+    #   ttl              "5m" / "1h" -> lifetime in ms
+    #   expires_at       epoch SECONDS -> ms. Documented as null when
+    #                    the last response reported no cache tokens.
+    #                    Bounded like task start times: >= 1e11 would
+    #                    be a millisecond value or garbage, not seconds
+    #   hit_ratio        0..1; documented as null while no tokens have
+    #                    been counted. Out-of-range is garbage, hidden
+    #   misses           non-negative count
+    #   warm,            strict bools, None when absent. They are kept
+    #   caching_observed tri-state because False and "not sent" mean
+    #                    different things to the consumers
+    # Bools are rejected for the numeric fields (bool is an int
+    # subclass, and `true` is neither a timestamp nor a ratio).
+    #
+    # Present-but-unusable values leave the same one-line stderr
+    # breadcrumb as the token and money fields: every one of these
+    # hides or changes a chip, and "my cache_hit chip vanished" must
+    # not be undiagnosable. Absent fields and the documented nulls
+    # (expires_at, hit_ratio) stay silent.
+    def _pc_note(field):
+        print(
+            "claude-status: ignoring unusable prompt_cache{} value".format(
+                "." + field if field else ""),
+            file=sys.stderr,
+        )
+
+    pc_obj = data.get("prompt_cache")
+    if not isinstance(pc_obj, dict):
+        if pc_obj is not None:
+            _pc_note("")
+        pc_obj = {}
+
+    def _pc_num(key, low, high, inclusive=True):
+        raw = pc_obj.get(key)
+        if raw is None:
+            return None
+        num = None if isinstance(raw, bool) else _safe_num(raw)
+        if num is not None:
+            if inclusive:
+                in_range = low <= num <= high
+            else:
+                in_range = low < num < high
+            if not in_range:
+                num = None
+        if num is None:
+            _pc_note(key)
+        return num
+
+    def _pc_bool(key):
+        raw = pc_obj.get(key)
+        if raw is None or isinstance(raw, bool):
+            return raw
+        _pc_note(key)
+        return None
+
+    pc_ttl = pc_obj.get("ttl")
+    pc_ttl_ms = None
+    if pc_ttl is not None:
+        # isinstance first: the regex needs a str, and stdin can carry
+        # any JSON type here.
+        ttl_match = (_PROMPT_CACHE_TTL_RE.fullmatch(pc_ttl)
+                     if isinstance(pc_ttl, str) else None)
+        if ttl_match:
+            pc_ttl_ms = (int(ttl_match.group(1))
+                         * _PROMPT_CACHE_TTL_UNIT_MS[ttl_match.group(2)])
+            if pc_ttl_ms > _PROMPT_CACHE_MAX_TTL_MS:
+                pc_ttl_ms = None
+        if pc_ttl_ms is None:
+            _pc_note("ttl")
+    out["prompt_cache_ttl_ms"] = pc_ttl_ms
+    pc_expires = _pc_num("expires_at", 0, 1e11, inclusive=False)
+    out["prompt_cache_expires_ms"] = (
+        pc_expires * 1000 if pc_expires is not None else None
+    )
+    out["prompt_cache_hit_ratio"] = _pc_num("hit_ratio", 0, 1)
+    pc_misses = _pc_num("misses", 0, float("inf"))
+    out["prompt_cache_misses"] = (
+        int(pc_misses) if pc_misses is not None else None
+    )
+    out["prompt_cache_warm"] = _pc_bool("warm")
+    out["prompt_cache_observed"] = _pc_bool("caching_observed")
 
     # Output style
     style_obj = data.get("output_style")
@@ -1075,15 +1183,35 @@ def _render_sections_named(n, order, theme):
 
         elif section == "cache_age":
             # Time since the most recent assistant message (#92) — a cue
-            # for how long a task has been running / whether the ~5-min
-            # prompt cache is still warm. Reads the transcript tail via
-            # the same cached, path-validated reader as `activity`.
+            # for how long a task has been running / whether the prompt
+            # cache is still warm. Reads the transcript tail via the
+            # same cached, path-validated reader as `activity`.
             #
             # We recompute the age from the (cached) timestamp against
             # the current clock on every render, so the displayed value
             # stays live-to-the-second even though the transcript read
-            # itself is cached for 5s. Past _CACHE_AGE_WARN_MS the chip
-            # switches to a warning color (cache likely cold).
+            # itself is cached for 5s.
+            #
+            # The chip switches to a warning color once the cache has
+            # gone cold (#131), decided from the best signal present:
+            #   1. prompt_cache.expires_at — upstream's own answer;
+            #      cold once the clock reaches it. Trusted only when it
+            #      falls after the last turn (an expiry older than the
+            #      turn it would describe is a stale payload) and no
+            #      further ahead than the longest lifetime we accept.
+            #   2. warm is False while caching_observed is True — the
+            #      session caches, and the last response wrote or read
+            #      no cache tokens, so there is no warm cache however
+            #      recent the turn. This is the documented meaning of a
+            #      null expires_at. Without caching_observed we cannot
+            #      tell "no cache" from "provider doesn't report it",
+            #      so that case falls through rather than warn forever.
+            #   3. prompt_cache.ttl — the real lifetime; cold once the
+            #      age reaches it.
+            #   4. none of the above (older Claude Code, or malformed)
+            #      — the _CACHE_AGE_WARN_MS guess, as before.
+            # A flat 5 minutes is wrong for a 1-hour cache: the chip
+            # warned for 55 minutes while the cache was still warm.
             #
             # Hidden when: no transcript, no assistant message in the
             # tail (ts None), or the age is negative — a future-dated
@@ -1096,9 +1224,24 @@ def _render_sections_named(n, order, theme):
             if transcript:
                 ts_ms = get_last_assistant_timestamp_ms(transcript)
                 if ts_ms is not None:
-                    age_ms = int(time.time() * 1000) - ts_ms
+                    now_ms = int(time.time() * 1000)
+                    age_ms = now_ms - ts_ms
                     if age_ms >= 0:
-                        if age_ms >= _CACHE_AGE_WARN_MS:
+                        expires_ms = n.get("prompt_cache_expires_ms")
+                        if expires_ms is not None and not (
+                                ts_ms < expires_ms
+                                <= now_ms + _PROMPT_CACHE_MAX_TTL_MS):
+                            expires_ms = None
+                        if expires_ms is not None:
+                            cold = now_ms >= expires_ms
+                        elif (n.get("prompt_cache_warm") is False
+                                and n.get("prompt_cache_observed") is True):
+                            cold = True
+                        else:
+                            cold = age_ms >= _first(
+                                n.get("prompt_cache_ttl_ms"),
+                                _CACHE_AGE_WARN_MS)
+                        if cold:
                             cagec = _first(tc.get("cache_age_warn"), YELLOW)
                         else:
                             cagec = _first(tc.get("cache_age"), BRIGHT_BLACK)
@@ -1106,6 +1249,48 @@ def _render_sections_named(n, order, theme):
                             colorize("cache_age:", tc["label"])
                             + colorize(fmt_duration(age_ms), cagec)
                         )
+
+        elif section == "cache_hit":
+            # Session-level prompt-cache health from `prompt_cache`
+            # (Claude Code v2.1.251+, #132): `hit:91%`, plus `miss:2`
+            # in a warning color once the session has had cache misses
+            # — the requests that re-processed content the cache
+            # already held, which is the expensive event. Distinct from
+            # `cache`, which describes the LAST request only.
+            #
+            # Hidden when caching_observed is False: that means caching
+            # is off or the provider doesn't report it, and rendering
+            # the accompanying ratio as `hit:0%` would present "not
+            # reported" as "nothing hit". Absent (None) does not hide —
+            # the field is only a veto.
+            #
+            # The percentage is rounded, not floored (0.29 * 100 is
+            # 28.999... in floating point), but never rounds UP to
+            # 100%: a ratio below 1 must not read as perfect. The miss
+            # count is capped for display (_CACHE_MISS_DISPLAY_MAX).
+            if n.get("prompt_cache_observed") is not False:
+                ratio = n.get("prompt_cache_hit_ratio")
+                misses = n.get("prompt_cache_misses")
+                parts = []
+                if ratio is not None:
+                    hit_pct = int(round(ratio * 100))
+                    if hit_pct >= 100 and ratio < 1:
+                        hit_pct = 99
+                    parts.append(
+                        colorize("hit:", tc["label"])
+                        + colorize("{}%".format(hit_pct),
+                                   _first(tc.get("cache_hit"), GREEN))
+                    )
+                if misses:
+                    if misses > _CACHE_MISS_DISPLAY_MAX:
+                        miss_text = "{}+".format(_CACHE_MISS_DISPLAY_MAX)
+                    else:
+                        miss_text = str(misses)
+                    parts.append(colorize(
+                        "miss:" + miss_text,
+                        _first(tc.get("cache_miss"), YELLOW)))
+                if parts:
+                    sections.append(" ".join(parts))
 
         elif section == "sessions":
             count = get_today_session_count()
@@ -1396,7 +1581,8 @@ _RELAXED_MIN_CC_VERSION = (2, 1, 141)
 # Below _FULL_LAYOUT_MIN_COLS: drop least-essential sections progressively.
 _COMPACT_DROP = [
     "git_extras", "version", "cc_version", "clock", "worktree",
-    "sessions", "tools", "activity", "cache_age", "latency", "context_size",
+    "sessions", "tools", "activity", "cache_age", "cache_hit", "latency",
+    "context_size",
     "session_name", "rate_limits", "output_style", "added_dirs", "effort",
     "git_worktree", "speed", "cost_rate", "context_tokens", "git_state",
     "commit_age", "cost_breakdown", "pr", "thinking",
@@ -2273,8 +2459,10 @@ def _is_subagent_payload(data):
 
 
 def _parse_start_time_ms(value):
-    """Task startTime -> epoch ms, or None. Format is NOT documented
-    upstream, so accept the three plausible encodings:
+    """Task startTime -> epoch ms, or None. Upstream documents it as a
+    number of milliseconds since the Unix epoch; that documentation
+    arrived after this parser shipped, so payloads from older Claude
+    Code builds are still read tolerantly in three encodings:
 
     - ISO-8601 string ("2026-07-09T18:00:00.000Z") via the transcript
       timestamp parser.
