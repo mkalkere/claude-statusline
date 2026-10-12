@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-10-12
+
+Robustness release. No new features and no change for well-formed input.
+
+### Fixed
+
+- **A stdin field of the wrong type could blank the whole status line** ([#133](https://github.com/mkalkere/claude-statusline/issues/133)). Several fields were read without a type check and then concatenated or method-called by a renderer, so a number or a list where a name belongs raised from inside the render, and the only thing that caught it was the outer fallback that prints nothing at all. Fuzzing every documented stdin field with every JSON type found nine such paths:
+
+  | field | failed when it was |
+  |---|---|
+  | `version` | not a string, with `cc_version` in the theme |
+  | `vim.mode` | not a string |
+  | `worktree.branch` | not a string |
+  | `git_branch` | not a string |
+  | `workspace.project_dir` | not a string |
+  | `model` | not an object |
+  | `context_window` | not an object |
+  | `context_window.current_usage` | not an object |
+  | `current_usage` (flat form) | not an object |
+
+  All string fields now go through one check: anything that is not a string is treated as absent, so its own section hides (or, for the branch, falls back to asking git) and the rest of the line renders. The object fields get the same `isinstance` guard the other nested blocks already had. The same fuzz run — 1,674 cases across 93 fields — now completes with no exception.
+
+- **Control characters in names are no longer passed through to the terminal.** Session, model, branch, worktree, agent, output-style and vim-mode text, plus the Claude Code version, is embedded in the output as sent. C0 and C1 control characters are now stripped from all of them, so a name cannot carry an escape sequence into your terminal. Subagent row text and link URLs were already handled this way; the main line was not.
+
+- **Diagnostics could appear inside the status line when stderr was closed.** The one-line "ignoring … value" notes are written to stderr. When the command is started with file descriptor 2 closed, Python's `sys.stderr` is `None` and `print` then falls back to stdout — so the note became the first row of the status line. Every diagnostic on the render path now goes through one helper that writes to stderr or nowhere.
+
+### Changed
+
+- README and `llms.txt` describe the upstream width situation as it is now: Claude Code passes the terminal dimensions to the command through `COLUMNS` and `LINES` (the request for it, anthropics/claude-code#22115, was closed as completed), and the per-line truncation case was fixed in Claude Code 2.1.141. Both documents still said the width was hidden and the request open. This closes the tracking issue [#53](https://github.com/mkalkere/claude-statusline/issues/53); the adaptive layout stays, because it is what keeps each line inside the panel on every release.
+
+### Notes
+
+- 836 tests pass (+14; 838 run, with 2 POSIX-only tests skipped on Windows): each crashing field against twelve wrong-typed values with a check that untouched sections on both lines survive, a baseline that proves every field under test is actually rendered, the fall back to git for an unusable branch, the `None`-when-absent contract the renderers rely on, control-character stripping per field, and the diagnostics path with stderr missing, broken, and present. Pure stdlib, zero dependencies, as always.
+- Names that are extremely long are not shortened by this release; a branch or project name of several thousand characters still produces an over-wide line.
+
 ## [0.16.0] - 2026-10-12
 
 Prompt-cache release. Claude Code v2.1.251 started sending a `prompt_cache` object on stdin with the session's real cache lifetime, expiry and hit statistics; this release reads it. Nothing changes on older Claude Code versions.
