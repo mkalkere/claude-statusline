@@ -2232,12 +2232,10 @@ _TERMINAL_TASK_STATUSES = frozenset({
 # URL sanitizer above).
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
-# Trailing date stamp on model IDs ("claude-sonnet-5-20250707").
-# Trailing "-YYYYMMDD", optionally followed by a bracketed variant
-# marker (real ids appear as "claude-sonnet-4-5-20250929[1m]").
-# The marker is captured so it can be re-appended — dropping it
-# would hide which context variant the session is on.
-_MODEL_DATE_RE = re.compile(r"-\d{8}(\[[^\]]*\])?$")
+# Length of the "YYYYMMDD" date stamp carried by model IDs
+# ("claude-sonnet-5-20250707"). An all-numeric id part of exactly this
+# length is a date, never a version component.
+_MODEL_DATE_LEN = 8
 
 _SUBAGENT_NAME_MAX = 24         # name segment cap (with ellipsis)
 _SUBAGENT_COLUMNS_DEFAULT = 80  # when columns is garbage after tasks qualified
@@ -2317,13 +2315,19 @@ def _sanitize_row_text(value):
 
 def _short_model(model_id, cap=_SUBAGENT_NAME_MAX):
     """Compact display for a model id: "claude-sonnet-5-20250707"
-    -> "Sonnet 5", "claude-opus-4-8" -> "Opus 4.8". Trailing numeric
-    id parts are version components, joined with dots. Unknown shapes
-    degrade to the sanitized, dash-split, title-cased raw id.
+    -> "Sonnet 5", "claude-opus-4-8" -> "Opus 4.8". Each run of
+    consecutive numeric id parts is joined with dots, so a version
+    keeps its dots whatever follows it ("claude-opus-4-5-thinking" ->
+    "Opus 4.5 Thinking"). An id that LEADS with its version
+    ("claude-3-5-sonnet-20241022") renders family-first like the rest
+    ("Sonnet 3.5"). Date stamps are dropped wherever they sit, and a
+    closing bracketed variant marker is kept verbatim ("...[1m]" ->
+    "... [1m]"). Ids with no numeric part degrade to the sanitized,
+    dash-split, title-cased raw id.
 
     Control-strip WITHOUT the length cap first: _sanitize_row_text's
-    24-char truncation would eat the trailing "-YYYYMMDD" before the
-    date regex could strip it ("claude-haiku-4-5-20251001" is 25
+    24-char truncation would eat the trailing "-YYYYMMDD" before it
+    could be recognised as a date ("claude-haiku-4-5-20251001" is 25
     chars). The cap is applied to the final short form instead.
 
     `cap` truncates the result with an ellipsis; subagent rows pass the
@@ -2339,24 +2343,51 @@ def _short_model(model_id, cap=_SUBAGENT_NAME_MAX):
     text = _CONTROL_CHARS_RE.sub("", model_id).strip()
     if not text:
         return ""
-    # Strip the trailing date, but KEEP any bracketed variant marker it
-    # carried ("...-20250929[1m]" -> suffix "[1m]"): the marker tells
-    # the user which context variant the session is on, so dropping it
-    # would be silent information loss.
-    date_match = _MODEL_DATE_RE.search(text)
-    variant_suffix = (date_match.group(1) or "") if date_match else ""
-    text = _MODEL_DATE_RE.sub("", text)
+    # Split off the closing bracketed variant marker BEFORE anything
+    # else and re-append it verbatim at the end: it tells the user
+    # which context variant the session is on, so dropping it would be
+    # silent information loss, and leaving it attached glues it to the
+    # last id part, which then stops reading as a number ("5[1m]").
+    # Plain string scans rather than a regex: an unanchored bracket
+    # pattern goes quadratic on a long run of unclosed "[". An empty
+    # "[]" carries nothing and is dropped.
+    variant_suffix = ""
+    if text.endswith("]"):
+        open_at = text.rfind("[")
+        if open_at != -1 and "]" not in text[open_at:-1]:
+            if len(text) - open_at > 2:
+                variant_suffix = text[open_at:]
+            text = text[:open_at].rstrip()
     if text.startswith("claude-"):
         text = text[len("claude-"):]
-    parts = [p for p in text.split("-") if p]
-    version = []
-    while parts and parts[-1].isdigit():
-        version.insert(0, parts.pop())
-    family = " ".join(parts).title()
-    if family and version:
-        short = "{} {}".format(family, ".".join(version))
-    else:
-        short = family or ".".join(version)
+    # ASCII digits only: str.isdigit() alone also accepts characters
+    # such as superscripts, which are not version numbers.
+    words = []
+    numeric_run = []
+    version_first = False
+    for part in text.split("-"):
+        if not part:
+            continue
+        numeric = part.isascii() and part.isdigit()
+        is_date = numeric and len(part) == _MODEL_DATE_LEN
+        if numeric and not is_date:
+            numeric_run.append(part)
+            continue
+        # A date ends the run it interrupts like any other part does:
+        # the numbers either side of it are not one version.
+        if numeric_run:
+            version_first = version_first or not words
+            words.append(".".join(numeric_run))
+            numeric_run = []
+        if not is_date:
+            words.append(part.title())
+    if numeric_run:
+        words.append(".".join(numeric_run))
+    # Version-first id: put the family (the part after the version) in
+    # front, so every id reads family, version, variant.
+    if version_first and len(words) > 1:
+        words[0], words[1] = words[1], words[0]
+    short = " ".join(words)
     if short and variant_suffix:
         short += " " + variant_suffix
     if cap is not None and len(short) > cap:

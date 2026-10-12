@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2] - 2026-10-11
+
+### Fixed
+
+- **Model versions lost their dots when the id carried anything after the version** ([#123](https://github.com/mkalkere/claude-statusline/issues/123)). The shortener only collected a *trailing* run of numeric id parts, so any suffix after the version stopped it and the version parts fell through as separate words. The case that makes this visible today is an undated id with a bracketed variant marker: `claude-opus-5-5[1m]` rendered as `Opus 5 5[1M]` — no dot, and the marker title-cased along with the rest. It now renders `Opus 5.5 [1m]`, the same shape the dated form (`claude-sonnet-4-5-20250929[1m]` → `Sonnet 4.5 [1m]`) has had since v0.15.0.
+
+  Every run of consecutive numeric id parts is now dot-joined, wherever it sits in the id:
+
+  | id | before | now |
+  |---|---|---|
+  | `claude-opus-5-5[1m]` | `Opus 5 5[1M]` | `Opus 5.5 [1m]` |
+  | `claude-opus-4-5-1m` | `Opus 4 5 1M` | `Opus 4.5 1M` |
+  | `claude-opus-4-5-thinking` | `Opus 4 5 Thinking` | `Opus 4.5 Thinking` |
+  | `claude-3-5-sonnet-20241022` | `3 5 Sonnet` | `Sonnet 3.5` |
+  | `claude-3-opus-20240229` | `3 Opus` | `Opus 3` |
+  | `claude-opus-4-5-20251101-thinking` | `Opus 4 5 20251101 Thinking` | `Opus 4.5 Thinking` |
+
+  Rows four and five are ids that lead with their version. They now read family-first like every other id, which settles the open question in the issue: an id whose first part is numeric has its version first, so the two orderings never have to be guessed apart.
+
+  The last row is a date stamp that is not at the end of the id. An all-numeric part of exactly eight digits is treated as a date and dropped wherever it sits; previously only a trailing one was stripped. Without that rule the date would have been dot-joined into the version and read as a real three-part version number, which is worse than the untidy output it replaces. One consequence: an id that is nothing but a date (`claude-20250101`) used to render as `Claude` and now shortens to nothing, so the main line shows the raw value instead.
+
+  A closing bracketed marker is split off before anything else and re-appended exactly as sent, with or without a date stamp in front of it. That applies to ids with no numeric part too (`claude-opus[1m]`: `Opus[1M]` → `Opus [1m]`), and an empty `[]` is dropped. Only ASCII digits count as numeric parts.
+
+  Affects subagent rows, and the main line when Claude Code sends a raw id as `model.display_name`. Friendly display names are still never passed through the shortener, and an id with no numeric part and no marker renders exactly as before.
+
+### Notes
+
+- 776 tests pass (+17). Thirteen of the new tests fail against the v0.15.1 shortener; the other four pin behaviour this release leaves alone (the exact `claude-` prefix match, tolerance of doubled or trailing dashes, seven- and nine-digit parts not being dates) or guard the cost of the marker split on malformed input. The existing subagent-cap test now asserts exact values at and over the cap instead of a length bound. Pure stdlib, zero dependencies, as always.
+- Provider-style ids are not specially handled: a namespace prefix in front of `claude-` is still shown, and an `@` or `:` separator still keeps the parts either side of it from being read as numbers.
+
 ## [0.15.1] - 2026-08-23
 
 ### Fixed
