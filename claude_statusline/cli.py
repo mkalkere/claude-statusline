@@ -39,6 +39,7 @@ from .sessions import (
     record_and_get_daily_spend,
     get_session_activity_count,
     get_session_tool_count, get_spill_override, get_today_session_count,
+    read_spill_setting_raw,
 )
 from .themes import THEMES, get_theme
 
@@ -1720,19 +1721,25 @@ _FIT_DROP_PRIORITY = _COMPACT_DROP + [
 
 # ─── Overflow spill (#121) ───────────────────────────────────────────
 #
-# Minimum terminal width at which sections may be moved between rows.
-# Below it, a row's own width shifts by a few columns as token counts
-# and countdowns change, and packing rows to the edge makes
-# low-priority sections come and go far more often for one or two
-# recovered sections. Measured before this shipped: at 112-130 columns
-# the frames in which some section changed went from about 3 in 600 to
-# about 30; from 165 up the count was the same as without spill.
+# Minimum terminal width at which a section may be shown on another
+# row. Below it a row's own width shifts by a few columns as token
+# counts and countdowns change, and packing rows to the edge makes
+# low-priority sections come and go for one or two sections gained.
 _SPILL_MIN_COLS = 160
 
-# Sections that only read correctly beside the branch: "stash:1
-# sync:+2" and a bare "merge" mean nothing a line away from it. They
-# may return to their OWN row when it has room, never to another.
-_SPILL_HOME_ONLY = frozenset({"git_extras", "git_state"})
+# Sections that are never shown on another row, because away from
+# their neighbours they stop meaning anything: the branch's companions
+# ("stash:1 sync:+2", a bare "merge", "wt:fix/bug", "gwt", "last:5m"),
+# and the two that carry no label of their own ("+247 -38", "12m05s").
+_SPILL_HOME_ONLY = frozenset({
+    "git_extras", "git_state", "worktree", "git_worktree", "commit_age",
+    "lines", "duration",
+})
+
+# A row's own section that must stay at the very end of it, after any
+# sections that moved up: the context warning is an alert, and an
+# alert buried mid-row is easy to miss.
+_SPILL_KEEP_LAST = "ctx_warning"
 
 
 # Plausibility bounds for a detected terminal width. Anything outside
@@ -2227,6 +2234,26 @@ def _parse_cc_version(raw):
     return tuple(out)
 
 
+def _relaxed_layout_gate(data, width_confidence_high):
+    """True when BOTH relaxed-layout gates pass: Claude Code version
+    >= 2.1.141 AND width detection found a high-confidence signal.
+
+    The single source of that decision — _layout_thresholds picks its
+    numbers from it and the overflow spill is gated on it — so the two
+    cannot drift apart, and neither has to infer it from the other's
+    output.
+    """
+    # Explicit isinstance(dict) guard — `(data or {})` only protects
+    # against falsy values (None / False / 0 / "" / []). A truthy non-
+    # dict (a non-empty list or string) would pass through and crash
+    # on .get(). Same defensive pattern as _normalize uses throughout.
+    cc_version = _parse_cc_version(
+        data.get("version") if isinstance(data, dict) else None)
+    return bool(cc_version is not None
+                and cc_version >= _RELAXED_MIN_CC_VERSION
+                and width_confidence_high)
+
+
 def _layout_thresholds(data, width_confidence_high):
     """Return (full_min, compact_min) — the layout thresholds to use
     for this render.
@@ -2241,15 +2268,7 @@ def _layout_thresholds(data, width_confidence_high):
     chain — True iff a real probe succeeded (not the safe-default
     fallback path).
     """
-    # Explicit isinstance(dict) guard — `(data or {})` only protects
-    # against falsy values (None / False / 0 / "" / []). A truthy non-
-    # dict (a non-empty list or string) would pass through and crash
-    # on .get(). Same defensive pattern as _normalize uses throughout.
-    cc_version = _parse_cc_version(
-        data.get("version") if isinstance(data, dict) else None)
-    if (cc_version is not None
-            and cc_version >= _RELAXED_MIN_CC_VERSION
-            and width_confidence_high):
+    if _relaxed_layout_gate(data, width_confidence_high):
         return _FULL_LAYOUT_MIN_COLS_RELAXED, _COMPACT_LAYOUT_MIN_COLS_RELAXED
     return _FULL_LAYOUT_MIN_COLS, _COMPACT_LAYOUT_MIN_COLS
 
@@ -2397,7 +2416,7 @@ def _spill_enabled(theme, term_width, relaxed_layout):
 
 
 def _spill_dropped(rows, sep_visible_width, target_width, drop_priority):
-    """Re-place sections that the per-row fit dropped (stage 3).
+    """Show sections the per-row fit dropped on a row above (stage 3).
 
     Args:
         rows: One (named, kept) pair per row — `named` is everything
@@ -2409,29 +2428,39 @@ def _spill_dropped(rows, sep_visible_width, target_width, drop_priority):
     Returns:
         One list of (name, rendered) tuples per row.
 
-    Rules (the reasons are in #121):
+    Rules (the reasons, and the measurements behind them, are in #121):
 
     - Candidates are tried most-important-first, i.e. in REVERSE drop
       order. One that fits nowhere is skipped and the next is tried.
-    - A candidate first goes back to its OWN row, at its original
-      position, if it fits. The per-row fit stops at the first drop
-      that makes the row fit, so it can leave room behind.
-    - Otherwise it goes to the NEAREST ROW ABOVE that has room,
-      appended after that row's own sections. Never downward, and
-      never for a section in _SPILL_HOME_ONLY.
+    - A candidate goes to the NEAREST ROW ABOVE its own that has room,
+      and is appended after that row's own sections (which keep their
+      order and position). Several guests on one row are ordered by
+      the row they came from, then by their position on it.
+    - Never downward. Never back onto its own row either: the row the
+      fit produced is left exactly as it is, so stage 3 only ever ADDS
+      sections to rows above. (Re-inserting at home was measured and
+      rejected — it made sections swap rows whenever the home row's
+      width moved by a column or two.)
+    - Never a section in _SPILL_HOME_ONLY.
     - A row left empty by the fit stays empty: this never creates a
       row the layout did not already have.
+    - A row's own _SPILL_KEEP_LAST section stays last, after guests.
     - No row ever exceeds `target_width`, and a section still appears
-      at most once (it is only ever placed if it had been dropped).
+      at most once (only a dropped section is ever placed).
 
     Pure function of its arguments — no state is kept between
     renders, so the same payload at the same width always lays out
     the same way.
     """
     # Each row is a list of entries [sort_key, name, rendered, width].
-    # Native sections sort by their original index; guests sort after
-    # every native, by (home row, original index).
-    native, guest = 0, 1
+    # Sort keys order a row as: its own sections by original index,
+    # then guests by (home row, original index), then its own
+    # keep-last section.
+    native, guest, last = 0, 1, 2
+    rank = {}
+    for index, name in enumerate(drop_priority):
+        # First occurrence wins, matching how _fit_to_width walks it.
+        rank.setdefault(name, index)
     layout = []
     widths = []
     candidates = []
@@ -2441,43 +2470,72 @@ def _spill_dropped(rows, sep_visible_width, target_width, drop_priority):
         for position, (name, rendered) in enumerate(named):
             width = _visible_width(rendered)
             if name in kept_names:
-                entries.append([(native, position), name, rendered, width])
-            elif name in drop_priority:
-                candidates.append((-drop_priority.index(name), row_index,
-                                   position, name, rendered, width))
+                group = last if name == _SPILL_KEEP_LAST else native
+                entries.append([(group, position), name, rendered, width])
+            elif name in rank and name not in _SPILL_HOME_ONLY:
+                candidates.append((-rank[name], row_index, position,
+                                   name, rendered, width))
         layout.append(entries)
         widths.append(sum(e[3] for e in entries)
                       + sep_visible_width * max(0, len(entries) - 1))
 
-    def fits(row_index, width):
-        # A row must already have something on it to take more.
-        return (bool(layout[row_index])
-                and widths[row_index] + sep_visible_width + width
-                <= target_width)
-
-    def place(row_index, entry):
-        layout[row_index].append(entry)
-        layout[row_index].sort(key=lambda e: e[0])
-        widths[row_index] += sep_visible_width + entry[3]
-
     for _, home, position, name, rendered, width in sorted(candidates):
-        if fits(home, width):
-            place(home, [(native, position), name, rendered, width])
-            continue
-        if name in _SPILL_HOME_ONLY:
-            continue
         for host in range(home - 1, -1, -1):
-            if fits(host, width):
-                place(host, [(guest, home, position), name, rendered, width])
+            # A row must already have something on it to take more.
+            if (layout[host] and widths[host] + sep_visible_width + width
+                    <= target_width):
+                layout[host].append(
+                    [(guest, home, position), name, rendered, width])
+                widths[host] += sep_visible_width + width
                 break
 
+    for entries in layout:
+        entries.sort(key=lambda e: e[0])
     return [[(e[1], e[2]) for e in entries] for entries in layout]
+
+
+def _spill_doctor_lines(detected_cols, width_gate_passes):
+    """Lines for --doctor describing whether overflow spill can run.
+
+    --doctor has no stdin, so the Claude Code version and the theme in
+    use are unknown here; this reports the parts that ARE knowable
+    (width, width confidence, the config value as written) and names
+    the rest, so "why did nothing move up?" has an answer without
+    reading source. A config value that is present but ignored is
+    called out — it is the one way to believe spill is off when it is
+    not.
+    """
+    present, raw = read_spill_setting_raw()
+    if not present:
+        setting = "not set (the theme decides)"
+    elif raw is True:
+        setting = "true (on, including for themes that leave it off)"
+    elif raw is False:
+        setting = "false (off for every theme)"
+    else:
+        setting = "{} — IGNORED, must be true or false without quotes".format(
+            json.dumps(raw)[:40])
+    lines = [
+        "  Overflow spill (sections that don't fit move up a line):",
+        "    spill_overflow in config: {}".format(setting),
+        "    width: {} cols — {} the {}-col minimum".format(
+            detected_cols,
+            "meets" if detected_cols >= _SPILL_MIN_COLS else "below",
+            _SPILL_MIN_COLS),
+        "    width was detected (not guessed): {}".format(width_gate_passes),
+        "    also needs, per render: Claude Code >= 2.1.141, and a theme "
+        "with spill on",
+        "    (on: default, powerline, nord, tokyo-night, gruvbox, rose-pine;"
+        " off: minimal, focus, custom unless it sets \"spill\": true)",
+    ]
+    return lines
 
 
 def render(data, theme_name="default"):
     """Render the statusline as one or two lines.
 
-    Two-stage layout adaptation:
+    Staged layout adaptation (a third stage, _spill_dropped, runs
+    after these two on wide terminals — see _spill_enabled):
 
     1. Coarse pre-filter (_apply_responsive) — picks a section list
        based on terminal width buckets:
@@ -2587,9 +2645,14 @@ def render(data, theme_name="default"):
         # line1 and would otherwise render burn/rate_limits/
         # context_size twice. Also protects hand-written themes that
         # list a section on two lines by mistake.
-        sections = [s for s in sections if s not in seen_sections]
-        seen_sections.update(sections)
-        raw_lines.append(sections)
+        # Checked one at a time, not row-against-rows: a name listed
+        # twice in the SAME row must be caught too.
+        unique = []
+        for section in sections:
+            if section not in seen_sections:
+                seen_sections.add(section)
+                unique.append(section)
+        raw_lines.append(unique)
         i += 1
 
     # Render + width-fit each row independently.
@@ -2614,9 +2677,9 @@ def render(data, theme_name="default"):
         fitted.append((named, _fit_to_width(
             named, sep_width, fit_width, _FIT_DROP_PRIORITY)))
 
-    # Stage 3: where it is enabled, sections the fit dropped may go
-    # back onto their own row or up onto a row with room (#121).
-    relaxed_layout = (full_min == _FULL_LAYOUT_MIN_COLS_RELAXED)
+    # Stage 3: where it is enabled, sections the fit dropped may be
+    # shown on a row above that has room (#121).
+    relaxed_layout = _relaxed_layout_gate(data, width_confidence_high)
     if _spill_enabled(theme, term_width, relaxed_layout):
         final_rows = _spill_dropped(
             fitted, sep_width, fit_width, _FIT_DROP_PRIORITY)
@@ -3921,6 +3984,8 @@ def cmd_doctor():
     print("  In --doctor (no stdin): width_gate={} (version_gate is render-time only)".format(
         width_gate_passes))
     print("  Note:    precise width-aware fit further trims sections to fit")
+    for line in _spill_doctor_lines(detected_cols, width_gate_passes):
+        print(line)
     print("  Unicode: \u2588\u2591\u2593 \u2387 \ue0b0")
     # Per-step width-detection report. Shows which signal won and
     # which signals were rejected (including the 2.1.139 tput stub).

@@ -136,6 +136,6 @@ Exit code 0 = installed, 1 = not installed, 2 = settings.json corrupt/unreadable
 ## Where to find more
 
 - [README.md](README.md) — full feature list, screenshots, FAQ
-- [ARCHITECTURE.md](ARCHITECTURE.md) — render pipeline, two-stage responsive layout, caching
+- [ARCHITECTURE.md](ARCHITECTURE.md) — render pipeline, staged responsive layout (bucket pre-filter, per-line fit, overflow spill), caching
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [llms.txt](llms.txt) — concise summary for LLM crawlers (machine-friendly index)

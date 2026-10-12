@@ -78,14 +78,14 @@ model.id, model.display_name, cwd, workspace.current_dir, workspace.project_dir,
 
 ## Architecture
 
-cli.py (entry point, normalization, two-stage layout, rendering) → bar.py (progress bar) + colors.py (ANSI + NO_COLOR) + formatters.py (tokens, cost, duration, speed) + git.py (branch, stash, sync, state, commit age with 5s cache) + sessions.py (session count, tool count, budget, effort with 10-30s cache) + themes.py (8 built-in + custom)
+cli.py (entry point, normalization, staged layout, rendering) → bar.py (progress bar) + colors.py (ANSI + NO_COLOR) + formatters.py (tokens, cost, duration, speed) + git.py (branch, stash, sync, state, commit age with 5s cache) + sessions.py (session count, tool count, budget, effort with 10-30s cache) + themes.py (8 built-in + custom)
 
 ## Key Design Decisions
 
 - Zero external dependencies (pure Python stdlib only — no pip packages)
 - Never crash — degrade gracefully on any malformed input (try/except defense-in-depth around `render()`)
 - File-based caching with TTLs (5s-60s) to avoid subprocess overhead on every render
-- **Two-stage responsive layout** (v0.5.4+): coarse pre-filter by terminal-width bucket (150+/100-149/<100 cols) skips expensive sections on narrow terminals; precise post-render fit then measures actual visible width (stripping ANSI/OSC 8) and drops sections in priority order until each line fits the terminal width minus a confidence-scaled safety margin (v0.15.0+: zero when the width is pinned via `CLAUDE_STATUSLINE_WIDTH`, small when a probe measured it, larger when it had to be guessed — Claude Code renders the status line inside a padded panel, so the usable row is narrower than the reported terminal width)
+- **Staged responsive layout** (v0.5.4+): coarse pre-filter by terminal-width bucket (150+/100-149/<100 cols) skips expensive sections on narrow terminals; precise post-render fit then measures actual visible width (stripping ANSI/OSC 8) and drops sections in priority order until each line fits the terminal width minus a confidence-scaled safety margin (v0.15.0+: zero when the width is pinned via `CLAUDE_STATUSLINE_WIDTH`, small when a probe measured it, larger when it had to be guessed — Claude Code renders the status line inside a padded panel, so the usable row is narrower than the reported terminal width) A third stage (v0.17.0+) shows sections that did not fit on Line 2 at the end of Line 1 when it has room: only at 160+ columns, on Claude Code 2.1.141+ with a detected width, for the six full themes (off for minimal, focus and custom themes unless the theme file sets `"spill": true`); `"spill_overflow": false` in claude-status-budget.json turns it off.
 - All numeric fields use `_first()` helper (not `or`) to preserve zero values
 - OSC 8 clickable links disabled by default (Claude Code's Ink TUI miscounts them)
 

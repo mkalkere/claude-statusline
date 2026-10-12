@@ -735,6 +735,15 @@ def _read_status_config():
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        # Read first, before the float() conversions below: one of
+        # those raising on a malformed neighbour (a budget of "abc")
+        # must not silently discard an explicit opt-out.
+        # Tri-state: a literal true/false overrides the theme's own
+        # setting; anything else (absent, null, "yes", 1) leaves the
+        # theme in charge.
+        spill = data.get("spill_overflow")
+        if isinstance(spill, bool):
+            result["spill"] = spill
         budget = data.get("daily_budget_usd")
         if budget is not None:
             result["budget"] = float(budget)
@@ -755,12 +764,6 @@ def _read_status_config():
         if isinstance(disabled, list):
             result["disabled"] = [s for s in disabled if isinstance(s, str)]
         result["clickable_links"] = bool(data.get("clickable_links", False))
-        # Tri-state: a literal true/false overrides the theme's own
-        # setting; anything else (absent, null, "yes", 1) leaves the
-        # theme in charge.
-        spill = data.get("spill_overflow")
-        if isinstance(spill, bool):
-            result["spill"] = spill
     except (OSError, IOError, json.JSONDecodeError,
             ValueError, TypeError, AttributeError):
         # AttributeError covers non-dict JSON (null, list, scalar) —
@@ -1152,6 +1155,28 @@ def get_spill_override():
     config = _read_status_config()
     value = config.get("spill")
     return value if isinstance(value, bool) else None
+
+
+def read_spill_setting_raw():
+    """The `spill_overflow` value exactly as written, for --doctor.
+
+    Bypasses the shared config cache and the bool check on purpose:
+    the point is to show the user what is in the file, including a
+    value that get_spill_override() ignores (a quoted "false", a 0).
+
+    Returns:
+        (present, value). `present` is False when the file or the key
+        is missing or the file is not a JSON object.
+    """
+    path = os.path.join(_CLAUDE_DIR, "claude-status-budget.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False, None
+    if not isinstance(data, dict) or "spill_overflow" not in data:
+        return False, None
+    return True, data["spill_overflow"]
 
 
 def get_clickable_links_enabled():

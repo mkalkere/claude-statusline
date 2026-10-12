@@ -74,7 +74,7 @@ Cache files are:
 
 ### Responsive Layout
 
-Two-stage adaptation prevents Line 2 truncation under Claude Code's `wrap:"truncate"` Ink behavior (anthropics/claude-code#28750) while still showing as much detail as the terminal can hold.
+Staged adaptation (two stages always, a third on wide terminals) prevents Line 2 truncation under Claude Code's `wrap:"truncate"` Ink behavior (anthropics/claude-code#28750) while still showing as much detail as the terminal can hold.
 
 **Stage 1 — coarse pre-filter** (`_apply_responsive`) picks an eligible section list by terminal-width bucket. Sections in `_COMPACT_DROP` are skipped before rendering on terminals where they won't fit, avoiding the cost of git subprocess calls and file scans on narrow terminals:
 
@@ -86,9 +86,9 @@ Two-stage adaptation prevents Line 2 truncation under Claude Code's `wrap:"trunc
 
 Truly essential sections (bar, tokens, cost, branch, ctx_warning) are deliberately omitted from `_FIT_DROP_PRIORITY` and never dropped — losing those would defeat the statusline's purpose.
 
-**Stage 3 — overflow spill** (`_spill_dropped`, gated by `_spill_enabled`) re-places sections stage 2 dropped. Stages 1 and 2 treat each row on its own, which left Line 1 with unused columns while Line 2 shed sections. Candidates are tried in reverse drop order (most important first); each goes back to its own row at its original position if it fits, otherwise to the nearest row above with room, appended after that row's native sections. It never moves a section down, never fills a row stage 2 left empty, never exceeds the fitted width, and keeps `git_extras` / `git_state` on the branch's row (`_SPILL_HOME_ONLY`). It is a pure function of the payload and the width — no state is kept between renders.
+**Stage 3 — overflow spill** (`_spill_dropped`, gated by `_spill_enabled`) shows sections stage 2 dropped on a row above that has room. Stages 1 and 2 treat each row on its own, which left Line 1 with unused columns while Line 2 shed sections. Candidates are tried in reverse drop order (most important first); each goes to the nearest row above with room and is appended after that row's native sections. The row a section came from is left exactly as stage 2 produced it — stage 3 only ever adds to rows above. It never moves a section down, never fills a row stage 2 left empty, never exceeds the fitted width, never moves a section in `_SPILL_HOME_ONLY` (the branch's companions and the two unlabelled sections), and keeps the context warning last on its row. It is a pure function of the payload and the width — no state is kept between renders.
 
-Stage 3 runs only when all three hold: the relaxed-layout gate passes (Claude Code 2.1.141+ and a width a real probe reported), the terminal is at least `_SPILL_MIN_COLS` (160) wide, and spill is on — the theme's `spill` flag (true on the six full themes, unset on `minimal` / `focus`, and reset to false for custom themes unless the theme file sets it), or the `spill_overflow` override in `claude-status-budget.json`.
+Stage 3 runs only when all three hold: the relaxed-layout gate passes (`_relaxed_layout_gate`: Claude Code 2.1.141+ and a width a real probe reported), the terminal is at least `_SPILL_MIN_COLS` (160) wide, and spill is on — the theme's `spill` flag (true on the six full themes, unset on `minimal` / `focus`, and reset to false for custom themes unless the theme file sets it), or the `spill_overflow` override in `claude-status-budget.json`. `--doctor` reports the override as written and the width conditions.
 
 ## Themes
 
